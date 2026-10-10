@@ -1,0 +1,19 @@
+{
+  "name": "yourharness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pool the processors of every device on your home network into one browser-based workbench.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0",
+    "ws": "^8.18.0"
+  }
+}

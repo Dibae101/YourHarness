@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#EDF0F3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#11161D" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>YourHarness</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&display=swap">
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+
+<div id="join" class="join" hidden>
+  <form id="join-form" class="join-card" novalidate>
+    <svg class="join-wires" viewBox="0 0 320 48" aria-hidden="true">
+      <path d="M0 10 C90 10 110 24 160 24 S230 10 320 10" stroke="#E0A100"/>
+      <path d="M0 24 H320" stroke="#2563C9"/>
+      <path d="M0 38 C90 38 110 24 160 24 S230 38 320 38" stroke="#D1433B"/>
+    </svg>
+    <h1 class="wordmark">YourHarness</h1>
+    <p class="lede">Open this page on every device at home. Each one adds its processor to a shared pool that runs jobs together.</p>
+    <label class="field"><span>Name this device</span><input id="join-name" name="name" autocomplete="off" maxlength="40" required></label>
+    <label class="field"><span>PIN</span><input id="join-pin" name="pin" inputmode="numeric" autocomplete="off" maxlength="12" required></label>
+    <p class="hint">The PIN is shown in the terminal where the server is running.</p>
+    <p id="join-error" class="error" role="alert"></p>
+    <button class="btn primary wide" type="submit">Join the pool</button>
+  </form>
+</div>
+
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <span class="wordmark small">YourHarness</span>
+    <span id="conn" class="conn" data-state="connecting">Connecting</span>
+  </header>
+
+  <main class="layout">
+    <div class="col">
+      <section id="pool" class="pool" aria-labelledby="pool-h">
+        <h2 id="pool-h">Devices</h2>
+        <p id="pool-summary" class="summary"></p>
+        <ul id="wires" class="wires"></ul>
+      </section>
+
+      <section id="me" class="panel me" aria-labelledby="me-h">
+        <h2 id="me-h">This device</h2>
+        <label class="switch">
+          <input id="me-share" type="checkbox">
+          <span class="switch-track" aria-hidden="true"></span>
+          <span>Share this device's processor</span>
+        </label>
+        <label class="field">
+          <span>Threads to use: <output id="me-threads-out" for="me-threads"></output></span>
+          <input id="me-threads" type="range" min="1" step="1">
+        </label>
+        <label class="field"><span>Device name</span><input id="me-name" maxlength="40" autocomplete="off"></label>
+        <p id="me-awake" class="hint"></p>
+        <button id="me-leave" class="btn ghost" type="button">Leave the pool on this device</button>
+      </section>
+
+      <section id="files" class="panel files" aria-labelledby="files-h">
+        <div class="panel-head">
+          <h2 id="files-h">Shared files</h2>
+          <label class="btn ghost file-btn">Add files<input id="file-input" type="file" multiple></label>
+        </div>
+        <p id="upload-status" class="hint" aria-live="polite"></p>
+        <ul id="file-list" class="file-list"></ul>
+      </section>
+    </div>
+
+    <div class="col">
+      <section id="run" class="panel run" aria-labelledby="run-h">
+        <h2 id="run-h">Run a job</h2>
+        <div class="kinds" role="radiogroup" aria-label="Job type">
+          <label><input type="radio" name="kind" value="mandelbrot" checked><span>Render a fractal</span></label>
+          <label><input type="radio" name="kind" value="primes"><span>Count primes</span></label>
+          <label><input type="radio" name="kind" value="pi"><span>Estimate π</span></label>
+          <label><input type="radio" name="kind" value="grep"><span>Search a file</span></label>
+          <label><input type="radio" name="kind" value="custom"><span>Your own code</span></label>
+        </div>
+
+        <form id="run-form" novalidate>
+          <fieldset data-kind="mandelbrot">
+            <legend>Draws a Mandelbrot image in thin strips. Every strip is colored on its left edge by the device that computed it.</legend>
+            <div class="row">
+              <label class="field"><span>Where</span>
+                <select id="f-loc">
+                  <option value="elephant" selected>Elephant valley</option>
+                  <option value="spiral">Spiral</option>
+                  <option value="seahorse">Seahorse valley</option>
+                  <option value="whole">Whole set</option>
+                </select>
+              </label>
+              <label class="field"><span>Size</span>
+                <select id="f-size">
+                  <option value="960x600">960 × 600</option>
+                  <option value="1600x1000" selected>1600 × 1000</option>
+                  <option value="2400x1500">2400 × 1500</option>
+                </select>
+              </label>
+              <label class="field"><span>Detail</span>
+                <select id="f-iter">
+                  <option value="3000">Normal</option>
+                  <option value="12000" selected>High</option>
+                  <option value="40000">Extreme</option>
+                </select>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset data-kind="primes" hidden>
+            <legend>Splits a range of numbers into pieces and sieves each piece for primes. A straight test of raw processor speed.</legend>
+            <div class="row">
+              <label class="field"><span>Count primes below</span>
+                <select id="p-limit">
+                  <option value="1000000000">1 billion</option>
+                  <option value="5000000000" selected>5 billion</option>
+                  <option value="20000000000">20 billion</option>
+                </select>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset data-kind="pi" hidden>
+            <legend>Drops random points on a square and counts how many land inside the circle. More points, closer to π.</legend>
+            <div class="row">
+              <label class="field"><span>Random points</span>
+                <select id="pi-samples">
+                  <option value="2000000000" selected>2 billion</option>
+                  <option value="8000000000">8 billion</option>
+                  <option value="20000000000">20 billion</option>
+                </select>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset data-kind="grep" hidden>
+            <legend>Each device reads a different part of a shared file and counts the matches in its part.</legend>
+            <div class="row">
+              <label class="field"><span>File</span><select id="g-file"></select></label>
+              <label class="field"><span>Text to find</span><input id="g-term" maxlength="200" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+            </div>
+            <label class="check"><input id="g-case" type="checkbox"> Ignore upper and lower case</label>
+            <p id="g-empty" class="hint">Add a file under Shared files first.</p>
+          </fieldset>
+
+          <fieldset data-kind="custom" hidden>
+            <legend>Write a <code>run(chunk, total)</code> function. Each device calls it for the pieces it receives, in background threads.</legend>
+            <label class="field"><span>Code</span><textarea id="c-code" rows="10" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea></label>
+            <div class="row">
+              <label class="field"><span>Pieces</span><input id="c-chunks" type="number" min="1" max="20000" value="200"></label>
+              <label class="field"><span>Combine results</span>
+                <select id="c-combine">
+                  <option value="sum">Add them up</option>
+                  <option value="max">Keep the largest</option>
+                  <option value="min">Keep the smallest</option>
+                  <option value="list">Keep as a list</option>
+                </select>
+              </label>
+            </div>
+            <p class="hint">This code runs on every device that is sharing. Only run code you trust.</p>
+          </fieldset>
+
+          <p id="run-error" class="error" role="alert"></p>
+          <button id="run-btn" class="btn primary" type="submit">Run on the pool</button>
+        </form>
+      </section>
+
+      <section id="current" class="panel current" aria-labelledby="current-h">
+        <div class="panel-head">
+          <h2 id="current-h">Current run</h2>
+          <div class="head-actions">
+            <button id="follow-btn" class="btn ghost" type="button" hidden>Show the latest run</button>
+            <button id="cancel-btn" class="btn ghost danger" type="button" hidden>Cancel run</button>
+          </div>
+        </div>
+        <p id="cur-empty" class="empty">Nothing has run yet. Choose a job above and run it. Every device that is sharing will take pieces of it.</p>
+        <div id="cur-body" hidden>
+          <p id="cur-title" class="cur-title"></p>
+          <p id="cur-status" class="cur-status" aria-live="polite"></p>
+          <canvas id="chunk-map" class="chunk-map" role="img" aria-label="Every piece of the job, colored by the device that computed it"></canvas>
+          <canvas id="fractal" class="fractal" role="img" aria-label="Fractal image computed by the pool" hidden></canvas>
+          <div id="cur-result" class="cur-result"></div>
+          <p id="cur-parallel" class="hint"></p>
+          <table id="cur-breakdown" class="breakdown">
+            <thead><tr><th scope="col">Device</th><th scope="col">Pieces</th><th scope="col">Share</th><th scope="col">Compute time</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="history-panel" class="panel history" aria-labelledby="history-h">
+        <h2 id="history-h">All runs</h2>
+        <ol id="history" class="history-list"></ol>
+      </section>
+    </div>
+  </main>
+</div>
+
+</body>
+</html>
