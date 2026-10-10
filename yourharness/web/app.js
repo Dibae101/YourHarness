@@ -169,7 +169,7 @@ def run(chunk, total):
 
   // Tell the coordinator this page is alive. A page the browser has frozen stops
   // sending these, and its pieces move to other devices within seconds.
-  setInterval(() => send({ type: 'beat' }), BEAT_MS);
+  setInterval(() => send({ type: 'ping', t: performance.now() }), BEAT_MS);
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && S.joined && !S.replaced && !S.ws) {
@@ -181,7 +181,8 @@ def run(chunk, total):
 
   function handle(m) {
     switch (m.type) {
-      case 'welcome':
+      case 'welcome': {
+        const termWasOpen = T.open && !!S.id; // a reconnect: reopen the terminal that was open
         S.retry = 0;
         S.id = m.id;
         S.color = m.color;
@@ -198,9 +199,11 @@ def run(chunk, total):
         setConn('online');
         if ((S.follow || !S.view) && m.snapshot) setView(m.snapshot);
         renderAll();
-        if (T.open) openTerminal(T.hostId);
-        else if (currentView() === 'terminal') autoOpenTerminal();
+        if (termWasOpen) openTerminal(T.hostId);
+        else if (WM.isOpen('terminal')) autoOpenTerminal();
+        send({ type: 'ping', t: performance.now() });
         break;
+      }
       case 'denied':
         S.deniedReason = m.reason || '';
         break;
@@ -208,7 +211,14 @@ def run(chunk, total):
         S.devices = m.devices;
         renderDevices();
         renderWorkspace();
-        if (currentView() === 'terminal') autoOpenTerminal();
+        fmRenderLocations();
+        if (WM.isOpen('terminal')) autoOpenTerminal();
+        break;
+      case 'pong':
+        if (typeof m.t === 'number') { S.rtt = Math.round(performance.now() - m.t); renderTopbar(); }
+        break;
+      case 'fs.changed':
+        if (FM.loc && FM.loc.type === 'fs' && FM.loc.device === m.device && FM.path === (m.path || '')) fmLoad();
         break;
       case 'job':
         upsertJob(m.job);
@@ -235,10 +245,12 @@ def run(chunk, total):
       case 'files':
         S.files = m.files;
         renderFiles();
+        if (FM.loc && FM.loc.type === 'shared') fmRender();
         break;
       case 'pool':
         S.pool = m.pool;
-        renderPool();
+        fmRenderLocations();
+        if (FM.loc && FM.loc.type === 'pool') fmRender();
         break;
       case 'error':
         $('#run-error').textContent = m.message;
@@ -255,9 +267,9 @@ def run(chunk, total):
   }
 
   function setConn(state) {
-    const el = $('#conn');
-    el.dataset.state = state;
-    el.textContent = { online: 'Connected', offline: 'Reconnecting', connecting: 'Connecting' }[state];
+    S.conn = state;
+    $('#conn').dataset.state = state;
+    renderTopbar();
   }
 
   // -------------------------------------------------------------------------
@@ -390,8 +402,8 @@ def run(chunk, total):
   function defaultHost() {
     const hosts = terminalHosts();
     const mine = myHost();
-    return hosts.find((h) => h.host && h.host === mine) // your own computer first
-      || hosts.find((h) => /ubuntu|linux|debian|fedora/i.test(h.workspace.system))
+    return hosts.find((h) => /ubuntu|linux|debian|fedora/i.test(h.workspace.system)) // the Linux machine is the workspace
+      || hosts.find((h) => h.host && h.host === mine)
       || hosts[0] || null;
   }
   const selectedHost = () => terminalHosts().find((h) => h.id === T.hostId) || defaultHost();
@@ -425,20 +437,11 @@ def run(chunk, total):
     if (T.sid) send({ type: 'term.close', sid: T.sid });
     T.sid = null;
     T.open = false;
-    setMax(false);
     renderWorkspace();
   }
   function fitTerminal() {
     if (!T.fit || !T.open) return;
     try { T.fit.fit(); } catch { /* not visible yet */ }
-  }
-  function setMax(on) {
-    T.max = on;
-    $('#workspace').classList.toggle('max', on);
-    document.body.classList.toggle('term-max', on);
-    $('#ws-max').setAttribute('aria-pressed', String(on));
-    $('#ws-max').textContent = on ? 'Exit full screen' : 'Full screen';
-    requestAnimationFrame(fitTerminal);
   }
   function b64bytes(b64) {
     const bin = atob(b64);
@@ -473,7 +476,7 @@ def run(chunk, total):
     const mine = myHost();
     $('#ws-hosts').innerHTML = hosts.map((h) => `<button class="host-tab" type="button" role="tab" data-host="${esc(h.id)}"
         aria-selected="${!!host && h.id === host.id}" style="--wire:${esc(h.color)}">
-        <b>${esc(h.name)}${h.host && h.host === mine ? ' (this computer)' : ''}</b><span>${esc(h.workspace.system)} · ${esc(h.workspace.shell)}</span></button>`).join('');
+        <b>${esc(h.name)}${h.host && h.host === mine ? ' (this computer)' : ''}</b><span>${esc(h.workspace.system)} · ${esc(h.workspace.shell)}${/ubuntu|linux|debian|fedora/i.test(h.workspace.system) ? ' · Linux' : ''}</span></button>`).join('');
     const where = $('#ws-where');
     if (!host) {
       where.style.removeProperty('--wire');
@@ -496,8 +499,9 @@ def run(chunk, total):
     $('#ws-open').disabled = !host;
     $('#ws-open').textContent = host ? (T.open ? `Reconnect to ${host.name}` : `Open terminal on ${host.name}`) : 'Open terminal';
     $('#ws-close').hidden = !T.open;
-    $('#ws-max').hidden = !T.open;
     $('#term-wrap').hidden = !T.open;
+    $('#wsub-terminal').textContent = host ? `on ${host.name} · ${host.workspace.system}` : '';
+    requestAnimationFrame(fitTerminal);
     $('#ws-status').textContent = host && host.workspace.shared ? 'This session stays open on that computer when you close the terminal or switch devices.' : '';
   }
 
@@ -658,7 +662,18 @@ def run(chunk, total):
       }).join('');
       const actions = [
         m.terminal ? `<a class="btn ghost small" href="#terminal" data-open-host="${esc(m.terminal.id)}">Open terminal here</a>` : '',
+        m.main.files ? `<a class="btn ghost small" href="#files" data-open-files="${esc(m.main.id)}">Browse files</a>` : '',
       ].join('');
+      const load = (m.agent && m.agent.load) || {};
+      const cpu = typeof load.cpu === 'number' ? load.cpu : null;
+      const memUsed = typeof load.memUsedGB === 'number' && i.memoryGB ? load.memUsedGB : null;
+      const live = m.agent
+        ? `<div class="live">
+            <span class="lbl">CPU</span><span class="meter"><i style="width:${cpu ?? 0}%"></i></span><span class="val">${cpu === null ? '…' : `${Math.round(cpu)}%`}</span>
+            <span class="lbl">Memory</span><span class="meter"><i style="width:${memUsed === null ? 0 : Math.min(100, (memUsed / i.memoryGB) * 100).toFixed(0)}%"></i></span><span class="val">${memUsed === null ? '…' : `${gb(memUsed)} / ${gb(i.memoryGB)} GB`}</span>
+          </div>
+          <canvas class="spark" data-spark="${esc(m.agent.id)}" height="40" aria-label="CPU use over the last two minutes"></canvas>`
+        : `<div class="live"><span class="lbl">Activity</span><span class="meter"><i style="width:${m.threads ? Math.min(100, (m.busy / m.threads) * 100) : 0}%"></i></span><span class="val">${m.busy ? `${m.busy} piece${m.busy === 1 ? '' : 's'}` : 'idle'}</span></div>`;
       return `<article class="machine" style="--wire:${esc(m.main.color)}" data-off="${!m.sharing && !m.terminal}">
         <div class="machine-head"><span class="machine-name">${esc(m.main.name)}</span><span class="machine-os">${esc(osText)}</span><div class="badges">${badges}</div></div>
         <dl class="shares">
@@ -667,6 +682,7 @@ def run(chunk, total):
           <div><dt>Storage</dt><dd>${diskText}</dd></div>
           <div><dt>Graphics</dt><dd>${gpuText}</dd></div>
         </dl>
+        ${live}
         <div class="via">${via}<span>${nf.format(m.done)} pieces computed so far</span></div>
         ${actions ? `<div class="machine-actions">${actions}</div>` : ''}
       </article>`;
@@ -692,25 +708,79 @@ def run(chunk, total):
 
     renderTopbar();
     renderOverviewJob();
+    drawSparks();
+  }
+
+  // CPU history per computer, sampled every 2 seconds, drawn as a small line under each card
+  const SPARK = new Map();
+  setInterval(() => {
+    for (const d of S.devices) {
+      if (d.kind !== 'agent' || !d.load || typeof d.load.cpu !== 'number') continue;
+      const h = SPARK.get(d.id) || [];
+      h.push(d.load.cpu);
+      if (h.length > 60) h.shift();
+      SPARK.set(d.id, h);
+    }
+    drawSparks();
+  }, 2000);
+  function drawSparks() {
+    document.querySelectorAll('canvas[data-spark]').forEach((cv) => {
+      const h = SPARK.get(cv.dataset.spark) || [];
+      const w = cv.clientWidth || 300;
+      const dpr = window.devicePixelRatio || 1;
+      cv.width = Math.round(w * dpr);
+      cv.height = Math.round(40 * dpr);
+      const ctx = cv.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, 40);
+      const color = getComputedStyle(cv.closest('.machine')).getPropertyValue('--wire').trim() || '#2563C9';
+      ctx.strokeStyle = cssVar('--line-soft');
+      ctx.beginPath(); ctx.moveTo(0, 39.5); ctx.lineTo(w, 39.5); ctx.stroke();
+      if (h.length < 2) return;
+      const x = (k) => w - (h.length - 1 - k) * (w / 59);
+      const y = (v) => 38 - (v / 100) * 34;
+      ctx.beginPath();
+      h.forEach((v, k) => (k ? ctx.lineTo(x(k), y(v)) : ctx.moveTo(x(k), y(v))));
+      ctx.lineTo(x(h.length - 1), 39); ctx.lineTo(x(0), 39); ctx.closePath();
+      ctx.globalAlpha = 0.18; ctx.fillStyle = color; ctx.fill(); ctx.globalAlpha = 1;
+      ctx.beginPath();
+      h.forEach((v, k) => (k ? ctx.lineTo(x(k), y(v)) : ctx.moveTo(x(k), y(v))));
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+    });
   }
 
   const myMachineName = () => { const m = machines().find((x) => x.here); return m ? m.main.name : S.name; };
   function renderTopbar() {
+    const conn = S.conn || 'connecting';
+    $('#conn').textContent = conn === 'online' ? `Pool${S.rtt != null ? ` ${S.rtt} ms` : ''}` : conn === 'offline' ? 'Reconnecting' : 'Connecting';
+    $('#conn').title = conn === 'online' ? `Connected to the pool at ${(S.address || location.origin).replace(/^https?:\/\//, '')}. ${S.rtt != null ? `Messages take ${S.rtt} ms to come back.` : ''}` : 'Not connected to the pool.';
+    const agents = S.devices.filter((d) => d.kind === 'agent' && d.load && typeof d.load.cpu === 'number' && !d.stale);
+    const cores = agents.reduce((a, d) => a + d.info.cores, 0);
+    const cpu = cores ? agents.reduce((a, d) => a + d.load.cpu * d.info.cores, 0) / cores : null;
+    $('#pb-cpu').innerHTML = cpu === null ? '' : `CPU <span class="pb-meter"><i style="width:${cpu.toFixed(0)}%"></i></span> <b>${Math.round(cpu)}%</b>`;
+    $('#pb-cpu').title = cpu === null ? '' : `Average processor use across ${agents.length} ${agents.length === 1 ? 'computer' : 'computers'} (${cores} cores)`;
     $('#me-chip').innerHTML = `You are on <b>${esc(myMachineName())}</b>`;
     $('#me-chip').style.setProperty('--me-color', S.color || 'var(--ok)');
     const addr = (S.address || location.origin).replace(/^https?:\/\//, '');
     $('#code-chip').innerHTML = S.joinCode ? `Join code <b>${esc(S.joinCode)}</b> · ${esc(addr)}` : esc(addr);
   }
 
+  // The latest run, split by device: the plainest proof that devices really share the work.
   function renderOverviewJob() {
-    const j = S.jobs.slice().reverse().find((x) => x.status === 'running' || x.status === 'queued');
+    const j = S.jobs.slice().reverse().find((x) => x.status !== 'cancelled');
     const box = $('#ov-job');
     box.hidden = !j;
     if (!j) return;
-    const pct = j.total ? (j.done / j.total) * 100 : 0;
-    box.innerHTML = `<p><b>Running:</b> ${esc(j.title)}, ${nf.format(j.done)} of ${nf.format(j.total)} pieces</p>
-      <a class="btn ghost small" href="#jobs">Open Jobs</a><span class="res-bar"><i style="width:${pct.toFixed(1)}%"></i></span>`;
+    const per = Object.values(j.perDevice).sort((a, b) => b.chunks - a.chunks);
+    const head = j.status === 'running' || j.status === 'queued'
+      ? `<b>Running:</b> ${esc(j.title)}, ${nf.format(j.done)} of ${nf.format(j.total)} pieces`
+      : `<b>Last run:</b> ${esc(j.title)}${j.status === 'done' && j.startedAt && j.finishedAt ? `, finished in ${fmtDur(j.finishedAt - j.startedAt)}` : `, ${esc(j.status)}`}`;
+    box.innerHTML = `<p>${head}</p><a class="btn ghost small" href="#jobs">Open Jobs</a>
+      <div class="split">${per.map((p) => `<div class="split-row" style="--wire:${esc(p.color)}"><span>${esc(p.name)}</span>
+        <span class="meter"><i style="width:${j.total ? ((p.chunks / j.total) * 100).toFixed(1) : 0}%"></i></span>
+        <span>${nf.format(p.chunks)} pieces · ${j.total ? Math.round((p.chunks / j.total) * 100) : 0}%</span></div>`).join('') || '<p class="hint">No device has finished a piece yet.</p>'}</div>`;
   }
+  setInterval(() => { $('#pb-clock').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }, 1000);
 
   // -------------------------------------------------------------------------
   // Rendering: current run
@@ -917,18 +987,7 @@ def run(chunk, total):
     return `${v.toFixed(v < 10 ? 1 : 0)} ${units[u]}`;
   }
   function renderFiles() {
-    $('#file-list').innerHTML = S.files.length
-      ? S.files.map((f) => `<li>
-          <span class="file-name">${esc(f.name)}</span>
-          <span class="file-meta">${fmtSize(f.size)}${f.by ? `, added by ${esc(f.by)}` : ''}</span>
-          <span class="file-actions">
-            <button class="btn ghost small" type="button" data-search="${esc(f.name)}">Search</button>
-            <a class="btn ghost small" href="/api/files/${encodeURIComponent(f.name)}" download="${esc(f.name)}">Download</a>
-            <button class="btn ghost small danger" type="button" data-delete="${esc(f.name)}" aria-label="Delete ${esc(f.name)}">Delete</button>
-          </span>
-        </li>`).join('')
-      : '<li class="empty">No shared files yet. Files added from any device can be read by every device.</li>';
-
+    // the "Search a file" job picks from the shared folder
     const sel = $('#g-file');
     const current = sel.value;
     sel.innerHTML = S.files.map((f) => `<option value="${esc(f.name)}">${esc(f.name)} (${fmtSize(f.size)})</option>`).join('');
@@ -936,25 +995,139 @@ def run(chunk, total):
     $('#g-empty').hidden = S.files.length > 0;
   }
 
-  function renderPool() {
-    const p = S.pool;
-    $('#pool-info').textContent = p.agents
-      ? `Spread over ${p.agents} ${p.agents === 1 ? 'computer' : 'computers'}, about ${nf.format(p.freeGB)} GB free. ${fmtSize(p.storedBytes)} stored. Each file is kept on ${Math.min(p.replicas, p.agents)} ${Math.min(p.replicas, p.agents) === 1 ? 'computer' : 'different computers'}.`
-      : 'No computer is connected to hold files. Add a Mac, Linux or Windows computer under "Add a device". Phones and tablets can add and read files but do not hold them.';
-    $('#pool-list').innerHTML = p.files.length
-      ? p.files.map((f) => {
-        const state = !f.available ? 'Offline: a computer holding it is away'
-          : f.copies < Math.min(f.wanted, p.agents) ? `${f.copies} of ${Math.min(f.wanted, p.agents)} copies, repairing` : `${f.copies} ${f.copies === 1 ? 'copy' : 'copies'}`;
-        return `<li>
-          <span class="file-name">${esc(f.name)}</span>
-          <span class="file-meta">${fmtSize(f.size)}, ${esc(state)}${f.by ? `, added by ${esc(f.by)}` : ''}</span>
-          <span class="file-actions">
-            ${f.available ? `<a class="btn ghost small" href="/api/pool/${encodeURIComponent(f.name)}" download="${esc(f.name)}">Download</a>` : ''}
-            <button class="btn ghost small danger" type="button" data-pool-delete="${esc(f.name)}" aria-label="Delete ${esc(f.name)}">Delete</button>
-          </span>
-        </li>`;
-      }).join('')
-      : '<li class="empty">Nothing here yet. Files added here are cut into pieces and spread over the computers in the pool.</li>';
+  // -------------------------------------------------------------------------
+  // Files app: each computer's home folder, pooled storage, and the shared folder
+  // -------------------------------------------------------------------------
+  const FM = { loc: null, path: '', entries: [], info: null, busy: false, sending: null };
+  const FOLDER_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg>';
+  const FILE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>';
+  const fileComputers = () => machines().map((m) => m.list.find((d) => d.files)).filter(Boolean);
+  const fmtWhen = (ms) => (ms ? new Date(ms).toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '');
+
+  function fmRenderLocations() {
+    const mine = myHost();
+    const comps = fileComputers();
+    if (!FM.loc) {
+      const own = comps.find((d) => d.host && d.host === mine);
+      const first = own || comps[0];
+      FM.loc = first ? { type: 'fs', device: first.id } : { type: 'pool' };
+    }
+    const cur = FM.loc;
+    $('#fm-locs').innerHTML = comps.map((d) => `<li><button class="fm-loc" type="button" data-loc="fs" data-device="${esc(d.id)}" style="--wire:${esc(d.color)}"
+        aria-current="${cur.type === 'fs' && cur.device === d.id}"><b>${esc(d.name)}${d.host && d.host === mine ? ' (this computer)' : ''}</b><span>${esc(d.workspace ? d.workspace.system : d.info.platform)}, home folder</span></button></li>`).join('')
+      || '<li class="hint">No computer is sharing its files yet. Computers running the YourHarness app appear here.</li>';
+    const coord = S.devices.find((d) => d.coordinator);
+    $('#fm-locs-pool').innerHTML = `<li><button class="fm-loc" type="button" data-loc="pool" aria-current="${cur.type === 'pool'}" style="--wire:var(--focus)"><b>Pooled storage</b><span>spread over ${S.pool.agents} ${S.pool.agents === 1 ? 'computer' : 'computers'}, 2 copies</span></button></li>
+      <li><button class="fm-loc" type="button" data-loc="shared" aria-current="${cur.type === 'shared'}" style="--wire:var(--muted)"><b>Shared folder</b><span>on ${esc(coord ? coord.name : 'the pool computer')}, used by Search</span></button></li>`;
+  }
+
+  function fmDeviceName(id) { const d = S.devices.find((x) => x.id === id); return d ? d.name : 'that computer'; }
+
+  async function fmLoad(keepStatus = false) {
+    fmRenderLocations();
+    const loc = FM.loc;
+    if (loc.type !== 'fs') { fmRender(); return; }
+    FM.busy = true;
+    const kept = keepStatus === true ? $('#fm-status').textContent : '';
+    if (!kept) $('#fm-status').textContent = 'Loading…';
+    try {
+      const res = await fetch(`/api/fs/${encodeURIComponent(loc.device)}?path=${encodeURIComponent(FM.path)}`, { credentials: 'same-origin' });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `The pool answered ${res.status}.`);
+      if (FM.loc !== loc) return;
+      FM.path = body.path;
+      FM.entries = body.entries;
+      FM.info = body;
+      $('#fm-status').textContent = body.truncated ? 'This folder has more items than can be shown.' : kept;
+    } catch (err) {
+      FM.entries = [];
+      FM.info = null;
+      $('#fm-status').textContent = err.message;
+    } finally {
+      FM.busy = false;
+    }
+    fmRender();
+  }
+
+  function fmRender() {
+    const loc = FM.loc || { type: 'pool' };
+    const showHidden = $('#fm-show-hidden').checked;
+    const isFs = loc.type === 'fs';
+    $('#fm-up').disabled = !isFs || !FM.path;
+    $('#fm-new').hidden = !isFs;
+    $('.fm-hidden').hidden = !isFs;
+    let crumbs = '';
+    if (isFs) {
+      const parts = FM.path ? FM.path.split('/') : [];
+      crumbs = `<button type="button" data-crumb="">${esc(fmDeviceName(loc.device))} ~</button>` + parts.map((part, k) =>
+        `<span class="sep">/</span><button type="button" data-crumb="${esc(parts.slice(0, k + 1).join('/'))}">${esc(part)}</button>`).join('');
+    } else {
+      crumbs = `<span>${loc.type === 'pool' ? 'Pooled storage' : 'Shared folder'}</span>`;
+    }
+    $('#fm-crumbs').innerHTML = crumbs;
+    $('#wsub-files').textContent = isFs ? `${fmDeviceName(loc.device)} · ~/${FM.path}` : (loc.type === 'pool' ? 'Pooled storage' : 'Shared folder');
+
+    let rows = '';
+    if (isFs) {
+      const entries = FM.entries.filter((e) => showHidden || !e.hidden);
+      $('#fm-info').textContent = FM.info ? `Files on ${fmDeviceName(loc.device)}. Uploads go into this folder. ${fmtSize(FM.info.free)} free on its disk.` : '';
+      rows = entries.map((e) => {
+        const path = FM.path ? `${FM.path}/${e.name}` : e.name;
+        const name = e.dir ? `<button class="fm-name" type="button" data-open-dir="${esc(path)}">${FOLDER_SVG}${esc(e.name)}</button>` : `<span class="fm-name">${FILE_SVG}${esc(e.name)}</span>`;
+        const acts = e.dir
+          ? `<button class="btn ghost" type="button" data-rename="${esc(path)}">Rename</button><button class="btn ghost danger" type="button" data-del="${esc(path)}" data-dir="1">Delete</button>`
+          : `<a class="btn ghost" href="/api/fs/${encodeURIComponent(loc.device)}/download?path=${encodeURIComponent(path)}" download="${esc(e.name)}">Download</a>
+             <button class="btn ghost" type="button" data-send="${esc(path)}">Send to…</button>
+             <button class="btn ghost" type="button" data-rename="${esc(path)}">Rename</button>
+             <button class="btn ghost danger" type="button" data-del="${esc(path)}">Delete</button>`;
+        return `<tr><td>${name}</td><td>${e.dir ? '' : fmtSize(e.size)}</td><td>${fmtWhen(e.mtime)}</td><td><div class="fm-acts">${acts}</div></td></tr>`;
+      }).join('') || `<tr><td colspan="4" class="hint">${FM.busy ? 'Loading…' : 'This folder is empty.'}</td></tr>`;
+    } else if (loc.type === 'pool') {
+      const p = S.pool;
+      $('#fm-info').textContent = p.agents
+        ? `Files here are cut into pieces, and each piece is kept on ${Math.min(2, p.agents)} of the ${p.agents} computers. "Stored on" shows which ones. ${fmtSize(p.storedBytes)} stored, about ${nf.format(p.freeGB)} GB free.`
+        : 'No computer is connected to hold pooled files.';
+      rows = p.files.map((f) => {
+        const state = !f.available ? 'offline' : f.copies < Math.min(f.wanted, p.agents) ? `${f.copies} copy, repairing` : `${f.copies} ${f.copies === 1 ? 'copy' : 'copies'}`;
+        return `<tr><td><span class="fm-name">${FILE_SVG}${esc(f.name)}</span><span class="fm-on">Stored on ${esc((f.on || []).join(' and ') || 'no connected computer')} · ${esc(state)}</span></td>
+          <td>${fmtSize(f.size)}</td><td>${fmtWhen(f.mtime)}</td>
+          <td><div class="fm-acts">${f.available ? `<a class="btn ghost" href="/api/pool/${encodeURIComponent(f.name)}" download="${esc(f.name)}">Download</a>` : ''}
+          <button class="btn ghost danger" type="button" data-pool-del="${esc(f.name)}">Delete</button></div></td></tr>`;
+      }).join('') || '<tr><td colspan="4" class="hint">Nothing in pooled storage yet. Upload a file to spread it over the computers.</td></tr>';
+    } else {
+      $('#fm-info').textContent = 'One folder on the computer that runs the pool. Every device can read it, and "Search a file" in Jobs reads from here.';
+      rows = S.files.map((f) => `<tr><td><span class="fm-name">${FILE_SVG}${esc(f.name)}</span>${f.by ? `<span class="fm-on">added by ${esc(f.by)}</span>` : ''}</td>
+          <td>${fmtSize(f.size)}</td><td>${fmtWhen(f.mtime)}</td>
+          <td><div class="fm-acts"><a class="btn ghost" href="/api/files/${encodeURIComponent(f.name)}" download="${esc(f.name)}">Download</a>
+          <button class="btn ghost" type="button" data-search="${esc(f.name)}">Search</button>
+          <button class="btn ghost danger" type="button" data-shared-del="${esc(f.name)}">Delete</button></div></td></tr>`).join('')
+        || '<tr><td colspan="4" class="hint">The shared folder is empty.</td></tr>';
+    }
+    $('#fm-rows').innerHTML = rows;
+  }
+
+  // A small in-page dialog for names; the desktop app's engine has no window.prompt()
+  function askText(title, initial = '', okLabel = 'OK') {
+    return new Promise((resolve) => {
+      const f = $('#fm-ask');
+      const input = $('#fm-ask-input');
+      $('#fm-ask-title').textContent = title;
+      $('#fm-ask-ok').textContent = okLabel;
+      input.value = initial;
+      f.hidden = false;
+      input.focus();
+      input.select();
+      const done = (v) => { f.hidden = true; f.onsubmit = null; $('#fm-ask-cancel').onclick = null; resolve(v); };
+      f.onsubmit = (e) => { e.preventDefault(); done(input.value.trim() || null); };
+      $('#fm-ask-cancel').onclick = () => done(null);
+    });
+  }
+
+  async function fmPost(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `The pool answered ${res.status}.`);
+    return data;
   }
 
   function renderMe() {
@@ -985,7 +1158,6 @@ def run(chunk, total):
     renderCurrent(true);
     renderHistory();
     renderFiles();
-    renderPool();
     renderAdd();
     renderWorkspace();
   }
@@ -1004,7 +1176,9 @@ def run(chunk, total):
   function showApp() {
     $('#boot').hidden = true;
     $('#join').hidden = true;
+    const first = $('#app').hidden;
     $('#app').hidden = false;
+    if (first) WM.restore();
     resizePool(S.sharing ? S.threads : 0);
     updateWakeLock();
   }
@@ -1109,8 +1283,6 @@ def run(chunk, total):
     setTimeout(() => openTerminal(T.hostId), 0); // after the view switches
   });
   $('#ws-close').addEventListener('click', closeTerminal);
-  $('#ws-max').addEventListener('click', () => setMax(!T.max));
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && T.max && e.target === document.body) setMax(false); });
   document.querySelector('.keybar').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-seq]');
     if (!b || !T.sid) return;
@@ -1216,23 +1388,10 @@ def run(chunk, total):
   });
 
   // Files
-  $('#file-input').addEventListener('change', async (e) => {
-    const files = [...e.target.files];
-    e.target.value = '';
-    const status = $('#upload-status');
-    for (const f of files) {
-      try {
-        await uploadFile(f, (pct) => { status.textContent = `Adding ${f.name}: ${pct}%`; });
-        status.textContent = `Added ${f.name}.`;
-      } catch (err) {
-        status.textContent = `Could not add ${f.name}. ${err.message}`;
-      }
-    }
-  });
-  function uploadFile(file, onPct, base = '/api/files') {
+  function uploadFile(file, onPct, base = '/api/files', url = null) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('PUT', `${base}/${encodeURIComponent(file.name)}`);
+      xhr.open('PUT', url || `${base}/${encodeURIComponent(file.name)}`);
       xhr.withCredentials = true;
       xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) onPct(Math.round((ev.loaded / ev.total) * 100)); };
       xhr.onload = () => {
@@ -1245,68 +1404,273 @@ def run(chunk, total):
       xhr.send(file);
     });
   }
-  $('#pool-input').addEventListener('change', async (e) => {
+  // Files app events
+  document.addEventListener('click', (e) => {
+    const loc = e.target.closest('.fm-loc');
+    if (!loc) return;
+    FM.loc = loc.dataset.loc === 'fs' ? { type: 'fs', device: loc.dataset.device } : { type: loc.dataset.loc };
+    FM.path = '';
+    fmLoad();
+  });
+  $('#fm-crumbs').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-crumb]');
+    if (b) { FM.path = b.dataset.crumb; fmLoad(); }
+  });
+  $('#fm-up').addEventListener('click', () => { FM.path = FM.path.split('/').slice(0, -1).join('/'); fmLoad(); });
+  $('#fm-refresh').addEventListener('click', fmLoad);
+  $('#fm-show-hidden').addEventListener('change', fmRender);
+  $('#fm-new').addEventListener('click', async () => {
+    const name = await askText('New folder', '', 'Create');
+    if (!name) return;
+    try {
+      await fmPost(`/api/fs/${encodeURIComponent(FM.loc.device)}/mkdir`, { path: FM.path ? `${FM.path}/${name}` : name });
+      fmLoad();
+    } catch (err) { $('#fm-status').textContent = err.message; }
+  });
+  $('#fm-upload').addEventListener('change', async (e) => {
     const files = [...e.target.files];
     e.target.value = '';
-    const status = $('#pool-status');
+    const loc = FM.loc;
+    const status = $('#fm-status');
     for (const f of files) {
       try {
-        await uploadFile(f, (pct) => { status.textContent = `Adding ${f.name}: ${pct}%`; }, '/api/pool');
-        status.textContent = `Added ${f.name}.`;
+        const where = loc.type === 'fs' ? `${fmDeviceName(loc.device)} ~/${FM.path ? `${FM.path}/` : ''}` : loc.type === 'pool' ? 'pooled storage' : 'the shared folder';
+        const url = loc.type === 'fs' ? `/api/fs/${encodeURIComponent(loc.device)}/upload?path=${encodeURIComponent(FM.path ? `${FM.path}/${f.name}` : f.name)}` : null;
+        await uploadFile(f, (pct) => { status.textContent = `Sending ${f.name} to ${where}: ${pct}%`; }, loc.type === 'pool' ? '/api/pool' : '/api/files', url);
+        status.textContent = `Saved ${f.name} to ${where}.`;
       } catch (err) {
-        status.textContent = `Could not add ${f.name}. ${err.message}`;
+        status.textContent = `Could not save ${f.name}. ${err.message}`;
       }
     }
+    if (loc.type === 'fs') fmLoad(true);
   });
-  $('#pool-list').addEventListener('click', async (e) => {
-    const del = e.target.closest('button[data-pool-delete]');
-    if (!del) return;
-    const name = del.dataset.poolDelete;
-    if (!confirm(`Delete ${name} from pooled storage? This removes every copy.`)) return;
-    const res = await fetch(`/api/pool/${encodeURIComponent(name)}`, { method: 'DELETE', credentials: 'same-origin' });
-    if (!res.ok) $('#pool-status').textContent = `Could not delete ${name}.`;
+  $('#fm-rows').addEventListener('click', async (e) => {
+    const t = e.target.closest('[data-open-dir],[data-rename],[data-del],[data-send],[data-pool-del],[data-shared-del],[data-search]');
+    if (!t) return;
+    const status = $('#fm-status');
+    const dev = FM.loc && FM.loc.device;
+    try {
+      if (t.dataset.openDir !== undefined) { FM.path = t.dataset.openDir; fmLoad(); return; }
+      if (t.dataset.rename) {
+        const old = t.dataset.rename;
+        const base = old.split('/').pop();
+        const name = await askText(`Rename ${base}`, base, 'Rename');
+        if (!name || name === base) return;
+        await fmPost(`/api/fs/${encodeURIComponent(dev)}/rename`, { path: old, to: [...old.split('/').slice(0, -1), name].join('/') });
+        fmLoad();
+      } else if (t.dataset.del) {
+        const path = t.dataset.del;
+        const isDir = !!t.dataset.dir;
+        if (!confirm(`Delete ${path.split('/').pop()} from ${fmDeviceName(dev)}?${isDir ? ' Everything inside the folder is deleted too.' : ''} This can't be undone.`)) return;
+        const res = await fetch(`/api/fs/${encodeURIComponent(dev)}?path=${encodeURIComponent(path)}${isDir ? '&recursive=1' : ''}`, { method: 'DELETE', credentials: 'same-origin' });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Could not delete it.');
+        fmLoad();
+      } else if (t.dataset.send) {
+        FM.sending = { device: dev, path: t.dataset.send };
+        const others = fileComputers().filter((d) => d.id !== dev);
+        if (!others.length) { status.textContent = 'There is no other computer to send to. Open the YourHarness app on another computer first.'; return; }
+        $('#fm-send-to').innerHTML = others.map((d) => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('');
+        $('#fm-send-what').textContent = `${t.dataset.send.split('/').pop()} from ${fmDeviceName(dev)}`;
+        $('#fm-send-err').textContent = '';
+        $('#fm-send').hidden = false;
+      } else if (t.dataset.poolDel) {
+        if (!confirm(`Delete ${t.dataset.poolDel} from pooled storage? Every copy is removed.`)) return;
+        await fetch(`/api/pool/${encodeURIComponent(t.dataset.poolDel)}`, { method: 'DELETE', credentials: 'same-origin' });
+      } else if (t.dataset.sharedDel) {
+        if (!confirm(`Delete ${t.dataset.sharedDel} from the shared folder?`)) return;
+        await fetch(`/api/files/${encodeURIComponent(t.dataset.sharedDel)}`, { method: 'DELETE', credentials: 'same-origin' });
+      } else if (t.dataset.search) {
+        $('input[name="kind"][value="grep"]').checked = true;
+        showKind();
+        $('#g-file').value = t.dataset.search;
+        WM.open('jobs');
+      }
+    } catch (err) { status.textContent = err.message; }
   });
-  $('#file-list').addEventListener('click', async (e) => {
-    const del = e.target.closest('button[data-delete]');
-    const search = e.target.closest('button[data-search]');
-    if (del) {
-      const name = del.dataset.delete;
-      if (!confirm(`Delete ${name} from the shared folder? This removes it for every device.`)) return;
-      const res = await fetch(`/api/files/${encodeURIComponent(name)}`, { method: 'DELETE', credentials: 'same-origin' });
-      if (!res.ok) $('#upload-status').textContent = `Could not delete ${name}.`;
-    } else if (search) {
-      $('input[name="kind"][value="grep"]').checked = true;
-      showKind();
-      $('#g-file').value = search.dataset.search;
-      location.hash = 'jobs';
-      $('#g-term').focus({ preventScroll: true });
-    }
+  $('#fm-send-cancel').addEventListener('click', () => { $('#fm-send').hidden = true; });
+  $('#fm-send').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const to = $('#fm-send-to').value;
+    const dir = $('#fm-send-dir').value.trim();
+    $('#fm-send-err').textContent = 'Sending…';
+    try {
+      const res = await fmPost('/api/fs-copy', { from: FM.sending, to: { device: to, dir } });
+      $('#fm-send').hidden = true;
+      $('#fm-status').textContent = `Copied to ${fmDeviceName(to)} ~/${res.path} (${fmtSize(res.size)}).`;
+    } catch (err) { $('#fm-send-err').textContent = err.message; }
   });
 
   // -------------------------------------------------------------------------
-  // Sections: one view at a time, chosen by the address (#overview, #terminal, ...)
+  // Window manager: draggable, resizable windows on wide screens, full-screen apps on phones
   // -------------------------------------------------------------------------
-  const VIEWS = ['overview', 'terminal', 'jobs', 'files', 'devices'];
-  function currentView() {
-    const h = location.hash.replace('#', '');
-    return VIEWS.includes(h) ? h : 'overview';
-  }
-  function showView() {
-    const v = currentView();
-    document.querySelectorAll('.view').forEach((el) => { el.hidden = el.dataset.view !== v; });
-    document.querySelectorAll('[data-nav]').forEach((a) => {
-      if (a.dataset.nav === v) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-    });
-    store.set('view', v);
-    if (v === 'terminal') {
-      renderWorkspace();
-      requestAnimationFrame(fitTerminal);
-      if (S.joined && S.devices.length) autoOpenTerminal();
+  const APP_SIZES = { monitor: [720, 640], terminal: [860, 600], files: [920, 600], jobs: [1000, 680], devices: [940, 680] };
+  const WM = (() => {
+    let z = 10;
+    const saved = (() => { try { return JSON.parse(store.get('wm') || '{}'); } catch { return {}; } })();
+    const state = saved && typeof saved === 'object' ? saved : {};
+    const desk = $('#desk');
+    const win = (app) => $(`#win-${app}`);
+    const phone = () => matchMedia('(max-width: 820px)').matches;
+    const save = () => store.set('wm', JSON.stringify(state));
+    const isOpen = (app) => !win(app).hidden;
+
+    function place(app) {
+      const el = win(app);
+      const st = state[app] || (state[app] = {});
+      if (phone()) return; // apps are full screen on phones; keep the desktop sizes for later
+      const W = desk.clientWidth, H = desk.clientHeight;
+      if (st.w == null) {
+        const [w, h] = APP_SIZES[app] || [800, 600];
+        const order = Object.keys(APP_SIZES).indexOf(app);
+        st.w = Math.min(w, W - 24); st.h = Math.min(h, H - 24);
+        st.x = Math.max(12, Math.min(W - st.w - 12, 24 + order * 36)); st.y = Math.max(12, Math.min(H - st.h - 12, 18 + order * 28));
+      }
+      st.w = Math.max(320, Math.min(st.w, W)); st.h = Math.max(220, Math.min(st.h, H));
+      st.x = Math.max(0, Math.min(st.x, W - 120)); st.y = Math.max(0, Math.min(st.y, H - 40));
+      Object.assign(el.style, { left: `${st.x}px`, top: `${st.y}px`, width: `${st.w}px`, height: `${st.h}px` });
+      el.classList.toggle('max', !!st.max);
     }
-    if (v === 'jobs') requestAnimationFrame(() => { const j = viewJob(); if (j) renderCurrent(true); });
-    window.scrollTo(0, 0);
-  }
-  window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#join=')) showView(); });
+    function focus(app) {
+      document.querySelectorAll('.win').forEach((w) => w.classList.remove('focused'));
+      const el = win(app);
+      el.style.zIndex = String(++z);
+      el.classList.add('focused');
+      state.front = app;
+      dockState();
+    }
+    function dockState() {
+      document.querySelectorAll('.dock-item').forEach((b) => {
+        const a = b.dataset.open;
+        b.classList.toggle('running', isOpen(a) || (state[a] && state[a].min));
+        b.classList.toggle('front', isOpen(a) && state.front === a);
+      });
+      $('#launcher').hidden = Object.keys(APP_SIZES).some(isOpen); // the app tiles show on an empty desktop only
+    }
+    function opened(app) {
+      if (app === 'terminal') { renderWorkspace(); if (S.joined && S.devices.length) autoOpenTerminal(); requestAnimationFrame(fitTerminal); }
+      if (app === 'files') fmLoad();
+      if (app === 'jobs') requestAnimationFrame(() => { if (viewJob()) renderCurrent(true); });
+      if (app === 'monitor') requestAnimationFrame(drawSparks);
+    }
+    function open(app) {
+      if (!win(app)) return;
+      if (phone()) Object.keys(APP_SIZES).forEach((a) => { if (a !== app && isOpen(a)) { win(a).hidden = true; } });
+      const st = state[app] || (state[app] = {});
+      st.open = true; st.min = false;
+      win(app).hidden = false;
+      place(app);
+      focus(app);
+      save();
+      opened(app);
+    }
+    function minimize(app) {
+      win(app).hidden = true;
+      state[app] = { ...(state[app] || {}), open: true, min: true };
+      save(); dockState();
+    }
+    function close(app) {
+      win(app).hidden = true;
+      state[app] = { ...(state[app] || {}), open: false, min: false };
+      if (app === 'terminal') closeTerminal();
+      save(); dockState();
+    }
+    function toggleMax(app) {
+      const st = state[app] || (state[app] = {});
+      st.max = !st.max;
+      place(app); save();
+      requestAnimationFrame(() => { fitTerminal(); drawSparks(); });
+    }
+    function restore() {
+      const apps = Object.keys(APP_SIZES).filter((a) => state[a] && state[a].open && !state[a].min);
+      if (!apps.length && !phone()) {
+        // first visit on a wide screen: the monitor on the left, the terminal on the right
+        const W = desk.clientWidth, H = desk.clientHeight;
+        const half = Math.floor((W - 36) / 2);
+        state.monitor = { x: 12, y: 12, w: Math.max(360, half), h: H - 24, open: true };
+        state.terminal = { x: Math.min(W - 372, 24 + half), y: 12, w: Math.max(360, half), h: H - 24, open: true };
+        apps.push('monitor', 'terminal');
+      }
+      apps.forEach((a) => { win(a).hidden = false; place(a); focus(a); });
+      if (state.front && apps.includes(state.front)) focus(state.front);
+      dockState();
+      apps.forEach(opened);
+    }
+
+    // dragging and resizing with pointer events (mouse, pen and touch)
+    desk.addEventListener('pointerdown', (e) => {
+      const el = e.target.closest('.win');
+      if (!el) return;
+      const app = el.dataset.app;
+      focus(app);
+      if (phone()) return;
+      const bar = e.target.closest('.win-bar');
+      const grip = e.target.closest('.win-resize');
+      if ((!bar && !grip) || e.target.closest('button') || (state[app] && state[app].max)) return;
+      e.preventDefault();
+      const st = state[app];
+      const start = { px: e.clientX, py: e.clientY, x: st.x, y: st.y, w: st.w, h: st.h };
+      el.setPointerCapture(e.pointerId);
+      const move = (ev) => {
+        if (grip) { st.w = start.w + ev.clientX - start.px; st.h = start.h + ev.clientY - start.py; }
+        else { st.x = start.x + ev.clientX - start.px; st.y = start.y + ev.clientY - start.py; }
+        place(app);
+      };
+      const up = () => {
+        el.removeEventListener('pointermove', move);
+        el.removeEventListener('pointerup', up);
+        el.removeEventListener('pointercancel', up);
+        save();
+        if (grip) requestAnimationFrame(() => { fitTerminal(); drawSparks(); });
+      };
+      el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', up);
+    });
+    desk.addEventListener('dblclick', (e) => {
+      const bar = e.target.closest('.win-bar');
+      if (bar && !e.target.closest('button') && !phone()) toggleMax(bar.closest('.win').dataset.app);
+    });
+    desk.addEventListener('click', (e) => {
+      const b = e.target.closest('.win-bar button[data-act]');
+      if (!b) return;
+      const app = b.closest('.win').dataset.app;
+      if (b.dataset.act === 'min') minimize(app);
+      else if (b.dataset.act === 'max') toggleMax(app);
+      else close(app);
+    });
+    document.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-open]');
+      if (!b) return;
+      const app = b.dataset.open;
+      if (b.classList.contains('dock-item') && isOpen(app) && state.front === app && !phone()) minimize(app);
+      else open(app);
+    });
+    window.addEventListener('resize', () => { Object.keys(APP_SIZES).forEach((a) => { if (isOpen(a)) place(a); }); dockState(); });
+    return { open, close, minimize, isOpen, restore, dockState };
+  })();
+
+  $('#pb-home').addEventListener('click', () => {
+    if (matchMedia('(max-width: 820px)').matches) Object.keys(APP_SIZES).forEach((a) => { if (WM.isOpen(a)) WM.minimize(a); });
+    else WM.open('monitor');
+  });
+  // links inside apps such as href="#terminal" open that app's window
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href^="#"]');
+    if (!a) return;
+    const app = a.getAttribute('href').slice(1);
+    if (!APP_SIZES[app]) return;
+    e.preventDefault();
+    if (a.dataset.openFiles) { FM.loc = { type: 'fs', device: a.dataset.openFiles }; FM.path = ''; }
+    WM.open(app);
+  });
+  $('#mon-test-btn').addEventListener('click', () => {
+    if (!S.ws || S.ws.readyState !== 1) return;
+    S.follow = true;
+    send({ type: 'submit', job: { kind: 'primes', params: { limit: 3e9, chunkSize: 1e7 } } });
+    $('#mon-test-btn').disabled = true;
+    setTimeout(() => { $('#mon-test-btn').disabled = false; }, 1500);
+  });
+  if ('ResizeObserver' in window) new ResizeObserver(() => fitTerminal()).observe($('#term'));
 
   // -------------------------------------------------------------------------
   // Start: a join link in the address bar signs this device in; otherwise try
@@ -1315,14 +1679,12 @@ def run(chunk, total):
   showKind();
   const fromLink = parseJoin(location.hash);
   if (fromLink) {
-    history.replaceState(null, '', `${location.pathname}${location.search}#${store.get('view') || 'overview'}`);
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
     joinWith(fromLink, S.name)
       .then(() => { S.joined = true; connect(); })
       .catch((err) => showJoin(err.message));
   } else {
-    if (!VIEWS.includes(location.hash.replace('#', ''))) history.replaceState(null, '', `${location.pathname}${location.search}#${store.get('view') || 'overview'}`);
     S.joined = true;
     connect();
   }
-  showView();
 })();

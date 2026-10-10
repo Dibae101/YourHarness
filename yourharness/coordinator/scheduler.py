@@ -23,6 +23,7 @@ from pathlib import Path
 from . import files as shared_files
 from .jobkinds import KINDS, PlanContext, UserError, clamp_int, clamp_num
 from .pool_store import PoolStore
+from .remote_fs import RemoteFS
 from .terminals import Terminals
 
 log = logging.getLogger("yourharness")
@@ -88,6 +89,8 @@ class Device:
         self.runtimes = frozenset(r for r in offered if r in allowed) or frozenset(allowed)
         self.workspace = sanitize_workspace(hello.get("workspace")) if self.kind == "agent" else None
         self.coordinator = self.kind == "agent" and bool(hello.get("coordinator"))  # the computer that runs the pool
+        self.files = self.kind == "agent" and isinstance(hello.get("files"), dict)  # lets the Files app browse its home folder
+        self.load: dict = {}  # live CPU and memory use, reported every few seconds
         self.inflight: set[tuple[str, int]] = set()
         self.params_sent: set[str] = set()
         self.done = 0
@@ -198,6 +201,7 @@ class Scheduler:
         self.file_meta: dict[str, dict] = {}
         self.terminals = Terminals(self)
         self.pool_store = PoolStore(self, store.dir)
+        self.remote_fs = RemoteFS(self)
         self.public_url = ""  # the address other devices use; set once the port is known
         self.repair_s = float(os.environ.get("HARNESS_REPAIR_S", 10))
         self._devices_pending = False
@@ -230,7 +234,7 @@ class Scheduler:
         return {
             "id": d.id, "name": d.name, "kind": d.kind, "color": d.color, "info": d.info, "threads": d.threads,
             "sharing": d.sharing, "runtimes": sorted(d.runtimes), "workspace": d.workspace, "busy": len(d.inflight),
-            "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host, "coordinator": d.coordinator,
+            "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host, "coordinator": d.coordinator, "files": d.files, "load": d.load,
         }
 
     def device_list(self) -> list[dict]:
@@ -258,6 +262,7 @@ class Scheduler:
             self.requeue_device(previous)
             self.terminals.device_gone(previous)
             self.pool_store.device_gone(previous)
+            self.remote_fs.device_gone(previous)
             previous.close(4002, "This device connected again from somewhere else.")
         d = Device(rec, ws, hello, self.pick_color(rec), host)
         self.store.update_device(d.id, name=d.name, color=d.color)
@@ -280,6 +285,7 @@ class Scheduler:
             self.requeue_device(d)
             self.terminals.device_gone(d)
             self.pool_store.device_gone(d)
+            self.remote_fs.device_gone(d)
             log.info("%s left", d.name)
             self.pool_store.changed()
             self.broadcast_devices()
@@ -313,6 +319,9 @@ class Scheduler:
         kind = msg.get("type")
         if kind == "beat":
             return
+        if kind == "ping":  # the page measures how quickly the pool answers
+            d.send({"type": "pong", "t": msg.get("t")})
+            return
         if kind == "update":
             if "name" in msg:
                 d.name = clean_text(msg["name"], 40, d.name)
@@ -323,6 +332,10 @@ class Scheduler:
                 d.sharing = bool(msg["sharing"])
             if "info" in msg:
                 d.info = sanitize_info(msg["info"])
+            if isinstance(msg.get("load"), dict):
+                d.load = {"cpu": _num_or_none(msg["load"].get("cpu"), 0, 100), "memUsedGB": _num_or_none(msg["load"].get("memUsedGB"), 0, 65536)}
+                self.broadcast_devices()
+                return  # a load report changes nothing the scheduler acts on
             self.broadcast_devices()
             self.dispatch()
         elif kind == "result":
@@ -345,6 +358,9 @@ class Scheduler:
             job = self.find_job(msg.get("jobId"))
             if job:
                 d.send({"type": "snapshot", "snapshot": self.snapshot(job)})
+        elif kind in ("fs.reply", "fs.error"):
+            if d.kind == "agent":
+                self.remote_fs.handle(d, msg)
         elif isinstance(kind, str) and kind.startswith("store."):
             if d.kind == "agent":
                 self.pool_store.handle(d, msg)

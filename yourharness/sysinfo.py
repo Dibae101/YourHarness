@@ -149,3 +149,49 @@ def collect(disk_path: str | None = None) -> dict:
         "gpus": gpus(),
         "python": platform.python_version(),
     }
+
+
+class CpuMeter:
+    """CPU use across all cores since the previous reading, as a percentage."""
+
+    def __init__(self):
+        self.prev = self._ticks()
+
+    @staticmethod
+    def _ticks() -> tuple[float, float] | None:
+        """(busy, total) time counters since boot, or None where unavailable."""
+        try:
+            if sys.platform.startswith("linux"):
+                with open("/proc/stat", encoding="ascii") as f:
+                    parts = [float(x) for x in f.readline().split()[1:]]
+                idle = parts[3] + (parts[4] if len(parts) > 4 else 0)
+                return sum(parts) - idle, sum(parts)
+            if sys.platform == "darwin":
+                import ctypes
+
+                lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+                lib.mach_host_self.restype = ctypes.c_uint
+                ticks = (ctypes.c_uint * 4)()  # user, system, idle, nice
+                count = ctypes.c_uint(4)
+                if lib.host_statistics(lib.mach_host_self(), 3, ctypes.byref(ticks), ctypes.byref(count)) != 0:  # HOST_CPU_LOAD_INFO
+                    return None
+                user, system, idle, nice = (float(t) for t in ticks)
+                return user + system + nice, user + system + nice + idle
+            if sys.platform.startswith("win"):
+                import ctypes
+
+                idle, kernel, user = (ctypes.c_ulonglong(), ctypes.c_ulonglong(), ctypes.c_ulonglong())
+                if not ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):  # type: ignore[attr-defined]
+                    return None
+                total = float(kernel.value + user.value)  # kernel time includes idle time
+                return total - idle.value, total
+        except (OSError, ValueError, IndexError, AttributeError):
+            return None
+        return None
+
+    def sample(self) -> float | None:
+        now = self._ticks()
+        prev, self.prev = self.prev, now
+        if not now or not prev or now[1] <= prev[1]:
+            return None
+        return round(max(0.0, min(100.0, (now[0] - prev[0]) / (now[1] - prev[1]) * 100)), 1)

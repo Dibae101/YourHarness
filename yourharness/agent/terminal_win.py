@@ -18,6 +18,30 @@ from typing import Callable
 
 from winpty import PtyProcess  # pywinpty; ImportError tells the agent to skip hosting a terminal
 
+PACKAGE_PARENT = Path(__file__).resolve().parent.parent.parent
+
+# Sourced by bash inside WSL when a terminal opens: the user's own ~/.bashrc first, then
+# the `harness` command and `from yourharness import pool`, both talking to the pool.
+WSL_RC = """# YourHarness: makes the pool usable from this Ubuntu shell
+[ -f ~/.bashrc ] && . ~/.bashrc
+export PYTHONPATH="__PKG__${PYTHONPATH:+:$PYTHONPATH}"
+# The pool's address as Windows sees it; inside WSL, Windows' own 127.0.0.1 is the Windows host
+case "$HARNESS_URL" in
+  http://127.0.0.1:*|http://localhost:*)
+    winhost=$(ip route show default 2>/dev/null | awk '{print $3; exit}')
+    [ -n "$winhost" ] && export HARNESS_URL="http://$winhost:${HARNESS_URL##*:}" ;;
+esac
+harness() { python3 -m yourharness "$@"; }
+"""
+
+
+def to_wsl_path(p: Path) -> str:
+    """C:\\Users\\Ana Lee\\x -> /mnt/c/Users/Ana Lee/x (WSL's default mount)."""
+    s = str(p)
+    if len(s) > 1 and s[1] == ":":
+        return f"/mnt/{s[0].lower()}{s[2:].replace(chr(92), '/')}"
+    return s.replace(chr(92), "/")
+
 
 def _wsl_distro() -> str | None:
     wsl = shutil.which("wsl.exe")
@@ -39,13 +63,22 @@ class WinTerminalHost:
         self.env_extra = env_extra
         self.sessions: dict[str, PtyProcess] = {}
         self.distro = _wsl_distro()
+        self.rc = home / "wsl-rc.sh"
+        if self.distro:
+            try:  # LF line endings: bash reads this file
+                self.rc.parent.mkdir(parents=True, exist_ok=True)
+                self.rc.write_bytes(WSL_RC.replace("__PKG__", to_wsl_path(PACKAGE_PARENT)).encode("utf-8"))
+            except OSError:
+                self.rc = None
 
     def describe(self) -> dict:
         if self.distro:
-            return {"shell": "bash", "shared": False, "system": f"{self.distro} on Windows (WSL)", "harness": False}
+            return {"shell": "bash", "shared": False, "system": f"{self.distro} on Windows (WSL)", "harness": bool(self.rc)}
         return {"shell": "PowerShell", "shared": False, "system": "Windows", "harness": False}
 
     def _argv(self) -> str:
+        if self.distro and self.rc:
+            return f'wsl.exe -d "{self.distro}" --cd ~ -e bash --rcfile "{to_wsl_path(self.rc)}" -i'
         if self.distro:
             return f'wsl.exe -d "{self.distro}" --cd ~'
         return "powershell.exe -NoLogo"

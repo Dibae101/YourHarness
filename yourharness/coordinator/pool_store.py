@@ -196,8 +196,9 @@ class PoolStore:
         files = []
         for name, f in self.files.items():
             copies = min((len([i for i in self.holders.get(h, []) if i in live_ids]) for h in f["chunks"]), default=want)
+            on = sorted({self.s.devices[i].name for h in f["chunks"] for i in self.holders.get(h, []) if i in live_ids and i in self.s.devices})
             files.append({"name": name, "size": f["size"], "mtime": f["mtime"], "by": f["by"], "chunks": len(f["chunks"]),
-                          "copies": copies, "wanted": REPLICAS, "available": copies >= 1})
+                          "copies": copies, "wanted": REPLICAS, "available": copies >= 1, "on": on})
         files.sort(key=lambda x: -x["mtime"])
         stored = sum(sum(f["sizes"]) for f in self.files.values())
         free = sum(d.info.get("diskFreeGB") or 0 for d in self.live_agents())

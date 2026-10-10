@@ -377,3 +377,70 @@ def test_discovery_finds_a_coordinator():
 
     found = asyncio.run(main())
     assert found and found[0]["port"] == 5555 and found[0]["host"] == "127.0.0.1"
+
+
+# ---------------------------------------------------------------------- files on each computer
+def test_files_on_each_computer(fresh_coord):
+    import os, urllib.parse
+
+    fresh_coord.agent("Mac", threads=1, workspace=True)
+    fresh_coord.agent("Windows PC", threads=1, workspace=True)
+    fresh_coord.agent("Compute only", threads=1)
+    c = fresh_coord.client("files")
+    devs = {d["name"]: d for d in c.devices()}
+    mac, win, plain = devs["Mac"]["id"], devs["Windows PC"]["id"], devs["Compute only"]["id"]
+    assert devs["Mac"]["files"] and not devs["Compute only"]["files"]
+    auth = {"Authorization": f"Bearer {c.token}"}
+    base = fresh_coord.base
+    q = urllib.parse.quote
+
+    def api(method, path, body=None, data=None):
+        hdr = dict(auth)
+        if body is not None:
+            data = json.dumps(body).encode()
+            hdr["Content-Type"] = "application/json"
+        return http(method, base + path, hdr, data)
+
+    status, body = api("GET", f"/api/fs/{mac}?path=")
+    assert status == 200 and json.loads(body)["entries"] == []
+    assert api("POST", f"/api/fs/{mac}/mkdir", {"path": "Projects"})[0] == 200
+
+    payload = os.urandom(9 * 1024 * 1024 + 7)  # three 4 MB pieces
+    status, body = api("PUT", f"/api/fs/{mac}/upload?path={q('Projects/data.bin')}", data=payload)
+    assert status == 201, body
+    listing = json.loads(api("GET", f"/api/fs/{mac}?path=Projects")[1])
+    assert [(e["name"], e["size"]) for e in listing["entries"]] == [("data.bin", len(payload))]
+    status, got = api("GET", f"/api/fs/{mac}/download?path={q('Projects/data.bin')}")
+    assert status == 200 and got == payload
+
+    # send it to the other computer
+    status, body = api("POST", "/api/fs-copy", {"from": {"device": mac, "path": "Projects/data.bin"}, "to": {"device": win, "dir": ""}})
+    assert status == 200, body
+    assert api("GET", f"/api/fs/{win}/download?path=data.bin")[1] == payload
+    assert api("POST", f"/api/fs/{win}/rename", {"path": "data.bin", "to": "renamed.bin"})[0] == 200
+    assert [e["name"] for e in json.loads(api("GET", f"/api/fs/{win}?path=")[1])["entries"]] == ["renamed.bin"]
+
+    # limits: no escaping the home folder, no access where it isn't allowed, non-empty folders need recursive
+    status, body = api("GET", f"/api/fs/{mac}?path={q('../..')}")
+    assert status == 400 and "outside the home folder" in json.loads(body)["error"]
+    status, body = api("GET", f"/api/fs/{plain}?path=")
+    assert status == 400 and "doesn't allow file access" in json.loads(body)["error"]
+    status, body = api("DELETE", f"/api/fs/{mac}?path=Projects")
+    assert status == 400 and "isn't empty" in json.loads(body)["error"]
+    assert api("DELETE", f"/api/fs/{mac}?path=Projects&recursive=1")[0] == 200
+    assert json.loads(api("GET", f"/api/fs/{mac}?path=")[1])["entries"] == []
+    # nothing was written outside the test's own folders
+    assert not (fresh_coord.tmp / "renamed.bin").exists()
+
+
+def test_live_load_is_reported(fresh_coord):
+    import time
+
+    fresh_coord.agent("Busy", threads=1)
+    c = fresh_coord.client("watcher")
+    for _ in range(40):
+        d = next(x for x in c.devices() if x["name"] == "Busy")
+        if d["load"].get("cpu") is not None:
+            break
+        time.sleep(0.25)
+    assert 0 <= d["load"]["cpu"] <= 100 and d["load"]["memUsedGB"] > 0

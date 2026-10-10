@@ -42,12 +42,14 @@
 </div>
 
 <div id="app" class="app" hidden>
-  <header class="topbar">
-    <span class="wordmark small">YourHarness</span>
-    <div class="top-info">
-      <span id="me-chip" class="chip chip-me"></span>
-      <a id="code-chip" class="chip chip-code" href="#devices"></a>
-      <span id="conn" class="conn" data-state="connecting">Connecting</span>
+  <header class="panelbar">
+    <button id="pb-home" class="pb-logo" type="button" title="Show all apps">YourHarness</button>
+    <div class="pb-status">
+      <span id="conn" class="pb-item conn" data-state="connecting">Connecting</span>
+      <span id="pb-cpu" class="pb-item" title="Processor use across the pool's computers"></span>
+      <span id="me-chip" class="pb-item chip-me"></span>
+      <a id="code-chip" class="pb-item chip-code" href="#devices" title="Join code and pool address"></a>
+      <span id="pb-clock" class="pb-item pb-clock"></span>
     </div>
   </header>
 
@@ -56,71 +58,156 @@
     <button id="replaced-btn" class="btn ghost small" type="button">Use this tab instead</button>
   </div>
 
-  <div class="shell">
-    <nav class="nav" aria-label="Sections">
-      <a class="nav-item" href="#overview" data-nav="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z"/></svg><span>Overview</span></a>
-      <a class="nav-item" href="#terminal" data-nav="terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v14H3z"/><path d="M7 10l3 2-3 2M12 15h5"/></svg><span>Terminal</span></a>
-      <a class="nav-item" href="#jobs" data-nav="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/></svg><span>Jobs</span></a>
-      <a class="nav-item" href="#files" data-nav="files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg><span>Files</span></a>
-      <a class="nav-item" href="#devices" data-nav="devices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v9H3zM1 17h16M18 8h4v11h-4z"/></svg><span>Devices</span></a>
-    </nav>
-
-    <main class="views">
-      <section class="view" data-view="overview" aria-labelledby="ov-h">
-        <div class="view-head">
-          <h1 id="ov-h">Overview</h1>
-          <p id="ov-sub" class="hint"></p>
+  <div id="desk" class="desk-area">
+    <div id="launcher" class="launcher">
+      <p class="launcher-h">Apps</p>
+      <div class="tiles">
+        <button class="tile" type="button" data-open="monitor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v12H3zM8 20h8M12 16v4"/><path d="M6 12l3-3 3 2 4-4 2 2"/></svg><span>System Monitor</span></button>
+        <button class="tile" type="button" data-open="terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v14H3z"/><path d="M7 10l3 2-3 2M12 15h5"/></svg><span>Terminal</span></button>
+        <button class="tile" type="button" data-open="files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg><span>Files</span></button>
+        <button class="tile" type="button" data-open="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/></svg><span>Jobs</span></button>
+        <button class="tile" type="button" data-open="devices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v9H3zM1 17h16M18 8h4v11h-4z"/></svg><span>Devices</span></button>
+      </div>
+    </div>
+      <section class="win" id="win-monitor" data-app="monitor" aria-labelledby="wt-monitor" hidden>
+        <header class="win-bar">
+          <button class="win-back" type="button" data-act="min" aria-label="Back to apps">‹</button>
+          <span class="win-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v12H3zM8 20h8M12 16v4"/><path d="M6 12l3-3 3 2 4-4 2 2"/></svg></span>
+          <span class="win-title" id="wt-monitor">System Monitor</span>
+          <span class="win-sub" id="wsub-monitor"></span>
+          <div class="win-ctrl">
+            <button type="button" data-act="min" aria-label="Minimize System Monitor" title="Minimize">–</button>
+            <button type="button" data-act="max" aria-label="Maximize System Monitor" title="Maximize">▢</button>
+            <button type="button" data-act="close" aria-label="Close System Monitor" title="Close">×</button>
+          </div>
+        </header>
+        <div class="win-body">
+          <div class="mon">
+            <p id="ov-sub" class="hint"></p>
+            <div id="res-totals" class="res-totals"></div>
+            <div class="mon-test">
+              <div>
+                <b>Is the pool really sharing?</b>
+                <p class="hint">Run a short test job. Every sharing device takes pieces, and the bars below show how much each one did.</p>
+              </div>
+              <button id="mon-test-btn" class="btn primary" type="button">Test the pool</button>
+            </div>
+            <div id="ov-job" class="ov-job" hidden></div>
+            <h2 class="section-h">Computers and devices</h2>
+            <div id="machines" class="machines"></div>
+          </div>
         </div>
-        <div id="res-totals" class="res-totals"></div>
-        <div class="ov-actions">
-          <a class="btn primary" href="#terminal">Open a terminal</a>
-          <a class="btn ghost" href="#jobs">Run a job</a>
-          <a class="btn ghost" href="#devices">Add a device</a>
-        </div>
-        <div id="ov-job" class="ov-job" hidden></div>
-        <h2 class="section-h">Computers and devices in the pool</h2>
-        <div id="machines" class="machines"></div>
+        <div class="win-resize" aria-hidden="true"></div>
       </section>
-
-      <section class="view" data-view="terminal" hidden>
-        <section id="workspace" class="workspace" aria-labelledby="ws-h">
-          <div class="view-head">
-            <h1 id="ws-h">Terminal</h1>
-            <p class="hint">Pick a computer. The shell runs on that computer, with its own files, processor and memory.</p>
+      <section class="win" id="win-terminal" data-app="terminal" aria-labelledby="wt-terminal" hidden>
+        <header class="win-bar">
+          <button class="win-back" type="button" data-act="min" aria-label="Back to apps">‹</button>
+          <span class="win-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v14H3z"/><path d="M7 10l3 2-3 2M12 15h5"/></svg></span>
+          <span class="win-title" id="wt-terminal">Terminal</span>
+          <span class="win-sub" id="wsub-terminal"></span>
+          <div class="win-ctrl">
+            <button type="button" data-act="min" aria-label="Minimize Terminal" title="Minimize">–</button>
+            <button type="button" data-act="max" aria-label="Maximize Terminal" title="Maximize">▢</button>
+            <button type="button" data-act="close" aria-label="Close Terminal" title="Close">×</button>
           </div>
-          <div id="ws-hosts" class="host-tabs" role="tablist" aria-label="Computer to open a terminal on"></div>
-          <div id="ws-where" class="where" aria-live="polite"></div>
-          <div class="term-actions">
-            <button id="ws-open" class="btn primary" type="button">Open terminal</button>
-            <button id="ws-max" class="btn ghost" type="button" hidden aria-pressed="false">Full screen</button>
-            <button id="ws-close" class="btn ghost" type="button" hidden>Close terminal</button>
+        </header>
+        <div class="win-body">
+          <div id="workspace" class="workspace">
+            <div id="ws-hosts" class="host-tabs" role="tablist" aria-label="Computer to open a terminal on"></div>
+            <div id="ws-where" class="where" aria-live="polite"></div>
+            <div class="term-actions">
+              <button id="ws-open" class="btn primary" type="button">Open terminal</button>
+              <button id="ws-close" class="btn ghost" type="button" hidden>Close terminal</button>
+            </div>
+            <div id="term-wrap" class="term-wrap" hidden>
+              <div class="term-title" id="term-title"></div>
+              <div id="term" class="term"></div>
+              <div class="keybar" role="toolbar" aria-label="Terminal keys">
+                <button type="button" data-seq="esc">Esc</button>
+                <button type="button" data-seq="tab">Tab</button>
+                <button type="button" data-seq="ctrlc">Ctrl-C</button>
+                <button type="button" data-seq="ctrld">Ctrl-D</button>
+                <button type="button" data-seq="up" aria-label="Up">↑</button>
+                <button type="button" data-seq="down" aria-label="Down">↓</button>
+                <button type="button" data-seq="left" aria-label="Left">←</button>
+                <button type="button" data-seq="right" aria-label="Right">→</button>
+              </div>
+            </div>
+            <p id="ws-status" class="hint"></p>
           </div>
-          <div id="term-wrap" class="term-wrap" hidden>
-            <div class="term-title" id="term-title"></div>
-            <div id="term" class="term"></div>
-            <div class="keybar" role="toolbar" aria-label="Terminal keys">
-              <button type="button" data-seq="esc">Esc</button>
-              <button type="button" data-seq="tab">Tab</button>
-              <button type="button" data-seq="ctrlc">Ctrl-C</button>
-              <button type="button" data-seq="ctrld">Ctrl-D</button>
-              <button type="button" data-seq="up" aria-label="Up">↑</button>
-              <button type="button" data-seq="down" aria-label="Down">↓</button>
-              <button type="button" data-seq="left" aria-label="Left">←</button>
-              <button type="button" data-seq="right" aria-label="Right">→</button>
+        </div>
+        <div class="win-resize" aria-hidden="true"></div>
+      </section>
+      <section class="win" id="win-files" data-app="files" aria-labelledby="wt-files" hidden>
+        <header class="win-bar">
+          <button class="win-back" type="button" data-act="min" aria-label="Back to apps">‹</button>
+          <span class="win-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg></span>
+          <span class="win-title" id="wt-files">Files</span>
+          <span class="win-sub" id="wsub-files"></span>
+          <div class="win-ctrl">
+            <button type="button" data-act="min" aria-label="Minimize Files" title="Minimize">–</button>
+            <button type="button" data-act="max" aria-label="Maximize Files" title="Maximize">▢</button>
+            <button type="button" data-act="close" aria-label="Close Files" title="Close">×</button>
+          </div>
+        </header>
+        <div class="win-body">
+          <div class="fm">
+            <aside class="fm-side" aria-label="Locations">
+              <p class="fm-side-h">Computers</p>
+              <ul id="fm-locs" class="fm-locs"></ul>
+              <p class="fm-side-h">Across the pool</p>
+              <ul id="fm-locs-pool" class="fm-locs"></ul>
+            </aside>
+            <div class="fm-main">
+              <div class="fm-bar">
+                <button id="fm-up" class="btn ghost small" type="button" aria-label="Up one folder">↑ Up</button>
+                <nav id="fm-crumbs" class="fm-crumbs" aria-label="Folder"></nav>
+              </div>
+              <div class="fm-bar fm-tools">
+                <label class="btn primary small file-btn">Upload here<input id="fm-upload" type="file" multiple></label>
+                <button id="fm-new" class="btn ghost small" type="button">New folder</button>
+                <button id="fm-refresh" class="btn ghost small" type="button">Refresh</button>
+                <label class="check fm-hidden"><input id="fm-show-hidden" type="checkbox"> Hidden files</label>
+              </div>
+              <p id="fm-info" class="hint"></p>
+              <p id="fm-status" class="hint" aria-live="polite"></p>
+              <div class="scroll-x"><table class="fm-table">
+                <thead><tr><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Modified</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+                <tbody id="fm-rows"></tbody>
+              </table></div>
             </div>
           </div>
-          <p id="ws-status" class="hint"></p>
-        </section>
-      </section>
-
-      <section class="view" data-view="jobs" hidden>
-        <div class="view-head">
-          <h1>Jobs</h1>
-          <p class="hint">A job is split into pieces, and every device that is sharing works on them at once.</p>
+          <form id="fm-ask" class="dialog" hidden>
+            <h3 id="fm-ask-title"></h3>
+            <label class="field"><span>Name</span><input id="fm-ask-input" autocomplete="off" spellcheck="false"></label>
+            <div class="dialog-actions"><button class="btn ghost" type="button" id="fm-ask-cancel">Cancel</button><button class="btn primary" type="submit" id="fm-ask-ok">OK</button></div>
+          </form>
+          <form id="fm-send" class="dialog" hidden>
+            <h3>Send a copy to another computer</h3>
+            <p id="fm-send-what" class="hint"></p>
+            <label class="field"><span>Computer</span><select id="fm-send-to"></select></label>
+            <label class="field"><span>Folder on that computer (leave empty for its home folder)</span><input id="fm-send-dir" autocomplete="off" spellcheck="false" placeholder="Documents"></label>
+            <p id="fm-send-err" class="error" role="alert"></p>
+            <div class="dialog-actions"><button class="btn ghost" type="button" id="fm-send-cancel">Cancel</button><button class="btn primary" type="submit">Send copy</button></div>
+          </form>
         </div>
-        <div class="grid-2">
-          <div class="stack">
-      <section id="run" class="panel run" aria-labelledby="run-h">
+        <div class="win-resize" aria-hidden="true"></div>
+      </section>
+      <section class="win" id="win-jobs" data-app="jobs" aria-labelledby="wt-jobs" hidden>
+        <header class="win-bar">
+          <button class="win-back" type="button" data-act="min" aria-label="Back to apps">‹</button>
+          <span class="win-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/></svg></span>
+          <span class="win-title" id="wt-jobs">Jobs</span>
+          <span class="win-sub" id="wsub-jobs"></span>
+          <div class="win-ctrl">
+            <button type="button" data-act="min" aria-label="Minimize Jobs" title="Minimize">–</button>
+            <button type="button" data-act="max" aria-label="Maximize Jobs" title="Maximize">▢</button>
+            <button type="button" data-act="close" aria-label="Close Jobs" title="Close">×</button>
+          </div>
+        </header>
+        <div class="win-body">
+          <div class="grid-2">
+            <div class="stack"><section id="run" class="panel run" aria-labelledby="run-h">
         <h2 id="run-h">Run a job</h2>
         <div class="kinds" role="radiogroup" aria-label="Job type">
           <label><input type="radio" name="kind" value="mandelbrot" checked><span>Render a fractal</span></label>
@@ -223,10 +310,8 @@
           <p id="run-error" class="error" role="alert"></p>
           <button id="run-btn" class="btn primary" type="submit">Run on the pool</button>
         </form>
-      </section>
-          </div>
-          <div class="stack">
-      <section id="current" class="panel current" aria-labelledby="current-h">
+      </section></div>
+            <div class="stack"><section id="current" class="panel current" aria-labelledby="current-h">
         <div class="panel-head">
           <h2 id="current-h">Current run</h2>
           <div class="head-actions">
@@ -247,48 +332,28 @@
             <tbody></tbody>
           </table>
         </div>
-      </section>
-      <section id="history-panel" class="panel history" aria-labelledby="history-h">
+      </section><section id="history-panel" class="panel history" aria-labelledby="history-h">
         <h2 id="history-h">All runs</h2>
         <ol id="history" class="history-list"></ol>
-      </section>
+      </section></div>
           </div>
         </div>
+        <div class="win-resize" aria-hidden="true"></div>
       </section>
-
-      <section class="view" data-view="files" hidden>
-        <div class="view-head">
-          <h1>Files</h1>
-          <p class="hint">Pooled storage spreads files over the computers. The shared folder lives on the computer that runs the pool and is what "Search a file" reads.</p>
-        </div>
-        <div class="grid-2">
-      <section id="pooled" class="panel files" aria-labelledby="pooled-h">
-        <div class="panel-head">
-          <h2 id="pooled-h">Pooled storage</h2>
-          <label class="btn ghost file-btn">Add files<input id="pool-input" type="file" multiple></label>
-        </div>
-        <p id="pool-info" class="hint"></p>
-        <p id="pool-status" class="hint" aria-live="polite"></p>
-        <ul id="pool-list" class="file-list"></ul>
-      </section>
-      <section id="files" class="panel files" aria-labelledby="files-h">
-        <div class="panel-head">
-          <h2 id="files-h">Shared files</h2>
-          <label class="btn ghost file-btn">Add files<input id="file-input" type="file" multiple></label>
-        </div>
-        <p id="upload-status" class="hint" aria-live="polite"></p>
-        <ul id="file-list" class="file-list"></ul>
-      </section>
-        </div>
-      </section>
-
-      <section class="view" data-view="devices" hidden>
-        <div class="view-head">
-          <h1>Devices</h1>
-          <p class="hint">Add devices, change what this device shares, and remove devices you no longer use.</p>
-        </div>
-        <div class="grid-2">
-      <section id="add" class="panel add" aria-labelledby="add-h">
+      <section class="win" id="win-devices" data-app="devices" aria-labelledby="wt-devices" hidden>
+        <header class="win-bar">
+          <button class="win-back" type="button" data-act="min" aria-label="Back to apps">‹</button>
+          <span class="win-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v9H3zM1 17h16M18 8h4v11h-4z"/></svg></span>
+          <span class="win-title" id="wt-devices">Devices</span>
+          <span class="win-sub" id="wsub-devices"></span>
+          <div class="win-ctrl">
+            <button type="button" data-act="min" aria-label="Minimize Devices" title="Minimize">–</button>
+            <button type="button" data-act="max" aria-label="Maximize Devices" title="Maximize">▢</button>
+            <button type="button" data-act="close" aria-label="Close Devices" title="Close">×</button>
+          </div>
+        </header>
+        <div class="win-body">
+          <div class="grid-2"><section id="add" class="panel add" aria-labelledby="add-h">
         <h2 id="add-h">Add a device</h2>
         <p class="hint"><b>Mac or Windows with the YourHarness app:</b> File → Join another pool, then type the address and code below. <b>iPhone, iPad or any browser:</b> open the address and type the code.</p>
         <div class="field">
@@ -328,8 +393,7 @@
         </div>
         <p class="hint">The commands above are for computers without the app: a Linux machine, or Ubuntu set up under WSL. Anyone with the code can join the pool and run code on its devices, so share it only with people you trust.</p>
         <p id="add-status" class="hint" aria-live="polite"></p>
-      </section>
-      <section id="me" class="panel me" aria-labelledby="me-h">
+      </section><section id="me" class="panel me" aria-labelledby="me-h">
         <h2 id="me-h">This device</h2>
         <label class="switch">
           <input id="me-share" type="checkbox">
@@ -343,9 +407,8 @@
         <label class="field"><span>Device name</span><input id="me-name" maxlength="40" autocomplete="off"></label>
         <p id="me-awake" class="hint"></p>
         <button id="me-leave" class="btn ghost" type="button">Leave the pool on this device</button>
-      </section>
-        </div>
-        <section id="resources" class="panel resources" aria-labelledby="res-h">
+      </section></div>
+          <section id="resources" class="panel resources" aria-labelledby="res-h">
           <h2 id="res-h">Every connection</h2>
           <p class="hint">Each row is one connection to the pool. A computer running the YourHarness app and a browser tab shows twice here, and once in Overview.</p>
           <div class="scroll-x"><table id="res-table" class="res-table">
@@ -353,9 +416,18 @@
             <tbody></tbody>
           </table></div>
         </section>
+        </div>
+        <div class="win-resize" aria-hidden="true"></div>
       </section>
-    </main>
   </div>
+
+  <nav class="dock" aria-label="Apps">
+    <button class="dock-item" type="button" data-open="monitor" title="System Monitor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v12H3zM8 20h8M12 16v4"/><path d="M6 12l3-3 3 2 4-4 2 2"/></svg><span>Monitor</span></button>
+    <button class="dock-item" type="button" data-open="terminal" title="Terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v14H3z"/><path d="M7 10l3 2-3 2M12 15h5"/></svg><span>Terminal</span></button>
+    <button class="dock-item" type="button" data-open="files" title="Files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg><span>Files</span></button>
+    <button class="dock-item" type="button" data-open="jobs" title="Jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/></svg><span>Jobs</span></button>
+    <button class="dock-item" type="button" data-open="devices" title="Devices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v9H3zM1 17h16M18 8h4v11h-4z"/></svg><span>Devices</span></button>
+  </nav>
 </div>
 
 </body>

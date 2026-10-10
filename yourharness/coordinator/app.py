@@ -112,6 +112,13 @@ class Coordinator:
         r.add_put("/api/pool/{name:.+}", self.pool_put)
         r.add_get("/api/pool/{name:.+}", self.pool_get)
         r.add_delete("/api/pool/{name:.+}", self.pool_delete)
+        r.add_get("/api/fs/{device_id}", self.fs_list)
+        r.add_get("/api/fs/{device_id}/download", self.fs_download)
+        r.add_put("/api/fs/{device_id}/upload", self.fs_upload)
+        r.add_post("/api/fs/{device_id}/mkdir", self.fs_mkdir)
+        r.add_post("/api/fs/{device_id}/rename", self.fs_rename)
+        r.add_delete("/api/fs/{device_id}", self.fs_delete)
+        r.add_post("/api/fs-copy", self.fs_copy)
         r.add_get("/install.sh", self.install_sh)
         r.add_get("/install.ps1", self.install_ps1)
         r.add_get("/agent.tar.gz", self.agent_tar)
@@ -312,6 +319,102 @@ class Coordinator:
         if not self.sched.pool_store.delete(name):
             raise fail(404, f"There is no pooled file named {name}.")
         return web.json_response({"ok": True})
+
+    # ------------------------------------------------------------------ files on each computer
+    async def _fs(self, coro):
+        from .remote_fs import RemoteFSError
+
+        try:
+            return await coro
+        except RemoteFSError as e:
+            raise fail(400, str(e))
+
+    async def fs_list(self, request):
+        self.authed(request)
+        res = await self._fs(self.sched.remote_fs.ask(request.match_info["device_id"], "list", path=request.query.get("path", "")))
+        return web.json_response({k: res[k] for k in ("path", "entries", "truncated", "free", "total")})
+
+    async def fs_download(self, request):
+        from urllib.parse import quote
+
+        from .remote_fs import RemoteFSError
+
+        self.authed(request)
+        dev, path = request.match_info["device_id"], request.query.get("path", "")
+        info = await self._fs(self.sched.remote_fs.ask(dev, "stat", path=path))
+        if info.get("dir"):
+            raise fail(400, "That's a folder. Pick a file.")
+        resp = web.StreamResponse(headers={
+            "Content-Type": "application/octet-stream", "Content-Length": str(info["size"]),
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(info['name'])}",
+            "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox", "Cache-Control": "no-store",
+        })
+        await resp.prepare(request)
+        try:
+            async for piece in self.sched.remote_fs.read_pieces(dev, path):
+                await resp.write(piece)
+        except RemoteFSError:
+            pass  # the computer left mid-download; the browser sees a short file and reports it
+        await resp.write_eof()
+        return resp
+
+    async def fs_upload(self, request):
+        self.authed(request, write=True)
+        dev, path = request.match_info["device_id"], request.query.get("path", "")
+        limit = self.cfg.max_upload_mb * 1024 * 1024
+
+        async def body():
+            seen = 0
+            async for part in request.content.iter_chunked(256 * 1024):
+                seen += len(part)
+                if seen > limit:
+                    raise web.HTTPRequestEntityTooLarge(max_size=limit, actual_size=seen, text=f"That file is over the {limit // 2**20} MB limit.")
+                yield part
+
+        size = await self._fs(self.sched.remote_fs.write_stream(dev, path, body()))
+        self.sched.broadcast({"type": "fs.changed", "device": dev, "path": path.rsplit("/", 1)[0] if "/" in path else ""})
+        return web.json_response({"ok": True, "size": size}, status=201)
+
+    async def _fs_body(self, request) -> dict:
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            body = None
+        if not isinstance(body, dict):
+            raise fail(400, "Send JSON.")
+        return body
+
+    async def fs_mkdir(self, request):
+        self.authed(request, write=True)
+        body = await self._fs_body(request)
+        res = await self._fs(self.sched.remote_fs.ask(request.match_info["device_id"], "mkdir", path=str(body.get("path", ""))))
+        return web.json_response({"ok": True, "path": res.get("path")})
+
+    async def fs_rename(self, request):
+        self.authed(request, write=True)
+        body = await self._fs_body(request)
+        await self._fs(self.sched.remote_fs.ask(request.match_info["device_id"], "rename", path=str(body.get("path", "")), to=str(body.get("to", ""))))
+        return web.json_response({"ok": True})
+
+    async def fs_delete(self, request):
+        self.authed(request, write=True)
+        await self._fs(self.sched.remote_fs.ask(request.match_info["device_id"], "delete", path=request.query.get("path", ""),
+                                                 recursive=request.query.get("recursive") == "1"))
+        return web.json_response({"ok": True})
+
+    async def fs_copy(self, request):
+        """Copy a file from one computer to a folder on another, piece by piece through the coordinator."""
+        self.authed(request, write=True)
+        body = await self._fs_body(request)
+        src, dst = body.get("from") or {}, body.get("to") or {}
+        fs = self.sched.remote_fs
+        info = await self._fs(fs.ask(str(src.get("device", "")), "stat", path=str(src.get("path", ""))))
+        if info.get("dir"):
+            raise fail(400, "Copying whole folders isn't supported yet. Pick a file.")
+        target = "/".join(x for x in (str(dst.get("dir", "")).strip("/"), info["name"]) if x)
+        size = await self._fs(fs.write_stream(str(dst.get("device", "")), target, fs.read_pieces(str(src.get("device", "")), str(src.get("path", "")))))
+        self.sched.broadcast({"type": "fs.changed", "device": str(dst.get("device", "")), "path": str(dst.get("dir", "")).strip("/")})
+        return web.json_response({"ok": True, "size": size, "path": target})
 
     # ------------------------------------------------------------------ agent install
     async def install_sh(self, request):

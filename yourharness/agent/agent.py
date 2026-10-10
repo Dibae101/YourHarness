@@ -25,6 +25,7 @@ log = logging.getLogger("yourharness")
 
 BEAT_S = float(os.environ.get("HARNESS_BEAT_S", 4))  # the coordinator marks a device as not responding after 20 s
 INFO_S = 30.0
+LOAD_S = float(os.environ.get("HARNESS_LOAD_S", 2))  # how often live CPU and memory use is reported
 
 
 class SignInError(Exception):
@@ -93,6 +94,12 @@ class Agent:
         self.params: dict[str, dict] = {}
         self.pool = SlotPool({"server": cfg.server, "token": cfg.token}, self._piece_done, cfg.home / "work")
         self.terms = None
+        self.files = None
+        self.cpu = sysinfo.CpuMeter()
+        if cfg.workspace:  # a computer that hosts a terminal also lets the pool browse its home folder
+            from .files import HomeFiles
+
+            self.files = HomeFiles()
         if cfg.workspace:
             env = {"HARNESS_URL": cfg.server, "HARNESS_TOKEN": cfg.token}
             if os.name == "posix":
@@ -159,6 +166,7 @@ class Agent:
             "type": "hello", "kind": "agent", "name": self.cfg.name, "threads": self.cfg.threads, "sharing": self.cfg.sharing,
             "runtimes": ["python"], "info": sysinfo.collect(str(self.cfg.home)), "version": __version__,
             "workspace": self.terms.describe() if self.terms else None, "coordinator": self.cfg.coordinator,
+            "files": self.files.describe() if self.files else None,
         }
 
     async def _connect_once(self) -> int | None:
@@ -168,7 +176,7 @@ class Agent:
                 self.ws = ws
                 self.outbox = asyncio.Queue()
                 self.send(self._hello())
-                tasks = [asyncio.ensure_future(t) for t in (self._writer(ws, self.outbox), self._beat(), self._refresh_info())]
+                tasks = [asyncio.ensure_future(t) for t in (self._writer(ws, self.outbox), self._beat(), self._refresh_info(), self._report_load())]
                 try:
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
@@ -196,6 +204,15 @@ class Agent:
         while True:
             await asyncio.sleep(BEAT_S)
             self.send({"type": "beat"})
+
+    async def _report_load(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(LOAD_S)
+            cpu = self.cpu.sample()
+            total, avail = await loop.run_in_executor(None, sysinfo.memory)
+            used = round((total - avail) / sysinfo.GB, 1) if total and avail else None
+            self.send({"type": "update", "load": {"cpu": cpu, "memUsedGB": used}})
 
     async def _refresh_info(self) -> None:
         loop = asyncio.get_running_loop()
@@ -231,6 +248,8 @@ class Agent:
             log.warning("%s", m.get("message"))
         elif kind in ("store.put", "store.get", "store.del"):
             asyncio.ensure_future(self._store(m))
+        elif kind == "fs":
+            asyncio.ensure_future(self._fs(m))
         elif isinstance(kind, str) and kind.startswith("term."):
             self._terminal(m)
 
@@ -256,6 +275,23 @@ class Agent:
         except Exception as e:
             if rid:
                 self.send({"type": "store.error", "rid": rid, "error": f"{type(e).__name__}: {e}"})
+
+    async def _fs(self, m: dict) -> None:
+        rid = m.get("rid")
+        if self.files is None:
+            self.send({"type": "fs.error", "rid": rid, "error": "This computer doesn't allow file access."})
+            return
+        from .files import FileAccessError
+
+        try:
+            res = await asyncio.get_running_loop().run_in_executor(None, self.files.handle, str(m.get("op")), m)
+            self.send({"type": "fs.reply", "rid": rid, **res})
+        except FileAccessError as e:
+            self.send({"type": "fs.error", "rid": rid, "error": str(e)})
+        except OSError as e:
+            self.send({"type": "fs.error", "rid": rid, "error": e.strerror or str(e)})
+        except Exception as e:  # keep the agent running whatever a request does
+            self.send({"type": "fs.error", "rid": rid, "error": f"{type(e).__name__}: {e}"})
 
     @staticmethod
     def _write_chunk(path: Path, data: bytes) -> None:

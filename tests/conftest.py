@@ -70,7 +70,9 @@ class Coord:
 
     def agent(self, name: str, threads: int = 2, workspace: bool = False) -> Proc:
         home = self.tmp / f"agent-{name.replace(' ', '-')}"
-        env = {**os.environ, "YOURHARNESS_HOME": str(home), "HARNESS_BEAT_S": "0.5"}
+        (home / "home").mkdir(parents=True, exist_ok=True)
+        # HOME is the folder the Files app may browse; keep it inside the test's temp folder
+        env = {**os.environ, "YOURHARNESS_HOME": str(home), "HARNESS_BEAT_S": "0.5", "HOME": str(home / "home")}
         args = [sys.executable, "-m", "yourharness", "agent", "--join", self.link, "--threads", str(threads), "--name", name]
         if workspace:
             args.append("--workspace")
