@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from collections import deque
@@ -21,6 +22,7 @@ from pathlib import Path
 
 from . import files as shared_files
 from .jobkinds import KINDS, PlanContext, UserError, clamp_int, clamp_num
+from .pool_store import PoolStore
 from .terminals import Terminals
 
 log = logging.getLogger("yourharness")
@@ -70,7 +72,8 @@ def sanitize_workspace(ws) -> dict | None:
 
 
 class Device:
-    def __init__(self, rec: dict, ws, hello: dict, color: str):
+    def __init__(self, rec: dict, ws, hello: dict, color: str, host: str = ""):
+        self.host = host
         self.id: str = rec["id"]
         self.kind: str = rec["kind"]
         self.ws = ws
@@ -192,6 +195,8 @@ class Scheduler:
         self.seq = 0
         self.file_meta: dict[str, dict] = {}
         self.terminals = Terminals(self)
+        self.pool_store = PoolStore(self, store.dir)
+        self.repair_s = float(os.environ.get("HARNESS_REPAIR_S", 10))
         self._devices_pending = False
 
     # ------------------------------------------------------------------ messaging
@@ -222,7 +227,7 @@ class Scheduler:
         return {
             "id": d.id, "name": d.name, "kind": d.kind, "color": d.color, "info": d.info, "threads": d.threads,
             "sharing": d.sharing, "runtimes": sorted(d.runtimes), "workspace": d.workspace, "busy": len(d.inflight),
-            "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale,
+            "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host,
         }
 
     def device_list(self) -> list[dict]:
@@ -244,20 +249,21 @@ class Scheduler:
             return rec["color"]
         return next((c for c in WIRE_COLORS if c not in in_use), WIRE_COLORS[len(self.devices) % len(WIRE_COLORS)])
 
-    def connect(self, rec: dict, ws, hello: dict) -> Device:
+    def connect(self, rec: dict, ws, hello: dict, host: str = "") -> Device:
         previous = self.devices.pop(rec["id"], None)
         if previous is not None:  # the same device connected again, from another tab or after a drop
             self.requeue_device(previous)
             self.terminals.device_gone(previous)
+            self.pool_store.device_gone(previous)
             previous.close(4002, "This device connected again from somewhere else.")
-        d = Device(rec, ws, hello, self.pick_color(rec))
+        d = Device(rec, ws, hello, self.pick_color(rec), host)
         self.store.update_device(d.id, name=d.name, color=d.color)
         self.devices[d.id] = d
         latest = self.running_job() or (self.jobs[-1] if self.jobs else None)
         d.send({
             "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind,
             "devices": self.device_list(), "jobs": [j.summary() for j in self.jobs], "snapshot": self.snapshot(latest),
-            "files": self.list_files(), "joinToken": self.store.join_token, "joinCode": self.store.join_code,
+            "files": self.list_files(), "joinToken": self.store.join_token, "joinCode": self.store.join_code, "pool": self.pool_store.listing(),
         })
         log.info("%s joined (%s, %s threads)", d.name, d.kind, d.threads)
         self.broadcast_devices()
@@ -270,7 +276,9 @@ class Scheduler:
             del self.devices[d.id]
             self.requeue_device(d)
             self.terminals.device_gone(d)
+            self.pool_store.device_gone(d)
             log.info("%s left", d.name)
+            self.pool_store.changed()
             self.broadcast_devices()
             self.dispatch()
 
@@ -334,6 +342,9 @@ class Scheduler:
             job = self.find_job(msg.get("jobId"))
             if job:
                 d.send({"type": "snapshot", "snapshot": self.snapshot(job)})
+        elif isinstance(kind, str) and kind.startswith("store."):
+            if d.kind == "agent":
+                self.pool_store.handle(d, msg)
         elif isinstance(kind, str) and kind.startswith("term."):
             if d.kind == "agent":
                 self.terminals.from_agent(d, msg)
@@ -554,9 +565,13 @@ class Scheduler:
             self.dispatch()
 
     async def run_maintenance(self, every_s: float = 1.0) -> None:
+        last_repair = 0.0
         while True:
             await asyncio.sleep(every_s)
             try:
                 self.sweep()
+                if time.monotonic() - last_repair >= self.repair_s:
+                    last_repair = time.monotonic()
+                    asyncio.ensure_future(self.pool_store.repair())
             except Exception:
                 log.exception("maintenance failed")

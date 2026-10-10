@@ -55,6 +55,7 @@ def run(chunk, total):
     devices: [],
     jobs: [],
     files: [],
+    pool: { files: [], agents: 0, storedBytes: 0, freeGB: 0, replicas: 2 },
     view: null, // { jobId, colors: [], values: [] | null }
     follow: true,
     ws: null,
@@ -189,6 +190,7 @@ def run(chunk, total):
         S.devices = m.devices;
         S.jobs = m.jobs;
         S.files = m.files || [];
+        if (m.pool) S.pool = m.pool;
         if (m.name && m.name !== S.name) { S.name = m.name; store.set('name', S.name); }
         showApp();
         setConn('online');
@@ -231,6 +233,10 @@ def run(chunk, total):
       case 'files':
         S.files = m.files;
         renderFiles();
+        break;
+      case 'pool':
+        S.pool = m.pool;
+        renderPool();
         break;
       case 'error':
         $('#run-error').textContent = m.message;
@@ -590,18 +596,26 @@ def run(chunk, total):
     const list = S.devices.slice().sort((a, b) => (b.id === S.id) - (a.id === S.id) || a.joinedAt - b.joinedAt);
     const live = list.filter((d) => d.sharing && !d.stale);
     const threads = live.reduce((a, d) => a + d.threads, 0);
-    const cores = live.reduce((a, d) => a + d.info.cores, 0);
-    const memDevs = live.filter((d) => d.info.memoryGB);
+    // A computer running an agent and a browser tab is one machine: count its cores and memory once.
+    const byHost = new Map();
+    for (const d of live) {
+      const key = d.host || d.id;
+      const cur = byHost.get(key);
+      if (!cur || (d.kind === 'agent' && cur.kind !== 'agent')) byHost.set(key, d);
+    }
+    const machines = [...byHost.values()];
+    const cores = machines.reduce((a, d) => a + d.info.cores, 0);
+    const memDevs = machines.filter((d) => d.info.memoryGB);
     const mem = memDevs.reduce((a, d) => a + d.info.memoryGB, 0);
-    const memFree = live.reduce((a, d) => a + (d.info.memoryFreeGB || 0), 0);
+    const memFree = machines.reduce((a, d) => a + (d.info.memoryFreeGB || 0), 0);
     const disk = live.reduce((a, d) => a + (d.info.diskFreeGB || 0), 0);
     const browserStore = live.filter((d) => d.kind !== 'agent').reduce((a, d) => a + (d.info.storageGB || 0), 0);
     const gpuDevs = live.filter((d) => d.info.gpus && d.info.gpus.length).length;
     const tile = (big, label, sub) => `<div class="res-tile"><b>${big}</b><span>${label}</span><span>${sub}</span></div>`;
     $('#res-totals').innerHTML = [
-      tile(`${live.length} of ${list.length}`, 'devices sharing', list.length - live.length ? `${list.length - live.length} not sharing` : 'all of them'),
+      tile(`${machines.length}`, machines.length === 1 ? 'computer or device sharing' : 'computers and devices sharing', list.length - live.length ? `${list.length - live.length} not sharing` : live.length > machines.length ? 'a browser tab on a computer with an agent counts once' : 'all of them'),
       tile(nf.format(threads), 'threads of compute', `of ${nf.format(cores)} cores on those devices`),
-      tile(mem ? `${gb(mem)} GB` : 'None reported', 'memory', mem ? `${gb(memFree)} GB free, reported by ${memDevs.length} of ${live.length}` : 'iPhone and iPad browsers do not report it'),
+      tile(mem ? `${gb(mem)} GB` : 'None reported', 'memory', mem ? `${gb(memFree)} GB free, reported by ${memDevs.length} of ${machines.length}` : 'iPhone and iPad browsers do not report it'),
       tile(`${gb(disk)} GB`, 'free disk on computers', browserStore ? `plus up to ${gb(browserStore)} GB of browser storage` : 'agents report their disk'),
       tile(nf.format(gpuDevs), gpuDevs === 1 ? 'device with graphics' : 'devices with graphics', 'WebGPU in browsers, Metal or CUDA on computers'),
     ].join('');
@@ -850,6 +864,27 @@ def run(chunk, total):
     $('#g-empty').hidden = S.files.length > 0;
   }
 
+  function renderPool() {
+    const p = S.pool;
+    $('#pool-info').textContent = p.agents
+      ? `Spread over ${p.agents} ${p.agents === 1 ? 'computer' : 'computers'}, about ${nf.format(p.freeGB)} GB free. ${fmtSize(p.storedBytes)} stored. Each file is kept on ${Math.min(p.replicas, p.agents)} ${Math.min(p.replicas, p.agents) === 1 ? 'computer' : 'different computers'}.`
+      : 'No computer is connected to hold files. Add a Mac, Linux or Windows computer under "Add a device". Phones and tablets can add and read files but do not hold them.';
+    $('#pool-list').innerHTML = p.files.length
+      ? p.files.map((f) => {
+        const state = !f.available ? 'Offline: a computer holding it is away'
+          : f.copies < Math.min(f.wanted, p.agents) ? `${f.copies} of ${Math.min(f.wanted, p.agents)} copies, repairing` : `${f.copies} ${f.copies === 1 ? 'copy' : 'copies'}`;
+        return `<li>
+          <span class="file-name">${esc(f.name)}</span>
+          <span class="file-meta">${fmtSize(f.size)}, ${esc(state)}${f.by ? `, added by ${esc(f.by)}` : ''}</span>
+          <span class="file-actions">
+            ${f.available ? `<a class="btn ghost small" href="/api/pool/${encodeURIComponent(f.name)}" download="${esc(f.name)}">Download</a>` : ''}
+            <button class="btn ghost small danger" type="button" data-pool-delete="${esc(f.name)}" aria-label="Delete ${esc(f.name)}">Delete</button>
+          </span>
+        </li>`;
+      }).join('')
+      : '<li class="empty">Nothing here yet. Files added here are cut into pieces and spread over the computers in the pool.</li>';
+  }
+
   function renderMe() {
     $('#me').style.setProperty('--me', S.color || 'var(--ok)');
     $('#me-share').checked = S.sharing;
@@ -876,6 +911,7 @@ def run(chunk, total):
     renderCurrent(true);
     renderHistory();
     renderFiles();
+    renderPool();
     renderAdd();
     renderWorkspace();
   }
@@ -1105,10 +1141,10 @@ def run(chunk, total):
       }
     }
   });
-  function uploadFile(file, onPct) {
+  function uploadFile(file, onPct, base = '/api/files') {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('PUT', `/api/files/${encodeURIComponent(file.name)}`);
+      xhr.open('PUT', `${base}/${encodeURIComponent(file.name)}`);
       xhr.withCredentials = true;
       xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) onPct(Math.round((ev.loaded / ev.total) * 100)); };
       xhr.onload = () => {
@@ -1121,6 +1157,27 @@ def run(chunk, total):
       xhr.send(file);
     });
   }
+  $('#pool-input').addEventListener('change', async (e) => {
+    const files = [...e.target.files];
+    e.target.value = '';
+    const status = $('#pool-status');
+    for (const f of files) {
+      try {
+        await uploadFile(f, (pct) => { status.textContent = `Adding ${f.name}: ${pct}%`; }, '/api/pool');
+        status.textContent = `Added ${f.name}.`;
+      } catch (err) {
+        status.textContent = `Could not add ${f.name}. ${err.message}`;
+      }
+    }
+  });
+  $('#pool-list').addEventListener('click', async (e) => {
+    const del = e.target.closest('button[data-pool-delete]');
+    if (!del) return;
+    const name = del.dataset.poolDelete;
+    if (!confirm(`Delete ${name} from pooled storage? This removes every copy.`)) return;
+    const res = await fetch(`/api/pool/${encodeURIComponent(name)}`, { method: 'DELETE', credentials: 'same-origin' });
+    if (!res.ok) $('#pool-status').textContent = `Could not delete ${name}.`;
+  });
   $('#file-list').addEventListener('click', async (e) => {
     const del = e.target.closest('button[data-delete]');
     const search = e.target.closest('button[data-search]');

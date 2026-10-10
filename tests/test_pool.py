@@ -300,3 +300,62 @@ def test_windows_installer_is_served(coord):
     status, body = http("GET", f"{coord.base}/install.ps1")
     text = body.decode()
     assert status == 200 and coord.base in text and "wsl.exe" in text and "--workspace" in text
+
+
+# ---------------------------------------------------------------------- pooled storage
+def test_pooled_storage_survives_a_computer_leaving(fresh_coord):
+    import hashlib, os, time
+
+    agents = [fresh_coord.agent(f"Disk {n}", threads=1) for n in "ABC"]
+    c = fresh_coord.client("storage")
+    data = os.urandom(10 * 1024 * 1024 + 123)  # three chunks, the last one short
+    src = fresh_coord.tmp / "big.bin"
+    src.write_bytes(data)
+    assert c.pool_put(src)["size"] == len(data)
+
+    info = c.pool_files()
+    f = next(x for x in info["files"] if x["name"] == "big.bin")
+    assert f["chunks"] == 3 and f["copies"] == 2 and info["agents"] == 3
+
+    out = fresh_coord.tmp / "back.bin"
+    c.pool_get("big.bin", out)
+    assert hashlib.sha256(out.read_bytes()).hexdigest() == hashlib.sha256(data).hexdigest()
+
+    # find a computer that holds chunks and take it away
+    index = json.loads((fresh_coord.tmp / "data" / "pool-index.json").read_text())
+    counts: dict[str, int] = {}
+    for ids in index["holders"].values():
+        for i in ids:
+            counts[i] = counts.get(i, 0) + 1
+    assert len(counts) >= 2 and all(n >= 1 for n in counts.values())
+    victim = max(counts, key=counts.get)
+    names = {d["id"]: d["name"] for d in c.devices()}
+    agents[["Disk A", "Disk B", "Disk C"].index(names[victim])].stop()
+
+    for _ in range(100):  # the file stays readable from the other copies
+        if len(c.devices()) == 3:  # the coordinator itself isn't an agent here; wait for the drop
+            time.sleep(0.1)
+        else:
+            break
+    out2 = fresh_coord.tmp / "back2.bin"
+    c.pool_get("big.bin", out2)
+    assert out2.read_bytes() == data
+
+    # with two computers left, every chunk gets its second copy back
+    for _ in range(150):
+        f = next(x for x in c.pool_files()["files"] if x["name"] == "big.bin")
+        if f["copies"] == 2:
+            break
+        time.sleep(0.2)
+    assert f["copies"] == 2, f
+
+    c.pool_rm("big.bin")
+    assert not c.pool_files()["files"]
+
+
+def test_pooled_storage_needs_a_computer(fresh_coord):
+    c = fresh_coord.client("storage")
+    src = fresh_coord.tmp / "x.bin"
+    src.write_bytes(b"hello")
+    with pytest.raises(PoolError, match="No computer is connected"):
+        c.pool_put(src)

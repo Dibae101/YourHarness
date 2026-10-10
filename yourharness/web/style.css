@@ -64,7 +64,7 @@ code { font-family: var(--mono); font-size: 0.9em; }
 }
 .layout { max-width: 1240px; margin: 0 auto; padding: 4px 20px 56px; display: flex; flex-direction: column; gap: 20px; }
 .col { display: contents; }
-#workspace, #resources { order: 0; } #pool { order: 1; } #run { order: 2; } #current { order: 3; } #me { order: 4; } #add { order: 5; } #files { order: 6; } #history-panel { order: 7; }
+#workspace, #resources { order: 0; } #pool { order: 1; } #run { order: 2; } #current { order: 3; } #me { order: 4; } #add { order: 5; } #pooled { order: 6; } #files { order: 7; } #history-panel { order: 8; }
 
 @media (min-width: 960px) {
   .layout { display: grid; grid-template-columns: minmax(320px, 5fr) 7fr; gap: 28px; align-items: start; }

@@ -140,6 +140,46 @@ class Client:
     def delete(self, name: str) -> None:
         self.request("DELETE", f"/api/files/{urllib.parse.quote(name, safe='')}")
 
+    # --- pooled storage: chunks spread over the computers, two copies of each
+    def pool_files(self) -> dict:
+        return self.request("GET", "/api/pool")
+
+    def pool_put(self, path: str | Path, name: str | None = None) -> dict:
+        path = Path(path)
+        target = urllib.parse.quote(name or path.name, safe="")
+        hdrs = {"Authorization": f"Bearer {self.token}", "Content-Length": str(path.stat().st_size)}
+        with open(path, "rb") as f:
+            req = urllib.request.Request(f"{self.server}/api/pool/{target}", data=f, headers=hdrs, method="PUT")
+            try:
+                with urllib.request.urlopen(req, timeout=3600) as res:
+                    return json.loads(res.read())
+            except urllib.error.HTTPError as e:
+                try:
+                    message = json.loads(e.read()).get("error")
+                except ValueError:
+                    message = None
+                raise PoolError(message or f"The coordinator answered {e.code}.") from None
+
+    def pool_get(self, name: str, dest: str | Path) -> Path:
+        dest = Path(dest)
+        if dest.is_dir():
+            dest = dest / name
+        req = urllib.request.Request(f"{self.server}/api/pool/{urllib.parse.quote(name, safe='')}", headers={"Authorization": f"Bearer {self.token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=3600) as res, open(dest, "wb") as out:
+                while chunk := res.read(1024 * 1024):
+                    out.write(chunk)
+        except urllib.error.HTTPError as e:
+            try:
+                message = json.loads(e.read()).get("error")
+            except ValueError:
+                message = None
+            raise PoolError(message or f"The coordinator answered {e.code}.") from None
+        return dest
+
+    def pool_rm(self, name: str) -> None:
+        self.request("DELETE", f"/api/pool/{urllib.parse.quote(name, safe='')}")
+
 
 def progress_line(job: dict) -> str:
     per = sorted(job.get("perDevice", {}).values(), key=lambda p: -p["chunks"])

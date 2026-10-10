@@ -89,6 +89,7 @@ class Coordinator:
             if path.is_file() and path.suffix in MIME:
                 self.static["/" + path.relative_to(WEB_DIR).as_posix()] = path
         self._maintenance: asyncio.Task | None = None
+        self.lan_ip = primary_ip() or ""
 
     # ------------------------------------------------------------------ app
     def build(self) -> web.Application:
@@ -107,6 +108,10 @@ class Coordinator:
         r.add_get("/api/files/{name:.+}", self.download)
         r.add_put("/api/files/{name:.+}", self.upload)
         r.add_delete("/api/files/{name:.+}", self.delete_file)
+        r.add_get("/api/pool", self.pool_list)
+        r.add_put("/api/pool/{name:.+}", self.pool_put)
+        r.add_get("/api/pool/{name:.+}", self.pool_get)
+        r.add_delete("/api/pool/{name:.+}", self.pool_delete)
         r.add_get("/install.sh", self.install_sh)
         r.add_get("/install.ps1", self.install_ps1)
         r.add_get("/agent.tar.gz", self.agent_tar)
@@ -279,6 +284,35 @@ class Coordinator:
         self.sched.broadcast_files()
         return web.json_response({"ok": True})
 
+    # ------------------------------------------------------------------ pooled storage
+    async def pool_list(self, request):
+        self.authed(request)
+        return web.json_response(self.sched.pool_store.listing())
+
+    async def pool_put(self, request):
+        rec = self.authed(request, write=True)
+        name = self._name(request)
+        live = self.sched.devices.get(rec["id"])
+        try:
+            size = await self.sched.pool_store.put_file(name, request.content, live.name if live else rec["name"], self.cfg.max_upload_mb * 1024 * 1024)
+        except UserError as e:
+            raise fail(400, str(e))
+        return web.json_response({"ok": True, "name": name, "size": size}, status=201)
+
+    async def pool_get(self, request):
+        self.authed(request)
+        try:
+            return await self.sched.pool_store.stream(request, self._name(request))
+        except UserError as e:
+            raise fail(404, str(e))
+
+    async def pool_delete(self, request):
+        self.authed(request, write=True)
+        name = self._name(request)
+        if not self.sched.pool_store.delete(name):
+            raise fail(404, f"There is no pooled file named {name}.")
+        return web.json_response({"ok": True})
+
     # ------------------------------------------------------------------ agent install
     async def install_sh(self, request):
         if not re.fullmatch(r"[A-Za-z0-9.:\-\[\]]+", request.host):
@@ -299,6 +333,10 @@ class Coordinator:
         if path is None:
             raise web.HTTPNotFound(text="Not found")
         return web.FileResponse(path, headers={"Content-Type": MIME[path.suffix], "Cache-Control": "no-cache"})
+
+    def host_of(self, ip: str) -> str:
+        """A device on this machine connects as 127.0.0.1 or as the LAN address; call both the same."""
+        return self.lan_ip if ip in ("127.0.0.1", "::1") and self.lan_ip else ip
 
     # ------------------------------------------------------------------ live connection
     async def websocket(self, request: web.Request):
@@ -324,7 +362,7 @@ class Coordinator:
         if not isinstance(hello, dict) or hello.get("type") != "hello":
             await ws.close(code=4000, message=b"Expected hello")
             return ws
-        device = self.sched.connect(rec, ws, hello)
+        device = self.sched.connect(rec, ws, hello, self.host_of(ip))
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:

@@ -93,7 +93,7 @@ class Coord:
 
 
 def start_coordinator(tmp: Path, stale_s: str = "2") -> Coord:
-    env = {**os.environ, "HARNESS_STALE_S": stale_s, "NO_QR": "1"}
+    env = {**os.environ, "HARNESS_STALE_S": stale_s, "NO_QR": "1", "HARNESS_REPAIR_S": "1"}
     args = [sys.executable, "-m", "yourharness", "serve", "--host", "127.0.0.1", "--port", "0",
             "--data-dir", str(tmp / "data"), "--shared-dir", str(tmp / "shared"), "--no-qr", "--no-local-agent"]
     proc = Proc(args, env)

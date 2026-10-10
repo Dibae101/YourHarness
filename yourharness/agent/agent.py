@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -219,8 +221,40 @@ class Agent:
                 self.params.pop(job.get("id"), None)
         elif kind == "error":
             log.warning("%s", m.get("message"))
+        elif kind in ("store.put", "store.get", "store.del"):
+            asyncio.ensure_future(self._store(m))
         elif isinstance(kind, str) and kind.startswith("term."):
             self._terminal(m)
+
+    async def _store(self, m: dict) -> None:
+        """Keep, return or delete a chunk of pooled storage. Chunks are named by their SHA-256."""
+        h, rid = m.get("hash"), m.get("rid")
+        try:
+            if not isinstance(h, str) or not re.fullmatch(r"[0-9a-f]{64}", h):
+                raise ValueError("bad chunk name")
+            path = self.cfg.home / "store" / h
+            loop = asyncio.get_running_loop()
+            if m["type"] == "store.put":
+                data = base64.b64decode(m["data"])
+                if hashlib.sha256(data).hexdigest() != h:
+                    raise ValueError("chunk failed its checksum")
+                await loop.run_in_executor(None, self._write_chunk, path, data)
+                self.send({"type": "store.ack", "rid": rid})
+            elif m["type"] == "store.get":
+                data = await loop.run_in_executor(None, path.read_bytes)
+                self.send({"type": "store.data", "rid": rid, "data": base64.b64encode(data).decode("ascii")})
+            else:
+                path.unlink(missing_ok=True)
+        except Exception as e:
+            if rid:
+                self.send({"type": "store.error", "rid": rid, "error": f"{type(e).__name__}: {e}"})
+
+    @staticmethod
+    def _write_chunk(path: Path, data: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
 
     def _terminal(self, m: dict) -> None:
         if self.terms is None:

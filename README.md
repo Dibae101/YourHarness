@@ -102,6 +102,19 @@ results = pool.map(score, [5_000_000] * 64)   # spread over every agent
 
 Functions are sent as source code, so define them with `def`. Arguments and results must be JSON: numbers, text, lists, dicts.
 
+## Pooled storage
+
+Add files in the **Pooled storage** panel, or from the workspace:
+
+```bash
+harness pool put dataset.csv      # cut into chunks, two copies on different computers
+harness pool ls                   # copies per file, free space, which files are offline
+harness pool get dataset.csv .
+harness pool rm dataset.csv
+```
+
+Only computers running an agent hold chunks; phones and tablets add and read files but store nothing. With one agent there is one copy. If a computer holding a copy disconnects, the file still downloads from the other copy and the missing copies are rebuilt on remaining computers within about 10 seconds. If every computer holding a chunk is offline, the file shows as offline until one returns. Chunks are checked against their SHA-256 on every read. Files pass through the coordinator, so its network is the speed limit.
+
 ## What can be pooled
 
 Wi-Fi is about 30,000 times slower than memory inside a device, so the pool never pretends to be one big computer. It splits work so each device computes on its own memory and only inputs and results cross the network.
@@ -109,7 +122,7 @@ Wi-Fi is about 30,000 times slower than memory inside a device, so the pool neve
 | Resource | Today | Next |
 | --- | --- | --- |
 | Processors | Jobs split into pieces; every device pulls a piece when it has a free thread | |
-| Storage | One shared folder on the coordinator, readable by byte range | Chunks stored on several devices, mounted as `/pool` |
+| Storage | **Pooled storage:** files are cut into 4 MB chunks, two copies each on different computers, repaired when one leaves. A separate shared folder on the coordinator is used by the file-search job | A `/pool` folder mount (needs FUSE) |
 | Memory | Each device works in its own memory | Model layers split across devices by free memory |
 | GPUs | Reported by agents | CUDA and Metal through agents, WebGPU in browsers over HTTPS |
 

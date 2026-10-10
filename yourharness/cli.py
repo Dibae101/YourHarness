@@ -219,6 +219,32 @@ def cmd_files(a) -> int:
     return 0
 
 
+def cmd_pool(a) -> int:
+    c = _client()
+    if a.action in (None, "ls"):
+        info = c.pool_files()
+        for f in info["files"]:
+            health = f"{f['copies']} of {f['wanted']} copies" if f["available"] else "OFFLINE (a computer holding it is away)"
+            print(f"{f['size']:>14,}  {f['name']}  ({health})")
+        if not info["files"]:
+            print("No pooled files yet.")
+        print(f"\n{info['storedBytes']:,} bytes stored on {info['agents']} computer{'s' if info['agents'] != 1 else ''}, about {info['freeGB']} GB free.")
+    elif a.action == "put":
+        for p in a.args:
+            res = c.pool_put(p)
+            print(f"Stored {res['name']} ({res['size']:,} bytes).")
+    elif a.action == "get":
+        if not a.args:
+            print("Name the file to get: harness pool get NAME [DEST]", file=sys.stderr)
+            return 1
+        print(f"Saved {c.pool_get(a.args[0], a.args[1] if len(a.args) > 1 else '.')}")
+    elif a.action == "rm":
+        for name in a.args:
+            c.pool_rm(name)
+            print(f"Deleted {name}.")
+    return 0
+
+
 # ---------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="harness", description="Pool the devices you own into one workspace.")
@@ -275,6 +301,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", nargs="?", choices=["ls", "put", "get", "rm"])
     s.add_argument("args", nargs="*")
     s.set_defaults(fn=cmd_files)
+
+    s = sub.add_parser("pool", help="pooled storage across computers: ls, put PATH..., get NAME [DEST], rm NAME...")
+    s.add_argument("action", nargs="?", choices=["ls", "put", "get", "rm"])
+    s.add_argument("args", nargs="*")
+    s.set_defaults(fn=cmd_pool)
     return p
 
 
