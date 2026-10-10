@@ -24,7 +24,10 @@ class Terminals:
         self.sessions: dict[str, tuple[str, str]] = {}  # sid -> (browser device id, agent device id)
 
     def hosts(self) -> list["Device"]:
-        return [d for d in self.s.devices.values() if d.kind == "agent" and d.workspace and not d.closed]
+        hosts = [d for d in self.s.devices.values() if d.kind == "agent" and d.workspace and not d.closed]
+        # Ubuntu (Linux, or WSL on Windows) is the workspace; other computers are the fallback
+        hosts.sort(key=lambda d: 0 if d.workspace["system"].startswith(("Linux", "Windows (WSL)")) else 1)
+        return hosts
 
     def from_browser(self, browser: "Device", msg: dict) -> None:
         kind = msg.get("type")

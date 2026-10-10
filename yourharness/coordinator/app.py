@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import socket
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ from aiohttp import WSMsgType, web
 from .. import __version__
 from . import files as shared_files
 from .auth import COOKIE, Limiter, client_ip, same_origin, token_from
-from .install import agent_tarball, install_script
+from .install import agent_tarball, install_ps1, install_script
 from .jobkinds import UserError
 from .scheduler import Scheduler, clean_text
 from .state import Store
@@ -107,6 +108,7 @@ class Coordinator:
         r.add_put("/api/files/{name:.+}", self.upload)
         r.add_delete("/api/files/{name:.+}", self.delete_file)
         r.add_get("/install.sh", self.install_sh)
+        r.add_get("/install.ps1", self.install_ps1)
         r.add_get("/agent.tar.gz", self.agent_tar)
         r.add_get("/ws", self.websocket)
         r.add_get("/{path:.*}", self.serve_static)
@@ -283,6 +285,11 @@ class Coordinator:
             raise web.HTTPBadRequest(text="Bad host name.")
         return web.Response(text=install_script(f"{request.scheme}://{request.host}"), content_type="text/x-shellscript")
 
+    async def install_ps1(self, request):
+        if not re.fullmatch(r"[A-Za-z0-9.:\-\[\]]+", request.host):
+            raise web.HTTPBadRequest(text="Bad host name.")
+        return web.Response(text=install_ps1(f"{request.scheme}://{request.host}"), content_type="text/plain")
+
     async def agent_tar(self, request):
         return web.Response(body=agent_tarball(), content_type="application/gzip")
 
@@ -349,7 +356,29 @@ def primary_ip() -> str | None:
         s.close()
 
 
-async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True) -> None:
+async def run_local_agent(cfg: Config, coord: "Coordinator", port: int) -> None:
+    """The coordinator's own computer joins the pool and hosts a workspace, so there is a terminal at once."""
+    from .. import sysinfo
+    from ..agent.agent import Agent, AgentConfig
+
+    path = cfg.data_dir / "local-agent.json"
+    token = None
+    if path.exists():
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if coord.store.device_for_token(saved.get("token")):
+            token = saved["token"]
+    if not token:
+        _, token = coord.store.add_device("agent", f"{sysinfo.platform_name()} (this computer)")
+        path.write_text(json.dumps({"token": token}), encoding="utf-8")
+        os.chmod(path, 0o600)
+    home = default_home() / "local-agent"
+    home.mkdir(parents=True, exist_ok=True)
+    agent_cfg = AgentConfig(server=f"http://127.0.0.1:{port}", token=token, name=f"{sysinfo.platform_name()} (this computer)",
+                            threads=max(1, (os.cpu_count() or 2) - 1), workspace=True, home=home)
+    await Agent(agent_cfg).run()
+
+
+async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True, local_agent: bool = True) -> None:
     coord = Coordinator(cfg)
     runner = web.AppRunner(coord.build(), access_log=None)
     await runner.setup()
@@ -362,9 +391,11 @@ async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True
     print("Phones, tablets and browsers: open this address and enter the join code")
     print(f"  {base}\n")
     print(f"  JOIN CODE: {coord.store.join_code}\n")
-    print("Computers (Mac, Linux, or Ubuntu in WSL on Windows): run this in a terminal")
+    print("Windows PC (sets up Ubuntu for you): in PowerShell run")
+    print(f"  irm {base}/install.ps1 | iex\n")
+    print("Mac or Linux computers: run this in a terminal")
     print(f"  curl -fsSL {base}/install.sh | bash -s -- --join {coord.store.join_code} --workspace")
-    print("  Leave out --workspace on computers that shouldn't host the shared terminal.\n")
+    print("  Leave out --workspace on computers that shouldn't host a terminal.\n")
     print(f"Or skip typing the code by opening: {link}\n")
     print(f"Shared folder: {cfg.shared_dir}")
     print(f"Sign-ins are stored in: {cfg.data_dir}")
@@ -379,7 +410,10 @@ async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True
             qr.print_ascii(invert=True)
         except ImportError:
             pass
+    local = asyncio.ensure_future(run_local_agent(cfg, coord, port)) if local_agent and os.name == "posix" else None
     try:
         await asyncio.Event().wait()
     finally:
+        if local:
+            local.cancel()
         await runner.cleanup()

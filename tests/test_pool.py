@@ -294,3 +294,9 @@ def test_code_changes_after_too_many_wrong_guesses(fresh_coord):
         http("POST", url, hdr, json.dumps({"token": f"{(int(old) + 1 + i) % 10000:04d}"}).encode())
     status, _ = http("POST", url, hdr, json.dumps({"token": old}).encode())
     assert status == 429
+
+
+def test_windows_installer_is_served(coord):
+    status, body = http("GET", f"{coord.base}/install.ps1")
+    text = body.decode()
+    assert status == 200 and coord.base in text and "wsl.exe" in text and "--workspace" in text

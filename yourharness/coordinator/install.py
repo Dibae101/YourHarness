@@ -67,6 +67,33 @@ fi
 """
 
 
+INSTALL_PS1 = r"""# YourHarness setup for Windows. Run in PowerShell:  irm __SERVER__/install.ps1 | iex
+$ErrorActionPreference = 'Stop'
+$server = '__SERVER__'
+Write-Host 'YourHarness: setting up the Ubuntu workspace on this PC.'
+$distros = ''
+try { $distros = (wsl.exe -l -q 2>$null) -join '' } catch { }
+$distros = $distros -replace "`0", ''
+if ($distros -notmatch 'Ubuntu') {
+  Write-Host 'Ubuntu is not installed yet. Installing it now. This needs an administrator PowerShell.'
+  wsl.exe --install -d Ubuntu
+  Write-Host ''
+  Write-Host 'Restart the PC if Windows asks you to. Open Ubuntu once from the Start menu to create your Linux user name and password.'
+  Write-Host 'Then run this same command again.'
+  return
+}
+$code = Read-Host 'Join code (shown where the coordinator is running)'
+if ($code -notmatch '^[0-9]{4}$') { Write-Host 'The join code is 4 digits.'; return }
+Write-Host 'Installing the agent inside Ubuntu. It may ask for your Linux password once.'
+Write-Host 'Keep this window open while you want this PC in the pool.'
+wsl.exe -d Ubuntu -- bash -lc "sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv tmux curl && curl -fsSL $server/install.sh | bash -s -- --join $code --workspace"
+"""
+
+
+def install_ps1(server: str) -> str:
+    return INSTALL_PS1.replace("__SERVER__", server.rstrip("/"))
+
+
 def install_script(server: str) -> str:
     return INSTALL_SH.replace("__SERVER__", server.rstrip("/"))
 

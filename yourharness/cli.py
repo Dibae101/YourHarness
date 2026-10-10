@@ -56,7 +56,7 @@ def cmd_serve(a) -> int:
         print("Made a new join link. Devices that already joined stay signed in; the old link stops working.")
     _setup_logging(a.verbose)
     try:
-        asyncio.run(serve(cfg, public_url=a.public_url, show_qr=not a.no_qr and not os.environ.get("NO_QR")))
+        asyncio.run(serve(cfg, public_url=a.public_url, show_qr=not a.no_qr and not os.environ.get("NO_QR"), local_agent=not a.no_local_agent))
     except KeyboardInterrupt:
         print("\nStopped the coordinator.")
     except OSError as e:
@@ -233,6 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--public-url", help="the address devices use, if not this machine's LAN address, e.g. https://box.tailnet.ts.net")
     s.add_argument("--new-join-link", action="store_true", help="replace the join link; devices already in stay signed in")
     s.add_argument("--no-qr", action="store_true")
+    s.add_argument("--no-local-agent", action="store_true", help="don't share this computer or host a terminal on it")
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_serve)
 

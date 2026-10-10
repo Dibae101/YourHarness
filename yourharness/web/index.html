@@ -116,7 +116,14 @@
           </div>
         </div>
         <div class="field">
-          <span id="add-cmd-label">Install the agent on a computer</span>
+          <span id="add-win-label">Windows PC: paste in PowerShell (sets up Ubuntu, asks for the code)</span>
+          <div class="copyrow">
+            <input id="add-win" readonly aria-labelledby="add-win-label">
+            <button class="btn ghost small" type="button" data-copy="add-win">Copy</button>
+          </div>
+        </div>
+        <div class="field">
+          <span id="add-cmd-label">Mac or Linux computer: paste in a terminal</span>
           <div class="copyrow">
             <textarea id="add-cmd" rows="4" readonly aria-labelledby="add-cmd-label"></textarea>
             <button class="btn ghost small" type="button" data-copy="add-cmd">Copy</button>

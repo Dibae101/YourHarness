@@ -188,6 +188,7 @@ def run(chunk, total):
         if ((S.follow || !S.view) && m.snapshot) setView(m.snapshot);
         renderAll();
         if (T.open) openTerminal();
+        else maybeAutoOpen();
         break;
       case 'denied':
         S.deniedReason = m.reason || '';
@@ -196,6 +197,7 @@ def run(chunk, total):
         S.devices = m.devices;
         renderDevices();
         renderWorkspace();
+        maybeAutoOpen();
         break;
       case 'job':
         upsertJob(m.job);
@@ -367,6 +369,12 @@ def run(chunk, total):
       });
     }
     return T.loading;
+  }
+  // Landing in the workspace is the point, so open the terminal as soon as a computer can host it.
+  function maybeAutoOpen() {
+    if (T.autoDone || T.open || !S.devices.some((d) => d.workspace)) return;
+    T.autoDone = true;
+    openTerminal();
   }
   async function openTerminal() {
     T.open = true;
@@ -808,6 +816,7 @@ def run(chunk, total):
     $('#add-code').value = S.joinCode || '';
     $('#add-link').value = link;
     $('#add-cmd').value = `curl -fsSL ${location.origin}/install.sh | bash -s -- --join ${S.joinCode} --workspace`;
+    $('#add-win').value = `irm ${location.origin}/install.ps1 | iex`;
   }
 
   function renderAll() {

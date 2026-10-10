@@ -42,11 +42,23 @@ Computers (Mac, Linux, or Ubuntu in WSL on Windows): run this in a terminal
 
 The code stays the same across restarts. After 20 wrong guesses in a row it changes by itself, and the long join link (also printed) keeps working. `harness serve --new-join-link` replaces it; devices that already joined stay signed in. If macOS asks whether Python may accept incoming connections, allow it.
 
+The coordinator's own computer joins the pool and hosts a workspace by itself, so you have a terminal as soon as it starts. `harness serve --no-local-agent` turns that off.
+
 ### 2. Join phones, tablets and browsers
 
 Scan the QR code, or open the coordinator's address and type the code. The device signs in once and remembers it. Keep the page open with the screen on; a phone whose page is paused stops checking in, and its pieces move to other devices within about 20 seconds.
 
-### 3. Host the workspace on the Windows PC
+### 3. Add the Windows PC with its Ubuntu workspace
+
+In PowerShell on the Windows PC (as administrator the first time, so it can install Ubuntu):
+
+```powershell
+irm http://<coordinator address>:8420/install.ps1 | iex
+```
+
+It installs Ubuntu under WSL if needed (restart and run it again if Windows asks), asks for the 4-digit join code, then installs the agent inside Ubuntu. Keep that PowerShell window open while the PC is in the pool. Once it's connected, the Ubuntu terminal is used in place of the Mac's. The manual steps below do the same thing.
+
+#### Manual steps
 
 In PowerShell as administrator, install Ubuntu under WSL, then restart if asked:
 
@@ -54,7 +66,7 @@ In PowerShell as administrator, install Ubuntu under WSL, then restart if asked:
 wsl --install -d Ubuntu
 ```
 
-Open Ubuntu from the Start menu and run:
+Open Ubuntu from the Start menu and run (use the code the coordinator printed):
 
 ```bash
 sudo apt update && sudo apt install -y python3-venv tmux curl
