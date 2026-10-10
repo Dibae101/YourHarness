@@ -18,6 +18,8 @@ from typing import Callable
 
 from winpty import PtyProcess  # pywinpty; ImportError tells the agent to skip hosting a terminal
 
+from .wsl import to_wsl_path, wsl_distro
+
 PACKAGE_PARENT = Path(__file__).resolve().parent.parent.parent
 
 # Sourced by bash inside WSL when a terminal opens: the user's own ~/.bashrc first, then
@@ -35,34 +37,12 @@ harness() { python3 -m yourharness "$@"; }
 """
 
 
-def to_wsl_path(p: Path) -> str:
-    """C:\\Users\\Ana Lee\\x -> /mnt/c/Users/Ana Lee/x (WSL's default mount)."""
-    s = str(p)
-    if len(s) > 1 and s[1] == ":":
-        return f"/mnt/{s[0].lower()}{s[2:].replace(chr(92), '/')}"
-    return s.replace(chr(92), "/")
-
-
-def _wsl_distro() -> str | None:
-    wsl = shutil.which("wsl.exe")
-    if not wsl:
-        return None
-    try:
-        out = subprocess.run([wsl, "-l", "-q"], capture_output=True, timeout=8, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    names = [n.strip() for n in out.decode("utf-16-le", "ignore").replace("\x00", "").splitlines() if n.strip()]
-    if not names:
-        return None
-    return next((n for n in names if "ubuntu" in n.lower()), names[0])
-
-
 class WinTerminalHost:
     def __init__(self, send: Callable[[dict], None], home: Path, env_extra: dict[str, str]):
         self.send = send
         self.env_extra = env_extra
         self.sessions: dict[str, PtyProcess] = {}
-        self.distro = _wsl_distro()
+        self.distro = wsl_distro()
         self.rc = home / "wsl-rc.sh"
         if self.distro:
             try:  # LF line endings: bash reads this file

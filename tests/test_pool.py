@@ -444,3 +444,162 @@ def test_live_load_is_reported(fresh_coord):
             break
         time.sleep(0.25)
     assert 0 <= d["load"]["cpu"] <= 100 and d["load"]["memUsedGB"] > 0
+
+
+# ---------------------------------------------------------------------- YourHarness OS: the pool shell
+class Shell:
+    """Types into the pool shell like a person in the browser would."""
+
+    def __init__(self, fb):
+        self.fb, self.sid, self.out = fb, None, b""
+
+    async def open(self):
+        await self.fb.ws.send_json({"type": "os.open", "cols": 100, "rows": 30, "ref": "t"})
+        m = await self.fb.wait_for(lambda m: m["type"] == "os.opened")
+        self.sid = m["sid"]
+        await self.wait_prompt()
+
+    def text(self) -> str:
+        data = b"".join(base64.b64decode(m["data"]) for m in self.fb.msgs if m["type"] == "os.out" and m["sid"] == self.sid)
+        return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", data.decode(errors="replace")).replace("\r", "")
+
+    async def wait_prompt(self, timeout=30):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if self.text().rstrip().endswith("$"):
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError("no prompt; screen:\n" + self.text()[-800:])
+
+    async def run(self, line: str, timeout=40) -> str:
+        before = len(self.text())
+        await self.fb.ws.send_json({"type": "os.in", "sid": self.sid, "data": line + "\r"})
+        await asyncio.sleep(0.1)
+        await self.wait_prompt(timeout)
+        return self.text()[before:]
+
+
+import re  # noqa: E402
+
+
+def test_pool_shell_is_one_os_across_computers(fresh_coord):
+    fresh_coord.agent("Alpha", threads=1, workspace=True)
+    fresh_coord.agent("Beta", threads=1, workspace=True)
+
+    async def main():
+        async with FakeBrowser(fresh_coord, "Terminal user") as fb:
+            sh = Shell(fb)
+            await sh.open()
+            assert "Alpha" in sh.text() and "Beta" in sh.text()
+
+            # a file written on one computer is read on the other
+            out = await sh.run("on Alpha sh -c 'mkdir -p src && echo made-on-alpha > src/note.txt && echo wrote'")
+            assert "wrote" in out and "ran on Alpha" in out and "1 saved in /pool" in out, out
+            out = await sh.run("on Beta cat src/note.txt")
+            assert "made-on-alpha" in out and "ran on Beta" in out and "fetched" in out, out
+
+            # cd moves the shell; the next command starts there, wherever it runs
+            await sh.run("cd src")
+            out = await sh.run("pwd; ls")
+            assert "/pool/src" not in out or "note.txt" in out
+            assert "note.txt" in out, out
+            assert "pool:/pool/src$" in sh.text()
+            out = await sh.run("cd .. && cd src && ls")
+            assert "note.txt" in out
+
+            # deleting a file in one place deletes it everywhere
+            await sh.run("on Beta rm note.txt")
+            out = await sh.run("on Alpha ls")
+            assert "note.txt" not in out, out
+
+            # unknown computer, failing command, builtin
+            assert "No computer matches" in await sh.run("on Nowhere echo hi")
+            out = await sh.run("sh -c 'exit 3'")
+            assert "exit 3" in out, out
+            assert "Alpha" in await sh.run("runners")
+
+            # par spreads work over both computers and shows where each landed
+            t0 = time.monotonic()
+            out = await sh.run("par sh -c 'sleep 1; echo item-{}' ::: 1 2 3 4", timeout=60)
+            took = time.monotonic() - t0
+            assert all(f"item-{n}" in out for n in "1234"), out
+            assert "Alpha" in out and "Beta" in out, out
+            assert took < 3.8, f"4 one-second commands on 2 computers took {took:.1f}s"
+
+            # Ctrl-C stops a running command
+            await fb.ws.send_json({"type": "os.in", "sid": sh.sid, "data": "sleep 30\r"})
+            await asyncio.sleep(1.2)
+            await fb.ws.send_json({"type": "os.in", "sid": sh.sid, "data": "\x03"})
+            await sh.wait_prompt(15)
+
+            # tab completion and history
+            await sh.run("cd /pool")
+            await sh.run("sh -c 'echo x > unique-long-name.txt'")
+            await fb.ws.send_json({"type": "os.in", "sid": sh.sid, "data": "cat uniq\t"})
+            await asyncio.sleep(0.4)
+            assert "cat unique-long-name.txt" in sh.text().split("\n")[-1] or "unique-long-name.txt" in sh.text()[-80:]
+            await fb.ws.send_json({"type": "os.in", "sid": sh.sid, "data": "\r"})
+            await sh.wait_prompt()
+
+    asyncio.run(main())
+
+
+def test_pool_shell_needs_a_computer(fresh_coord):
+    async def main():
+        async with FakeBrowser(fresh_coord, "Lonely") as fb:
+            sh = Shell(fb)
+            await sh.open()
+            assert "No computer can run commands yet" in sh.text()
+            assert "No computer can run commands right now" in await sh.run("echo hi")
+
+    asyncio.run(main())
+
+
+def test_os_disk_folders_in_pooled_storage(fresh_coord):
+    fresh_coord.agent("Disk", threads=1)
+    c = fresh_coord.client("disk")
+    auth = {"Authorization": f"Bearer {c.token}"}
+    base = fresh_coord.base
+
+    def api(method, path, body=None, data=None):
+        hdr = dict(auth)
+        if body is not None:
+            data, hdr["Content-Type"] = json.dumps(body).encode(), "application/json"
+        return http(method, base + path, hdr, data)
+
+    assert api("PUT", "/api/os/file?path=a/b/c.txt", data=b"deep")[0] == 201
+    assert api("POST", "/api/os/mkdir", {"path": "empty"})[0] == 200
+    names = lambda p: {e["name"]: e["dir"] for e in json.loads(api("GET", f"/api/os/list?path={p}")[1])["entries"]}  # noqa: E731
+    assert names("") == {"a": True, "empty": True} and names("a/b") == {"c.txt": False}
+    assert api("GET", "/api/os/file?path=a/b/c.txt")[1] == b"deep"
+    # a file can't also be a folder, and paths can't climb out
+    assert api("PUT", "/api/os/file?path=a/b/c.txt/x", data=b"no")[0] == 400
+    assert api("PUT", "/api/os/file?path=a/b", data=b"no")[0] == 400
+    assert api("GET", "/api/os/list?path=../..")[0] == 400
+    # rename a folder, delete without and with recursive
+    assert api("POST", "/api/os/rename", {"path": "a", "to": "z"})[0] == 200
+    assert names("") == {"empty": True, "z": True} and names("z/b") == {"c.txt": False}
+    assert api("DELETE", "/api/os/file?path=z")[0] == 400
+    assert api("DELETE", "/api/os/file?path=z&recursive=1")[0] == 200
+    man = json.loads(api("GET", "/api/os/manifest")[1])
+    assert man["files"] == {} and man["dirs"] == ["empty"]
+
+
+def test_on_accepts_computer_names_with_spaces(fresh_coord):
+    fresh_coord.agent("Darshan's MacBook Air", threads=1, workspace=True)
+    fresh_coord.agent("Second computer", threads=1, workspace=True)
+
+    async def main():
+        async with FakeBrowser(fresh_coord, "Spacey") as fb:
+            sh = Shell(fb)
+            await sh.open()
+            out = await sh.run("on Second computer echo one")
+            assert "one" in out and "ran on Second computer" in out, out
+            out = await sh.run("on Darshan's MacBook Air echo two")
+            assert "two" in out and "ran on Darshan's MacBook Air" in out, out
+            out = await sh.run('on "Second computer" echo three')
+            assert "three" in out and "ran on Second computer" in out, out
+            out = await sh.run("on second echo four")  # the start of a name still works
+            assert "four" in out and "ran on Second computer" in out, out
+
+    asyncio.run(main())

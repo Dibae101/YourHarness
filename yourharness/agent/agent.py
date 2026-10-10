@@ -95,11 +95,16 @@ class Agent:
         self.pool = SlotPool({"server": cfg.server, "token": cfg.token}, self._piece_done, cfg.home / "work")
         self.terms = None
         self.files = None
+        self.runner = None
         self.cpu = sysinfo.CpuMeter()
         if cfg.workspace:  # a computer that hosts a terminal also lets the pool browse its home folder
             from .files import HomeFiles
 
             self.files = HomeFiles()
+            from .runner import Runner
+
+            if Runner.available():  # the pool shell can run commands here
+                self.runner = Runner(cfg.server, cfg.token, cfg.home, self.send, {"HARNESS_URL": cfg.server})
         if cfg.workspace:
             env = {"HARNESS_URL": cfg.server, "HARNESS_TOKEN": cfg.token}
             if os.name == "posix":
@@ -167,6 +172,7 @@ class Agent:
             "runtimes": ["python"], "info": sysinfo.collect(str(self.cfg.home)), "version": __version__,
             "workspace": self.terms.describe() if self.terms else None, "coordinator": self.cfg.coordinator,
             "files": self.files.describe() if self.files else None,
+            "exec": self.runner.describe() if self.runner else None,
         }
 
     async def _connect_once(self) -> int | None:
@@ -194,6 +200,9 @@ class Agent:
                     self.ws = None
                     self.outbox = None
                     self.params.clear()
+                    if self.runner:
+                        for run_id in list(self.runner.procs):  # the coordinator has already given up on these
+                            self.runner.kill(run_id)
                     self.pool.dropped.clear()  # job ids restart if the coordinator restarts
                     self.pool.take_queued()  # the coordinator hands these to other devices
                     if self.terms:
@@ -250,6 +259,10 @@ class Agent:
             asyncio.ensure_future(self._store(m))
         elif kind == "fs":
             asyncio.ensure_future(self._fs(m))
+        elif kind == "exec.start" and self.runner:
+            asyncio.ensure_future(self.runner.run(m))
+        elif kind == "exec.cancel" and self.runner:
+            self.runner.kill(str(m.get("id")))
         elif isinstance(kind, str) and kind.startswith("term."):
             self._terminal(m)
 

@@ -16,21 +16,38 @@ Download from the [Releases page](https://github.com/Dibae101/YourHarness/releas
 
 **What the app does when you launch it:** it looks for a pool on your network. If it finds one it asks for the 4-digit code once, then reconnects by itself on every launch. If it finds none, it starts a pool on that computer. The computer shares its processors in the background (menu bar on Mac, tray on Windows); closing the window keeps sharing, and Quit stops it. The workspace terminal opens in the window. On the Mac the terminal is the Mac's shell; on Windows, add Ubuntu with the PowerShell command below for a Linux terminal.
 
+### YourHarness OS
+
+The Terminal app opens **YourHarness OS**: a shell that belongs to the pool, not to any computer.
+
+- **Every command runs on the least-busy computer** and the line after it says where: `↳ ran on DESKTOP-KAMSS80 (Ubuntu on Windows (WSL)) · 1.8 s · exit 0`.
+- **Its disk is `/pool`.** Before a command runs, the files that changed elsewhere are fetched to that computer; afterwards, what the command created, changed or deleted is saved back. A file written on the Mac is there when the next command lands on the Windows PC. The same disk is the first thing in the Files app.
+- **Linux first.** Computers running Linux (Ubuntu, or Ubuntu under WSL on Windows) run the commands. A Mac is used only when no Linux computer is connected, or when you ask for it.
+
+| Command | What it does |
+| --- | --- |
+| `on <computer> <command>` | Run on a specific computer (`linux`, `mac` or part of a name also work; quote names with spaces) |
+| `par <command with {}> ::: a b c` | Run once per item at the same time, spread over the computers |
+| `runners`, `ps` | Which computers can run commands and how busy they are; what ran where |
+| `cd`, `pwd`, `export NAME=value`, `clear`, `help`, `exit` | Shell basics. Tab completes names in `/pool`, arrows scroll history, Ctrl-C stops the running command |
+
+**What it is not.** One command still runs on one computer, so a single program doesn't get faster; `par`, `pool.map()` and Jobs are how work spreads over several. A computer's memory can't be added to another's (Wi-Fi is about 30,000 times slower than RAM). Commands get no keyboard input, so editors and `htop` need a **direct shell** (the other tabs in Terminal, one per computer). Each computer runs one command at a time; others wait. If two computers change the same file at once, the later save wins. Files are copied to each computer that runs a command, so a very large `/pool` makes the first command on a new computer slow.
+
 ### The desktop
 
 The app (and the page in any browser) is a small desktop: a status bar on top, a dock at the bottom, and windows you can move, resize, minimize and maximize. On phones each app opens full screen.
 
 | App | What it does |
 | --- | --- |
-| **System Monitor** | One card per computer or phone with what it shares, live CPU and memory use, and a two-minute CPU graph. **Test the pool** runs a short job and shows how many pieces each device computed. That's the quickest way to see that sharing works. |
-| **Terminal** | A shell on the computer you pick. The Ubuntu machine is picked by default. The banner says where the shell runs and, when it isn't your computer, that your keystrokes go there. In the Ubuntu terminal on a Windows PC, `harness` and `from yourharness import pool` are ready to use. |
-| **Files** | Browse the home folder of every computer running the app. Pick the computer and folder, then upload, download, make folders, rename, delete, or **Send to…** another computer. Also pooled storage (shows which computers hold each file) and the shared folder. |
+| **System Monitor** | One card per computer or phone with what it shares, live CPU and memory use, and a two-minute CPU graph. Below: **Programs running in YourHarness OS** with the computer each is on. **Test the pool** runs a short job and shows how many pieces each device computed. |
+| **Terminal** | **YourHarness OS** (default) plus a direct shell on each computer. |
+| **Files** | Opens on `/pool`. Make folders, upload, download, rename and delete; each file shows which computers hold it. Also browse the home folder of every computer running the app, send a file from one computer to another, and the shared folder. |
 | **Jobs** | Run a job across every sharing device and watch who computes which piece. |
 | **Devices** | The join code and address, this device's sharing settings, and every connection with a Remove button. |
 
 The status bar shows the connection and how fast the pool answers (for example `Pool 3 ms`), average CPU use across the pool's computers, which computer you're on, the join code and the time. Wi-Fi itself can't be controlled from a web page.
 
-Files can only reach a computer's home folder, and only on computers that host a terminal (every computer running the app does). Anyone in the pool can use them, so share the join code only with people you trust.
+Computers that run the app let the pool browse their home folder and run commands, so anyone in the pool can do both. Share the join code only with people you trust.
 
 Releases are built by GitHub Actions: push a tag such as `v0.3.0` and the `.dmg` and `.exe` appear on the Releases page. Run `python desktop/make_icons.py` to regenerate icons.
 

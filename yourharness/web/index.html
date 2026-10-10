@@ -93,6 +93,8 @@
               <button id="mon-test-btn" class="btn primary" type="button">Test the pool</button>
             </div>
             <div id="ov-job" class="ov-job" hidden></div>
+            <h2 class="section-h">Programs running in YourHarness OS</h2>
+            <div class="scroll-x"><table class="procs-table"><thead><tr><th scope="col">Command</th><th scope="col">Computer</th><th scope="col">State</th><th scope="col">Time</th></tr></thead><tbody id="procs"></tbody></table></div>
             <h2 class="section-h">Computers and devices</h2>
             <div id="machines" class="machines"></div>
           </div>
@@ -116,7 +118,7 @@
             <div id="ws-hosts" class="host-tabs" role="tablist" aria-label="Computer to open a terminal on"></div>
             <div id="ws-where" class="where" aria-live="polite"></div>
             <div class="term-actions">
-              <button id="ws-open" class="btn primary" type="button">Open terminal</button>
+              <button id="ws-open" class="btn primary" type="button">Open YourHarness OS</button>
               <button id="ws-close" class="btn ghost" type="button" hidden>Close terminal</button>
             </div>
             <div id="term-wrap" class="term-wrap" hidden>
@@ -153,10 +155,10 @@
         <div class="win-body">
           <div class="fm">
             <aside class="fm-side" aria-label="Locations">
-              <p class="fm-side-h">Computers</p>
-              <ul id="fm-locs" class="fm-locs"></ul>
-              <p class="fm-side-h">Across the pool</p>
+              <p class="fm-side-h">YourHarness OS</p>
               <ul id="fm-locs-pool" class="fm-locs"></ul>
+              <p class="fm-side-h">Each computer, direct</p>
+              <ul id="fm-locs" class="fm-locs"></ul>
             </aside>
             <div class="fm-main">
               <div class="fm-bar">

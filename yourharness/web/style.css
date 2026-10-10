@@ -498,3 +498,25 @@ button.fm-name:hover { text-decoration: underline; }
 .workspace { height: 100%; }
 .term-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .term-wrap .term { flex: 1; height: auto; min-height: 160px; }
+
+/* ---------- YourHarness OS shell ---------- */
+.host-tab.os-tab { border-color: var(--ink); }
+.runners { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.runner { font-size: 0.8125rem; padding: 4px 10px 4px 12px; border-radius: 999px; background: var(--line-soft); position: relative; }
+.runner::before { content: ""; position: absolute; left: 4px; top: 7px; bottom: 7px; width: 3px; border-radius: 2px; background: var(--wire); }
+.procs-table { width: 100%; min-width: 440px; border-collapse: collapse; font-size: 0.875rem; }
+.procs-table th { text-align: left; font-weight: 500; font-size: 0.75rem; color: var(--muted); padding: 0 10px 6px 0; border-bottom: 1px solid var(--line); }
+.procs-table td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+.procs-table td.mono { font-family: var(--mono); font-size: 0.8125rem; overflow-wrap: anywhere; }
+.procs-table tr[data-state="running"] td:nth-child(3) { color: var(--ok); font-weight: 600; }
+.procs-table tr[data-state="failed"] td:nth-child(3) { color: var(--danger); }
+
+.where { gap: 8px; padding: 12px 16px; }
+.where-main { font-size: 1.0625rem; }
+.where details { font-size: 0.875rem; }
+.where summary { cursor: pointer; color: var(--muted); font-weight: 600; width: fit-content; }
+.where summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+.where-note { font-size: 0.875rem; }
+.host-tab { min-width: 0; padding: 8px 12px; }
+.host-tabs { gap: 8px; }
+.term-actions { margin-top: -4px; }

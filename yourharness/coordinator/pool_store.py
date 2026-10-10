@@ -24,6 +24,21 @@ from .jobkinds import UserError
 
 log = logging.getLogger("yourharness")
 
+
+def clean_path(raw) -> str:
+    """A path inside /pool as "a/b/c.txt" (no leading slash, no "." or ".." parts). "" is the top folder."""
+    parts = [p for p in str(raw or "").replace("\\", "/").split("/") if p not in ("", ".")]
+    for p in parts:
+        if p == ".." or len(p) > 200 or any(ord(c) < 32 or ord(c) == 127 for c in p):
+            raise UserError("That path isn't allowed.")
+    return "/".join(parts)
+
+
+def file_digest(chunks: list[str]) -> str:
+    """One fingerprint for a whole file, made from its chunk fingerprints."""
+    return hashlib.sha256("".join(chunks).encode("ascii")).hexdigest()
+
+
 CHUNK = 4 * 1024 * 1024
 REPLICAS = 2
 REQUEST_TIMEOUT = 60.0
@@ -35,15 +50,17 @@ class PoolStore:
         self.path = Path(data_dir) / "pool-index.json"
         self.files: dict[str, dict] = {}
         self.holders: dict[str, list[str]] = {}
+        self.dirs: set[str] = set()  # folders made on purpose; folders that hold files exist without being listed here
         if self.path.exists():
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.files, self.holders = data.get("files", {}), data.get("holders", {})
+            self.dirs = set(data.get("dirs", []))
         self.reqs: dict[str, tuple[asyncio.Future, str]] = {}
         self._repairing = False
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"files": self.files, "holders": self.holders}), encoding="utf-8")
+        tmp.write_text(json.dumps({"files": self.files, "holders": self.holders, "dirs": sorted(self.dirs)}), encoding="utf-8")
         os.replace(tmp, self.path)
 
     # ------------------------------------------------------------------ devices
@@ -115,7 +132,96 @@ class PoolStore:
         raise UserError(f"Part of this file is on a computer that is offline ({last or 'no copy is connected'}). It will be readable again when that computer reconnects.")
 
     # ------------------------------------------------------------------ files
+    # ------------------------------------------------------------------ folders and paths
+    def is_dir(self, path: str) -> bool:
+        if path == "":
+            return True
+        pre = path + "/"
+        return path in self.dirs or any(d.startswith(pre) for d in self.dirs) or any(f.startswith(pre) for f in self.files)
+
+    def _check_parents(self, path: str) -> None:
+        parts = path.split("/")
+        for k in range(1, len(parts)):
+            if "/".join(parts[:k]) in self.files:
+                raise UserError(f"{'/'.join(parts[:k])} is a file, so nothing can be saved inside it.")
+
+    def mkdir(self, path: str) -> None:
+        path = clean_path(path)
+        if not path:
+            raise UserError("Name the new folder.")
+        if path in self.files or self.is_dir(path):
+            raise UserError("Something with that name is already there.")
+        self._check_parents(path)
+        self.dirs.add(path)
+        self.save()
+        self.changed()
+
+    def list_dir(self, path: str) -> list[dict]:
+        path = clean_path(path)
+        if path in self.files:
+            raise UserError("That's a file, not a folder.")
+        if not self.is_dir(path):
+            raise UserError("That folder doesn't exist.")
+        pre = path + "/" if path else ""
+        live_ids = {d.id for d in self.live_agents()}
+        out: dict[str, dict] = {}
+        for full, f in self.files.items():
+            if not full.startswith(pre):
+                continue
+            rest = full[len(pre):]
+            head, _, tail = rest.partition("/")
+            if tail:
+                e = out.setdefault(head, {"name": head, "dir": True, "size": None, "mtime": 0})
+                e["mtime"] = max(e["mtime"], f["mtime"])
+            else:
+                copies = min((len([i for i in self.holders.get(h, []) if i in live_ids]) for h in f["chunks"]), default=1)
+                on = sorted({self.s.devices[i].name for h in f["chunks"] for i in self.holders.get(h, []) if i in live_ids and i in self.s.devices})
+                out[head] = {"name": head, "dir": False, "size": f["size"], "mtime": f["mtime"], "available": copies >= 1, "copies": copies, "on": on}
+        for d in self.dirs:
+            if d.startswith(pre):
+                head = d[len(pre):].partition("/")[0]
+                if head:
+                    out.setdefault(head, {"name": head, "dir": True, "size": None, "mtime": 0})
+        return sorted(out.values(), key=lambda e: (not e["dir"], e["name"].lower()))
+
+    def rename(self, src: str, dst: str) -> None:
+        src, dst = clean_path(src), clean_path(dst)
+        if not src or not dst:
+            raise UserError("Name both the old and the new path.")
+        if src == dst:
+            return
+        if dst == src or dst.startswith(src + "/"):
+            raise UserError("A folder can't be moved into itself.")
+        if dst in self.files or self.is_dir(dst):
+            raise UserError("Something with the new name is already there.")
+        self._check_parents(dst)
+        if src in self.files:
+            self.files[dst] = self.files.pop(src)
+        elif self.is_dir(src):
+            pre = src + "/"
+            for full in [f for f in self.files if f.startswith(pre)]:
+                self.files[dst + "/" + full[len(pre):]] = self.files.pop(full)
+            self.dirs = {dst + d[len(src):] if d == src or d.startswith(pre) else d for d in self.dirs}
+            self.dirs.add(dst)
+        else:
+            raise UserError("That doesn't exist.")
+        self.save()
+        self.changed()
+
+    def manifest(self) -> dict:
+        files = {}
+        for path, f in self.files.items():
+            f.setdefault("digest", file_digest(f["chunks"]))
+            files[path] = {"size": f["size"], "mtime": f["mtime"], "digest": f["digest"]}
+        return {"files": files, "dirs": sorted(self.dirs)}
+
     async def put_file(self, name: str, content, by: str | None, max_bytes: int) -> int:
+        name = clean_path(name)
+        if not name:
+            raise UserError("Name the file.")
+        if self.is_dir(name):
+            raise UserError("A folder with that name is already there.")
+        self._check_parents(name)
         size, hashes, sizes, fresh = 0, [], [], []
         buf = bytearray()
 
@@ -142,18 +248,30 @@ class PoolStore:
             self._gc(fresh)
             raise
         old = self.files.get(name)
-        self.files[name] = {"size": size, "chunks": hashes, "sizes": sizes, "mtime": int(time.time() * 1000), "by": by}
+        self.files[name] = {"size": size, "chunks": hashes, "sizes": sizes, "mtime": int(time.time() * 1000), "by": by, "digest": file_digest(hashes)}
         if old:
             self._gc(old["chunks"])
         self.save()
         self.changed()
         return size
 
-    def delete(self, name: str) -> bool:
+    def delete(self, name: str, recursive: bool = False) -> bool:
+        name = clean_path(name)
         old = self.files.pop(name, None)
-        if old is None:
+        if old is not None:
+            self._gc(old["chunks"])
+        elif name and self.is_dir(name):
+            pre = name + "/"
+            inside = [f for f in self.files if f.startswith(pre)]
+            if (inside or any(d.startswith(pre) for d in self.dirs)) and not recursive:
+                raise UserError("That folder isn't empty.")
+            gone: list[str] = []
+            for f in inside:
+                gone += self.files.pop(f)["chunks"]
+            self.dirs = {d for d in self.dirs if d != name and not d.startswith(pre)}
+            self._gc(gone)
+        else:
             return False
-        self._gc(old["chunks"])
         self.save()
         self.changed()
         return True

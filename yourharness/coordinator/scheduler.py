@@ -22,7 +22,9 @@ from pathlib import Path
 
 from . import files as shared_files
 from .jobkinds import KINDS, PlanContext, UserError, clamp_int, clamp_num
+from .execs import Execs
 from .pool_store import PoolStore
+from .poolshell import PoolShell
 from .remote_fs import RemoteFS
 from .terminals import Terminals
 
@@ -90,6 +92,8 @@ class Device:
         self.workspace = sanitize_workspace(hello.get("workspace")) if self.kind == "agent" else None
         self.coordinator = self.kind == "agent" and bool(hello.get("coordinator"))  # the computer that runs the pool
         self.files = self.kind == "agent" and isinstance(hello.get("files"), dict)  # lets the Files app browse its home folder
+        ex = hello.get("exec") if self.kind == "agent" else None  # can run the pool shell's commands
+        self.exec = {"os": clean_text(ex.get("os"), 60, "Linux"), "linux": bool(ex.get("linux"))} if isinstance(ex, dict) else None
         self.load: dict = {}  # live CPU and memory use, reported every few seconds
         self.inflight: set[tuple[str, int]] = set()
         self.params_sent: set[str] = set()
@@ -202,6 +206,8 @@ class Scheduler:
         self.terminals = Terminals(self)
         self.pool_store = PoolStore(self, store.dir)
         self.remote_fs = RemoteFS(self)
+        self.execs = Execs(self)
+        self.poolshell = PoolShell(self)
         self.public_url = ""  # the address other devices use; set once the port is known
         self.repair_s = float(os.environ.get("HARNESS_REPAIR_S", 10))
         self._devices_pending = False
@@ -234,7 +240,7 @@ class Scheduler:
         return {
             "id": d.id, "name": d.name, "kind": d.kind, "color": d.color, "info": d.info, "threads": d.threads,
             "sharing": d.sharing, "runtimes": sorted(d.runtimes), "workspace": d.workspace, "busy": len(d.inflight),
-            "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host, "coordinator": d.coordinator, "files": d.files, "load": d.load,
+            "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host, "coordinator": d.coordinator, "files": d.files, "exec": d.exec, "load": d.load,
         }
 
     def device_list(self) -> list[dict]:
@@ -263,6 +269,8 @@ class Scheduler:
             self.terminals.device_gone(previous)
             self.pool_store.device_gone(previous)
             self.remote_fs.device_gone(previous)
+            self.execs.device_gone(previous)
+            self.poolshell.device_gone(previous)
             previous.close(4002, "This device connected again from somewhere else.")
         d = Device(rec, ws, hello, self.pick_color(rec), host)
         self.store.update_device(d.id, name=d.name, color=d.color)
@@ -271,7 +279,7 @@ class Scheduler:
         d.send({
             "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind,
             "devices": self.device_list(), "jobs": [j.summary() for j in self.jobs], "snapshot": self.snapshot(latest),
-            "files": self.list_files(), "joinToken": self.store.join_token, "joinCode": self.store.join_code, "pool": self.pool_store.listing(), "address": self.public_url,
+            "files": self.list_files(), "procs": self.execs.listing(), "joinToken": self.store.join_token, "joinCode": self.store.join_code, "pool": self.pool_store.listing(), "address": self.public_url,
         })
         log.info("%s joined (%s, %s threads)", d.name, d.kind, d.threads)
         self.broadcast_devices()
@@ -286,6 +294,8 @@ class Scheduler:
             self.terminals.device_gone(d)
             self.pool_store.device_gone(d)
             self.remote_fs.device_gone(d)
+            self.execs.device_gone(d)
+            self.poolshell.device_gone(d)
             log.info("%s left", d.name)
             self.pool_store.changed()
             self.broadcast_devices()
@@ -358,6 +368,12 @@ class Scheduler:
             job = self.find_job(msg.get("jobId"))
             if job:
                 d.send({"type": "snapshot", "snapshot": self.snapshot(job)})
+        elif kind in ("exec.out", "exec.done"):
+            if d.kind == "agent":
+                self.execs.handle(d, msg)
+        elif isinstance(kind, str) and kind.startswith("os."):
+            if d.kind != "agent":
+                self.poolshell.from_browser(d, msg)
         elif kind in ("fs.reply", "fs.error"):
             if d.kind == "agent":
                 self.remote_fs.handle(d, msg)

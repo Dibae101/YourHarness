@@ -112,6 +112,13 @@ class Coordinator:
         r.add_put("/api/pool/{name:.+}", self.pool_put)
         r.add_get("/api/pool/{name:.+}", self.pool_get)
         r.add_delete("/api/pool/{name:.+}", self.pool_delete)
+        r.add_get("/api/os/list", self.os_list)
+        r.add_get("/api/os/manifest", self.os_manifest)
+        r.add_get("/api/os/file", self.os_get)
+        r.add_put("/api/os/file", self.os_put)
+        r.add_delete("/api/os/file", self.os_delete)
+        r.add_post("/api/os/mkdir", self.os_mkdir)
+        r.add_post("/api/os/rename", self.os_rename)
         r.add_get("/api/fs/{device_id}", self.fs_list)
         r.add_get("/api/fs/{device_id}/download", self.fs_download)
         r.add_put("/api/fs/{device_id}/upload", self.fs_upload)
@@ -318,6 +325,69 @@ class Coordinator:
         name = self._name(request)
         if not self.sched.pool_store.delete(name):
             raise fail(404, f"There is no pooled file named {name}.")
+        return web.json_response({"ok": True})
+
+    # ------------------------------------------------------------------ the OS disk (/pool)
+    def _os(self, fn, *args):
+        try:
+            return fn(*args)
+        except UserError as e:
+            raise fail(400, str(e))
+
+    async def os_list(self, request):
+        self.authed(request)
+        path = request.query.get("path", "")
+        from .pool_store import clean_path
+
+        store = self.sched.pool_store
+        entries = self._os(store.list_dir, path)
+        return web.json_response({"path": self._os(clean_path, path), "entries": entries, "free": round(store.listing()["freeGB"] * 2**30), "agents": len(store.live_agents())})
+
+    async def os_manifest(self, request):
+        self.authed(request)
+        return web.json_response(self.sched.pool_store.manifest())
+
+    async def os_get(self, request):
+        self.authed(request)
+        from .pool_store import clean_path
+
+        path = self._os(clean_path, request.query.get("path", ""))
+        store = self.sched.pool_store
+        if path not in store.files:
+            raise fail(404, f"There is no file at /pool/{path}.")
+        try:
+            return await store.stream(request, path)
+        except UserError as e:
+            raise fail(404, str(e))
+
+    async def os_put(self, request):
+        rec = self.authed(request, write=True)
+        live = self.sched.devices.get(rec["id"])
+        try:
+            size = await self.sched.pool_store.put_file(request.query.get("path", ""), request.content, live.name if live else rec["name"], self.cfg.max_upload_mb * 1024 * 1024)
+        except UserError as e:
+            raise fail(400, str(e))
+        from .pool_store import clean_path
+
+        f = self.sched.pool_store.files[clean_path(request.query.get("path", ""))]
+        return web.json_response({"ok": True, "size": size, "digest": f["digest"], "mtime": f["mtime"]}, status=201)
+
+    async def os_delete(self, request):
+        self.authed(request, write=True)
+        if not self._os(self.sched.pool_store.delete, request.query.get("path", ""), request.query.get("recursive") == "1"):
+            raise fail(404, "There is nothing at that path.")
+        return web.json_response({"ok": True})
+
+    async def os_mkdir(self, request):
+        self.authed(request, write=True)
+        body = await self._fs_body(request)
+        self._os(self.sched.pool_store.mkdir, str(body.get("path", "")))
+        return web.json_response({"ok": True})
+
+    async def os_rename(self, request):
+        self.authed(request, write=True)
+        body = await self._fs_body(request)
+        self._os(self.sched.pool_store.rename, str(body.get("path", "")), str(body.get("to", "")))
         return web.json_response({"ok": True})
 
     # ------------------------------------------------------------------ files on each computer

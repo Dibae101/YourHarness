@@ -188,6 +188,7 @@ def run(chunk, total):
         S.color = m.color;
         S.joinToken = m.joinToken;
         S.joinCode = m.joinCode;
+        S.procs = m.procs || [];
         S.address = m.address || location.origin;
         S.joined = true;
         S.devices = m.devices;
@@ -199,7 +200,7 @@ def run(chunk, total):
         setConn('online');
         if ((S.follow || !S.view) && m.snapshot) setView(m.snapshot);
         renderAll();
-        if (termWasOpen) openTerminal(T.hostId);
+        if (termWasOpen) openTerminal(T.kind, T.hostId);
         else if (WM.isOpen('terminal')) autoOpenTerminal();
         send({ type: 'ping', t: performance.now() });
         break;
@@ -250,7 +251,7 @@ def run(chunk, total):
       case 'pool':
         S.pool = m.pool;
         fmRenderLocations();
-        if (FM.loc && FM.loc.type === 'pool') fmRender();
+        if (FM.loc && FM.loc.type === 'os') fmLoad(true);
         break;
       case 'error':
         $('#run-error').textContent = m.message;
@@ -259,7 +260,14 @@ def run(chunk, total):
       case 'term.out':
       case 'term.exit':
       case 'term.error':
+      case 'os.opened':
+      case 'os.out':
+      case 'os.exit':
         onTerminal(m);
+        break;
+      case 'procs':
+        S.procs = m.procs;
+        renderProcs();
         break;
       default:
         break;
@@ -365,8 +373,11 @@ def run(chunk, total):
   // -------------------------------------------------------------------------
   // Workspace terminal
   // -------------------------------------------------------------------------
-  const T = { term: null, fit: null, sid: null, hostId: null, ref: null, open: false, max: false, loading: null };
+  // T.kind is 'os' (the YourHarness OS shell: commands go to whichever computer is least busy)
+  // or 'direct' (a shell that lives on one chosen computer).
+  const T = { term: null, fit: null, sid: null, kind: 'os', hostId: null, ref: null, open: false, loading: null };
   const KEYS = { esc: '\x1b', tab: '\t', ctrlc: '\x03', ctrld: '\x04', up: '\x1b[A', down: '\x1b[B', right: '\x1b[C', left: '\x1b[D' };
+  const LINUX = /ubuntu|linux|debian|fedora/i;
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {
@@ -377,6 +388,7 @@ def run(chunk, total):
       document.head.appendChild(el);
     });
   }
+  const termMsg = (suffix, extra) => ({ type: `${T.kind === 'os' ? 'os' : 'term'}.${suffix}`, sid: T.sid, ...extra });
   function ensureTerminal() {
     if (T.term) return Promise.resolve();
     if (!T.loading) {
@@ -391,32 +403,31 @@ def run(chunk, total):
         T.fit = new window.FitAddon.FitAddon();
         T.term.loadAddon(T.fit);
         T.term.open($('#term'));
-        T.term.onData((d) => { if (T.sid) send({ type: 'term.in', sid: T.sid, data: d }); });
-        T.term.onResize(({ cols, rows }) => { if (T.sid) send({ type: 'term.resize', sid: T.sid, cols, rows }); });
+        T.term.onData((d) => { if (T.sid) send(termMsg('in', { data: d })); });
+        T.term.onResize(({ cols, rows }) => { if (T.sid) send(termMsg('resize', { cols, rows })); });
       });
     }
     return T.loading;
   }
-  // Which computers can host a terminal, and which one to use when nobody has picked.
-  const terminalHosts = () => S.devices.filter((d) => d.workspace && !d.stale);
-  function defaultHost() {
-    const hosts = terminalHosts();
-    const mine = myHost();
-    return hosts.find((h) => /ubuntu|linux|debian|fedora/i.test(h.workspace.system)) // the Linux machine is the workspace
-      || hosts.find((h) => h.host && h.host === mine)
-      || hosts[0] || null;
-  }
-  const selectedHost = () => terminalHosts().find((h) => h.id === T.hostId) || defaultHost();
+
+  // Computers that can run the OS shell's commands, and computers that can host a direct shell.
+  const runners = () => S.devices.filter((d) => d.exec && !d.stale && d.sharing);
+  const directHosts = () => S.devices.filter((d) => d.workspace && !d.stale);
+  const selectedHost = () => directHosts().find((h) => h.id === T.hostId) || directHosts().find((h) => LINUX.test(h.workspace.system)) || directHosts()[0] || null;
+  const osAvailable = () => runners().length > 0;
 
   function autoOpenTerminal() {
-    if (T.open || T.autoDone || !selectedHost()) return;
-    T.autoDone = true;
-    openTerminal();
+    if (T.open || T.autoDone) return;
+    if (osAvailable()) { T.autoDone = true; openTerminal('os'); }
+    else if (selectedHost()) { T.autoDone = true; openTerminal('direct', selectedHost().id); }
   }
-  async function openTerminal(hostId) {
-    const host = terminalHosts().find((h) => h.id === hostId) || selectedHost();
-    if (!host) { renderWorkspace(); return; }
-    T.hostId = host.id;
+  async function openTerminal(kind = T.kind, hostId = T.hostId) {
+    if (T.sid) send(termMsg('close'));
+    T.sid = null;
+    T.kind = kind === 'direct' ? 'direct' : 'os';
+    const host = T.kind === 'direct' ? (directHosts().find((h) => h.id === hostId) || selectedHost()) : null;
+    if (T.kind === 'direct' && !host) { renderWorkspace(); return; }
+    T.hostId = host ? host.id : T.hostId;
     T.open = true;
     renderWorkspace();
     try {
@@ -426,15 +437,17 @@ def run(chunk, total):
       return;
     }
     fitTerminal();
-    if (T.sid) send({ type: 'term.close', sid: T.sid });
-    T.sid = null;
     T.ref = newId();
     T.term.reset();
-    T.term.write(`\x1b[2mConnecting to ${host.name}…\x1b[0m\r\n`);
-    send({ type: 'term.open', cols: T.term.cols, rows: T.term.rows, ref: T.ref, host: host.id });
+    if (T.kind === 'direct') {
+      T.term.write(`\x1b[2mConnecting to ${host.name}…\x1b[0m\r\n`);
+      send({ type: 'term.open', cols: T.term.cols, rows: T.term.rows, ref: T.ref, host: host.id });
+    } else {
+      send({ type: 'os.open', cols: T.term.cols, rows: T.term.rows, ref: T.ref });
+    }
   }
   function closeTerminal() {
-    if (T.sid) send({ type: 'term.close', sid: T.sid });
+    if (T.sid) send(termMsg('close'));
     T.sid = null;
     T.open = false;
     renderWorkspace();
@@ -451,58 +464,87 @@ def run(chunk, total):
   }
   function onTerminal(m) {
     if (!T.term) return;
-    if (m.type === 'term.opened' && m.ref === T.ref) {
+    const os = m.type.startsWith('os.');
+    if (os !== (T.kind === 'os')) return;
+    const kind = m.type.split('.')[1];
+    if (kind === 'opened' && m.ref === T.ref) {
       T.sid = m.sid;
-      T.hostId = m.hostId;
-      const ws = m.workspace || {};
-      T.term.write(`\x1b[1;33mThis shell runs on ${m.host}\x1b[0m\x1b[2m · ${ws.system || ''} · ${ws.shell || ''}. Everything you run here uses that computer.\x1b[0m\r\n`);
+      if (!os) {
+        T.hostId = m.hostId;
+        const ws = m.workspace || {};
+        T.term.write(`\x1b[1;33mThis shell runs on ${m.host}\x1b[0m\x1b[2m · ${ws.system || ''} · ${ws.shell || ''}. Everything you run here uses that computer.\x1b[0m\r\n`);
+      }
       renderWorkspace();
       fitTerminal();
-      send({ type: 'term.resize', sid: T.sid, cols: T.term.cols, rows: T.term.rows });
+      send(termMsg('resize', { cols: T.term.cols, rows: T.term.rows }));
       T.term.focus();
-    } else if (m.type === 'term.error' && m.ref === T.ref) {
+    } else if (kind === 'error' && m.ref === T.ref) {
       T.term.write(`\r\n${m.message}\r\n`);
-    } else if (m.type === 'term.out' && m.sid === T.sid) {
+    } else if (kind === 'out' && m.sid === T.sid) {
       T.term.write(b64bytes(m.data));
-    } else if (m.type === 'term.exit' && m.sid === T.sid) {
+    } else if (kind === 'exit' && m.sid === T.sid) {
       T.sid = null;
       T.term.write(`\r\n\x1b[2m${m.message || 'The shell ended.'} Press Reconnect to start again.\x1b[0m\r\n`);
       renderWorkspace();
     }
   }
+
   function renderWorkspace() {
-    const hosts = terminalHosts();
+    const rs = runners();
+    const hosts = directHosts();
     const host = selectedHost();
     const mine = myHost();
-    $('#ws-hosts').innerHTML = hosts.map((h) => `<button class="host-tab" type="button" role="tab" data-host="${esc(h.id)}"
-        aria-selected="${!!host && h.id === host.id}" style="--wire:${esc(h.color)}">
-        <b>${esc(h.name)}${h.host && h.host === mine ? ' (this computer)' : ''}</b><span>${esc(h.workspace.system)} · ${esc(h.workspace.shell)}${/ubuntu|linux|debian|fedora/i.test(h.workspace.system) ? ' · Linux' : ''}</span></button>`).join('');
+    const isOs = T.kind === 'os';
+    const linux = rs.filter((r) => LINUX.test(r.exec.os));
+    const using = linux.length ? linux : rs;
+    $('#ws-hosts').innerHTML = `<button class="host-tab os-tab" type="button" role="tab" data-kind="os" aria-selected="${isOs}" style="--wire:var(--ink)">
+        <b>YourHarness OS</b><span>${new Set(rs.map((r) => r.host || r.id)).size > 1 ? `one shell for all ${new Set(rs.map((r) => r.host || r.id)).size} computers` : 'one shell for the pool'} · files in /pool</span></button>`
+      + hosts.map((h) => `<button class="host-tab" type="button" role="tab" data-host="${esc(h.id)}" aria-selected="${!isOs && !!host && h.id === host.id}" style="--wire:${esc(h.color)}">
+        <b>${esc(h.name)}${h.host && h.host === mine ? ' (this computer)' : ''}</b><span>direct shell · ${esc(h.workspace.system)}</span></button>`).join('');
+
     const where = $('#ws-where');
-    if (!host) {
+    if (isOs) {
+      where.style.setProperty('--wire', 'var(--ink)');
+      if (!rs.length) {
+        where.innerHTML = `<div class="where-main">No computer can run commands yet</div>
+          <p>Open the YourHarness app on a Mac or Windows PC and keep sharing on. Phones and tablets can't run commands.</p>`;
+      } else {
+        const rows = using.map((r) => {
+          const cpu = r.load && typeof r.load.cpu === 'number' ? `${Math.round(r.load.cpu)}% CPU` : '';
+          const busy = S.procs.some((p) => p.status === 'running' && p.runner === r.name);
+          return `<span class="runner" style="--wire:${esc(r.color)}"><b>${esc(r.name)}</b> ${esc(r.exec.os)} · ${busy ? 'running a command' : 'idle'}${cpu ? ` · ${cpu}` : ''}</span>`;
+        }).join('');
+        where.innerHTML = `<div class="where-main">Runs on the least-busy computer</div>
+          <div class="runners">${rows}</div>
+          ${linux.length ? '' : '<p class="where-note">No Linux computer is connected, so commands run on macOS for now.</p>'}
+          <details><summary>How this works</summary>
+            <p>This shell belongs to the pool, not to a computer. Each command goes to whichever of these computers is free, your files in <code>/pool</code> go with it, and the line after each command says where it ran.</p>
+            <p>Try <code>par echo {} ::: a b c d</code> to spread work over every computer, or <code>on &lt;computer&gt; &lt;command&gt;</code> to pick one. Commands can't take keyboard input; for an editor or other interactive tool, pick a direct shell.</p>
+          </details>`;
+      }
+      $('#term-title').textContent = 'YourHarness OS';
+      $('#term-title').style.setProperty('--wire', 'var(--ink)');
+    } else if (!host) {
       where.style.removeProperty('--wire');
-      where.innerHTML = `<div class="where-main">No computer can host a terminal right now</div>
-        <p>Open the YourHarness app on a Mac or Windows PC, or add a Linux computer under Devices. Phones and tablets can use a terminal but can't host one.</p>`;
+      where.innerHTML = '<div class="where-main">No computer can host a terminal right now</div><p>Open the YourHarness app on a Mac or Windows PC.</p>';
     } else {
       const ws = host.workspace;
       const remote = !(host.host && host.host === mine);
-      const machines = new Set(S.devices.map((d) => d.host || d.id)).size;
       where.style.setProperty('--wire', host.color);
-      where.innerHTML = `<div class="where-main">Runs on ${esc(host.name)}</div>
-        <p>${esc(ws.system)}, ${esc(ws.shell)} shell${ws.shared ? ', one session shared by every device' : ''}. Commands you type use ${esc(host.name)}'s own processor, memory and files${remote ? `, not ${esc(myMachineName())}'s` : ''}.</p>
-        ${ws.harness && machines > 1 ? `<p>To use all ${machines} computers from here, run <code>harness run …</code> or Python <code>pool.map()</code>.</p>` : ''}
-        ${remote ? `<p>You are typing from ${esc(myMachineName())}. Your keystrokes go to ${esc(host.name)}.</p>` : ''}`;
+      where.innerHTML = `<div class="where-main">Direct shell: runs only on ${esc(host.name)}</div>
+        <p>${esc(ws.system)}, ${esc(ws.shell)} shell. Commands here use ${esc(host.name)}'s own processor, memory and files and are <b>not</b> shared with the pool${remote ? `, and not ${esc(myMachineName())}'s` : ''}. Use the YourHarness OS tab for pooled work.</p>`;
+      $('#term-title').textContent = `${host.name} — ${ws.system} (direct)`;
+      $('#term-title').style.setProperty('--wire', host.color);
     }
-    $('#term-title').textContent = host ? `${host.name} — ${host.workspace.system}` : '';
-    $('#term-title').style.setProperty('--wire', host ? host.color : '');
-    const live = T.open && !!T.sid && host && T.hostId === host.id;
+    const live = T.open && !!T.sid && (isOs || (host && T.hostId === host.id));
     $('#ws-open').hidden = live;
-    $('#ws-open').disabled = !host;
-    $('#ws-open').textContent = host ? (T.open ? `Reconnect to ${host.name}` : `Open terminal on ${host.name}`) : 'Open terminal';
+    $('#ws-open').disabled = isOs ? !rs.length : !host;
+    $('#ws-open').textContent = T.open ? 'Reconnect' : isOs ? 'Open YourHarness OS' : `Open shell on ${host ? host.name : ''}`;
     $('#ws-close').hidden = !T.open;
     $('#term-wrap').hidden = !T.open;
-    $('#wsub-terminal').textContent = host ? `on ${host.name} · ${host.workspace.system}` : '';
+    $('#wsub-terminal').textContent = isOs ? 'YourHarness OS · runs on the least-busy computer' : (host ? `direct shell on ${host.name}` : '');
     requestAnimationFrame(fitTerminal);
-    $('#ws-status').textContent = host && host.workspace.shared ? 'This session stays open on that computer when you close the terminal or switch devices.' : '';
+    $('#ws-status').textContent = '';
   }
 
   // -------------------------------------------------------------------------
@@ -708,6 +750,7 @@ def run(chunk, total):
 
     renderTopbar();
     renderOverviewJob();
+    renderProcs();
     drawSparks();
   }
 
@@ -763,6 +806,18 @@ def run(chunk, total):
     $('#me-chip').style.setProperty('--me-color', S.color || 'var(--ok)');
     const addr = (S.address || location.origin).replace(/^https?:\/\//, '');
     $('#code-chip').innerHTML = S.joinCode ? `Join code <b>${esc(S.joinCode)}</b> · ${esc(addr)}` : esc(addr);
+  }
+
+  // Programs the pool shell is running or ran recently, and the computer each is on
+  function renderProcs() {
+    const box = $('#procs');
+    if (!box) return;
+    const rows = (S.procs || []).slice(0, 12);
+    box.innerHTML = rows.length ? rows.map((p) => {
+      const dur = p.startedAt ? fmtDur((p.endedAt || Date.now()) - p.startedAt) : '';
+      const state = p.status === 'running' ? 'running' : p.status === 'queued' ? 'waiting' : p.status === 'done' ? `exit ${p.code}` : p.status;
+      return `<tr data-state="${esc(p.status)}"><td class="mono">${esc(p.cmd)}</td><td>${esc(p.runner || '—')}</td><td>${esc(state)}</td><td>${esc(dur)}</td></tr>`;
+    }).join('') : '<tr><td colspan="4" class="hint">Nothing has run in the YourHarness OS shell yet.</td></tr>';
   }
 
   // The latest run, split by device: the plainest proof that devices really share the work.
@@ -998,7 +1053,7 @@ def run(chunk, total):
   // -------------------------------------------------------------------------
   // Files app: each computer's home folder, pooled storage, and the shared folder
   // -------------------------------------------------------------------------
-  const FM = { loc: null, path: '', entries: [], info: null, busy: false, sending: null };
+  const FM = { loc: null, path: '', entries: [], info: null, busy: false, sending: null }; // loc.type: 'os' (/pool), 'fs' (a computer), 'shared'
   const FOLDER_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg>';
   const FILE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>';
   const fileComputers = () => machines().map((m) => m.list.find((d) => d.files)).filter(Boolean);
@@ -1007,17 +1062,13 @@ def run(chunk, total):
   function fmRenderLocations() {
     const mine = myHost();
     const comps = fileComputers();
-    if (!FM.loc) {
-      const own = comps.find((d) => d.host && d.host === mine);
-      const first = own || comps[0];
-      FM.loc = first ? { type: 'fs', device: first.id } : { type: 'pool' };
-    }
+    if (!FM.loc) FM.loc = { type: 'os' };
     const cur = FM.loc;
     $('#fm-locs').innerHTML = comps.map((d) => `<li><button class="fm-loc" type="button" data-loc="fs" data-device="${esc(d.id)}" style="--wire:${esc(d.color)}"
         aria-current="${cur.type === 'fs' && cur.device === d.id}"><b>${esc(d.name)}${d.host && d.host === mine ? ' (this computer)' : ''}</b><span>${esc(d.workspace ? d.workspace.system : d.info.platform)}, home folder</span></button></li>`).join('')
       || '<li class="hint">No computer is sharing its files yet. Computers running the YourHarness app appear here.</li>';
     const coord = S.devices.find((d) => d.coordinator);
-    $('#fm-locs-pool').innerHTML = `<li><button class="fm-loc" type="button" data-loc="pool" aria-current="${cur.type === 'pool'}" style="--wire:var(--focus)"><b>Pooled storage</b><span>spread over ${S.pool.agents} ${S.pool.agents === 1 ? 'computer' : 'computers'}, 2 copies</span></button></li>
+    $('#fm-locs-pool').innerHTML = `<li><button class="fm-loc" type="button" data-loc="os" aria-current="${cur.type === 'os'}" style="--wire:var(--ink)"><b>YourHarness OS · /pool</b><span>belongs to the pool, kept on ${Math.min(2, S.pool.agents) || 0} of ${S.pool.agents} ${S.pool.agents === 1 ? 'computer' : 'computers'}</span></button></li>
       <li><button class="fm-loc" type="button" data-loc="shared" aria-current="${cur.type === 'shared'}" style="--wire:var(--muted)"><b>Shared folder</b><span>on ${esc(coord ? coord.name : 'the pool computer')}, used by Search</span></button></li>`;
   }
 
@@ -1026,12 +1077,12 @@ def run(chunk, total):
   async function fmLoad(keepStatus = false) {
     fmRenderLocations();
     const loc = FM.loc;
-    if (loc.type !== 'fs') { fmRender(); return; }
+    if (loc.type !== 'fs' && loc.type !== 'os') { fmRender(); return; }
     FM.busy = true;
     const kept = keepStatus === true ? $('#fm-status').textContent : '';
     if (!kept) $('#fm-status').textContent = 'Loading…';
     try {
-      const res = await fetch(`/api/fs/${encodeURIComponent(loc.device)}?path=${encodeURIComponent(FM.path)}`, { credentials: 'same-origin' });
+      const res = await fetch(loc.type === 'os' ? `/api/os/list?path=${encodeURIComponent(FM.path)}` : `/api/fs/${encodeURIComponent(loc.device)}?path=${encodeURIComponent(FM.path)}`, { credentials: 'same-origin' });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `The pool answered ${res.status}.`);
       if (FM.loc !== loc) return;
@@ -1049,51 +1100,57 @@ def run(chunk, total):
     fmRender();
   }
 
+  const fmApi = (loc) => (loc.type === 'os' ? {
+    download: (path) => `/api/os/file?path=${encodeURIComponent(path)}`,
+    upload: (path) => `/api/os/file?path=${encodeURIComponent(path)}`,
+    mkdir: '/api/os/mkdir', rename: '/api/os/rename',
+    remove: (path, dir) => `/api/os/file?path=${encodeURIComponent(path)}${dir ? '&recursive=1' : ''}`,
+  } : {
+    download: (path) => `/api/fs/${encodeURIComponent(loc.device)}/download?path=${encodeURIComponent(path)}`,
+    upload: (path) => `/api/fs/${encodeURIComponent(loc.device)}/upload?path=${encodeURIComponent(path)}`,
+    mkdir: `/api/fs/${encodeURIComponent(loc.device)}/mkdir`, rename: `/api/fs/${encodeURIComponent(loc.device)}/rename`,
+    remove: (path, dir) => `/api/fs/${encodeURIComponent(loc.device)}?path=${encodeURIComponent(path)}${dir ? '&recursive=1' : ''}`,
+  });
+  const fmWhere = (loc) => (loc.type === 'os' ? `YourHarness OS /pool/${FM.path ? `${FM.path}/` : ''}` : `${fmDeviceName(loc.device)} ~/${FM.path ? `${FM.path}/` : ''}`);
+
   function fmRender() {
-    const loc = FM.loc || { type: 'pool' };
+    const loc = FM.loc || { type: 'os' };
     const showHidden = $('#fm-show-hidden').checked;
-    const isFs = loc.type === 'fs';
-    $('#fm-up').disabled = !isFs || !FM.path;
-    $('#fm-new').hidden = !isFs;
-    $('.fm-hidden').hidden = !isFs;
+    const folderView = loc.type === 'fs' || loc.type === 'os';
+    $('#fm-up').disabled = !folderView || !FM.path;
+    $('#fm-new').hidden = !folderView;
+    $('.fm-hidden').hidden = loc.type !== 'fs';
     let crumbs = '';
-    if (isFs) {
+    if (folderView) {
       const parts = FM.path ? FM.path.split('/') : [];
-      crumbs = `<button type="button" data-crumb="">${esc(fmDeviceName(loc.device))} ~</button>` + parts.map((part, k) =>
+      const rootName = loc.type === 'os' ? 'YourHarness OS /pool' : `${fmDeviceName(loc.device)} ~`;
+      crumbs = `<button type="button" data-crumb="">${esc(rootName)}</button>` + parts.map((part, k) =>
         `<span class="sep">/</span><button type="button" data-crumb="${esc(parts.slice(0, k + 1).join('/'))}">${esc(part)}</button>`).join('');
     } else {
-      crumbs = `<span>${loc.type === 'pool' ? 'Pooled storage' : 'Shared folder'}</span>`;
+      crumbs = '<span>Shared folder</span>';
     }
     $('#fm-crumbs').innerHTML = crumbs;
-    $('#wsub-files').textContent = isFs ? `${fmDeviceName(loc.device)} · ~/${FM.path}` : (loc.type === 'pool' ? 'Pooled storage' : 'Shared folder');
+    $('#wsub-files').textContent = folderView ? fmWhere(loc).replace(/\/$/, '') : 'Shared folder';
 
     let rows = '';
-    if (isFs) {
+    if (folderView) {
+      const api = fmApi(loc);
       const entries = FM.entries.filter((e) => showHidden || !e.hidden);
-      $('#fm-info').textContent = FM.info ? `Files on ${fmDeviceName(loc.device)}. Uploads go into this folder. ${fmtSize(FM.info.free)} free on its disk.` : '';
+      $('#fm-info').textContent = loc.type === 'os'
+        ? `This is the disk of YourHarness OS. It belongs to the pool, not to a computer: files here are cut into pieces kept on ${Math.min(2, S.pool.agents)} of the ${S.pool.agents} computers, and every command you run in the OS shell sees them as /pool. Uploads go into this folder.`
+        : (FM.info ? `Files on ${fmDeviceName(loc.device)}. Uploads go into this folder. ${fmtSize(FM.info.free)} free on its disk.` : '');
       rows = entries.map((e) => {
         const path = FM.path ? `${FM.path}/${e.name}` : e.name;
-        const name = e.dir ? `<button class="fm-name" type="button" data-open-dir="${esc(path)}">${FOLDER_SVG}${esc(e.name)}</button>` : `<span class="fm-name">${FILE_SVG}${esc(e.name)}</span>`;
+        const name = e.dir ? `<button class="fm-name" type="button" data-open-dir="${esc(path)}">${FOLDER_SVG}${esc(e.name)}</button>`
+          : `<span class="fm-name">${FILE_SVG}${esc(e.name)}</span>${loc.type === 'os' && e.on ? `<span class="fm-on">stored on ${esc(e.on.join(' and ') || 'no connected computer')}${e.available === false ? ' · offline' : ''}</span>` : ''}`;
         const acts = e.dir
           ? `<button class="btn ghost" type="button" data-rename="${esc(path)}">Rename</button><button class="btn ghost danger" type="button" data-del="${esc(path)}" data-dir="1">Delete</button>`
-          : `<a class="btn ghost" href="/api/fs/${encodeURIComponent(loc.device)}/download?path=${encodeURIComponent(path)}" download="${esc(e.name)}">Download</a>
-             <button class="btn ghost" type="button" data-send="${esc(path)}">Send to…</button>
+          : `${e.available === false ? '' : `<a class="btn ghost" href="${api.download(path)}" download="${esc(e.name)}">Download</a>`}
+             ${loc.type === 'fs' ? `<button class="btn ghost" type="button" data-send="${esc(path)}">Send to…</button>` : ''}
              <button class="btn ghost" type="button" data-rename="${esc(path)}">Rename</button>
              <button class="btn ghost danger" type="button" data-del="${esc(path)}">Delete</button>`;
         return `<tr><td>${name}</td><td>${e.dir ? '' : fmtSize(e.size)}</td><td>${fmtWhen(e.mtime)}</td><td><div class="fm-acts">${acts}</div></td></tr>`;
-      }).join('') || `<tr><td colspan="4" class="hint">${FM.busy ? 'Loading…' : 'This folder is empty.'}</td></tr>`;
-    } else if (loc.type === 'pool') {
-      const p = S.pool;
-      $('#fm-info').textContent = p.agents
-        ? `Files here are cut into pieces, and each piece is kept on ${Math.min(2, p.agents)} of the ${p.agents} computers. "Stored on" shows which ones. ${fmtSize(p.storedBytes)} stored, about ${nf.format(p.freeGB)} GB free.`
-        : 'No computer is connected to hold pooled files.';
-      rows = p.files.map((f) => {
-        const state = !f.available ? 'offline' : f.copies < Math.min(f.wanted, p.agents) ? `${f.copies} copy, repairing` : `${f.copies} ${f.copies === 1 ? 'copy' : 'copies'}`;
-        return `<tr><td><span class="fm-name">${FILE_SVG}${esc(f.name)}</span><span class="fm-on">Stored on ${esc((f.on || []).join(' and ') || 'no connected computer')} · ${esc(state)}</span></td>
-          <td>${fmtSize(f.size)}</td><td>${fmtWhen(f.mtime)}</td>
-          <td><div class="fm-acts">${f.available ? `<a class="btn ghost" href="/api/pool/${encodeURIComponent(f.name)}" download="${esc(f.name)}">Download</a>` : ''}
-          <button class="btn ghost danger" type="button" data-pool-del="${esc(f.name)}">Delete</button></div></td></tr>`;
-      }).join('') || '<tr><td colspan="4" class="hint">Nothing in pooled storage yet. Upload a file to spread it over the computers.</td></tr>';
+      }).join('') || `<tr><td colspan="4" class="hint">${FM.busy ? 'Loading…' : loc.type === 'os' ? 'This folder is empty. Upload files here, or make some in the YourHarness OS terminal.' : 'This folder is empty.'}</td></tr>`;
     } else {
       $('#fm-info').textContent = 'One folder on the computer that runs the pool. Every device can read it, and "Search a file" in Jobs reads from here.';
       rows = S.files.map((f) => `<tr><td><span class="fm-name">${FILE_SVG}${esc(f.name)}</span>${f.by ? `<span class="fm-on">added by ${esc(f.by)}</span>` : ''}</td>
@@ -1267,26 +1324,25 @@ def run(chunk, total):
   });
 
   // Workspace
-  $('#ws-open').addEventListener('click', () => openTerminal(T.hostId));
+  $('#ws-open').addEventListener('click', () => openTerminal(T.kind, T.hostId));
   $('#ws-hosts').addEventListener('click', (e) => {
-    const b = e.target.closest('button[data-host]');
+    const b = e.target.closest('button.host-tab');
     if (!b) return;
-    T.hostId = b.dataset.host;
-    if (T.open) openTerminal(T.hostId); // switch the open terminal to the picked computer
-    else renderWorkspace();
+    if (b.dataset.kind === 'os') { T.kind = 'os'; openTerminal('os'); }
+    else { T.kind = 'direct'; T.hostId = b.dataset.host; openTerminal('direct', T.hostId); }
   });
+  $('#ws-close').addEventListener('click', closeTerminal);
   $('#machines').addEventListener('click', (e) => {
     const a = e.target.closest('[data-open-host]');
     if (!a) return;
-    T.hostId = a.dataset.openHost;
     T.autoDone = true;
-    setTimeout(() => openTerminal(T.hostId), 0); // after the view switches
+    setTimeout(() => openTerminal('direct', a.dataset.openHost), 0); // after the window opens
   });
   $('#ws-close').addEventListener('click', closeTerminal);
   document.querySelector('.keybar').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-seq]');
     if (!b || !T.sid) return;
-    send({ type: 'term.in', sid: T.sid, data: KEYS[b.dataset.seq] });
+    send(termMsg('in', { data: KEYS[b.dataset.seq] }));
     T.term.focus();
   });
 
@@ -1423,7 +1479,7 @@ def run(chunk, total):
     const name = await askText('New folder', '', 'Create');
     if (!name) return;
     try {
-      await fmPost(`/api/fs/${encodeURIComponent(FM.loc.device)}/mkdir`, { path: FM.path ? `${FM.path}/${name}` : name });
+      await fmPost(fmApi(FM.loc).mkdir, { path: FM.path ? `${FM.path}/${name}` : name });
       fmLoad();
     } catch (err) { $('#fm-status').textContent = err.message; }
   });
@@ -1434,18 +1490,19 @@ def run(chunk, total):
     const status = $('#fm-status');
     for (const f of files) {
       try {
-        const where = loc.type === 'fs' ? `${fmDeviceName(loc.device)} ~/${FM.path ? `${FM.path}/` : ''}` : loc.type === 'pool' ? 'pooled storage' : 'the shared folder';
-        const url = loc.type === 'fs' ? `/api/fs/${encodeURIComponent(loc.device)}/upload?path=${encodeURIComponent(FM.path ? `${FM.path}/${f.name}` : f.name)}` : null;
-        await uploadFile(f, (pct) => { status.textContent = `Sending ${f.name} to ${where}: ${pct}%`; }, loc.type === 'pool' ? '/api/pool' : '/api/files', url);
+        const folderView = loc.type === 'fs' || loc.type === 'os';
+        const where = folderView ? fmWhere(loc) : 'the shared folder';
+        const url = folderView ? fmApi(loc).upload(FM.path ? `${FM.path}/${f.name}` : f.name) : null;
+        await uploadFile(f, (pct) => { status.textContent = `Sending ${f.name} to ${where}: ${pct}%`; }, '/api/files', url);
         status.textContent = `Saved ${f.name} to ${where}.`;
       } catch (err) {
         status.textContent = `Could not save ${f.name}. ${err.message}`;
       }
     }
-    if (loc.type === 'fs') fmLoad(true);
+    if (loc.type === 'fs' || loc.type === 'os') fmLoad(true);
   });
   $('#fm-rows').addEventListener('click', async (e) => {
-    const t = e.target.closest('[data-open-dir],[data-rename],[data-del],[data-send],[data-pool-del],[data-shared-del],[data-search]');
+    const t = e.target.closest('[data-open-dir],[data-rename],[data-del],[data-send],[data-shared-del],[data-search]');
     if (!t) return;
     const status = $('#fm-status');
     const dev = FM.loc && FM.loc.device;
@@ -1456,13 +1513,13 @@ def run(chunk, total):
         const base = old.split('/').pop();
         const name = await askText(`Rename ${base}`, base, 'Rename');
         if (!name || name === base) return;
-        await fmPost(`/api/fs/${encodeURIComponent(dev)}/rename`, { path: old, to: [...old.split('/').slice(0, -1), name].join('/') });
+        await fmPost(fmApi(FM.loc).rename, { path: old, to: [...old.split('/').slice(0, -1), name].join('/') });
         fmLoad();
       } else if (t.dataset.del) {
         const path = t.dataset.del;
         const isDir = !!t.dataset.dir;
-        if (!confirm(`Delete ${path.split('/').pop()} from ${fmDeviceName(dev)}?${isDir ? ' Everything inside the folder is deleted too.' : ''} This can't be undone.`)) return;
-        const res = await fetch(`/api/fs/${encodeURIComponent(dev)}?path=${encodeURIComponent(path)}${isDir ? '&recursive=1' : ''}`, { method: 'DELETE', credentials: 'same-origin' });
+        if (!confirm(`Delete ${path.split('/').pop()} from ${FM.loc.type === 'os' ? 'YourHarness OS' : fmDeviceName(dev)}?${isDir ? ' Everything inside the folder is deleted too.' : ''} This can't be undone.`)) return;
+        const res = await fetch(fmApi(FM.loc).remove(path, isDir), { method: 'DELETE', credentials: 'same-origin' });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Could not delete it.');
         fmLoad();
       } else if (t.dataset.send) {
@@ -1473,9 +1530,6 @@ def run(chunk, total):
         $('#fm-send-what').textContent = `${t.dataset.send.split('/').pop()} from ${fmDeviceName(dev)}`;
         $('#fm-send-err').textContent = '';
         $('#fm-send').hidden = false;
-      } else if (t.dataset.poolDel) {
-        if (!confirm(`Delete ${t.dataset.poolDel} from pooled storage? Every copy is removed.`)) return;
-        await fetch(`/api/pool/${encodeURIComponent(t.dataset.poolDel)}`, { method: 'DELETE', credentials: 'same-origin' });
       } else if (t.dataset.sharedDel) {
         if (!confirm(`Delete ${t.dataset.sharedDel} from the shared folder?`)) return;
         await fetch(`/api/files/${encodeURIComponent(t.dataset.sharedDel)}`, { method: 'DELETE', credentials: 'same-origin' });
