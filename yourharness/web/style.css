@@ -64,12 +64,12 @@ code { font-family: var(--mono); font-size: 0.9em; }
 }
 .layout { max-width: 1240px; margin: 0 auto; padding: 4px 20px 56px; display: flex; flex-direction: column; gap: 20px; }
 .col { display: contents; }
-#workspace { order: 0; } #pool { order: 1; } #run { order: 2; } #current { order: 3; } #me { order: 4; } #add { order: 5; } #files { order: 6; } #history-panel { order: 7; }
+#workspace, #resources { order: 0; } #pool { order: 1; } #run { order: 2; } #current { order: 3; } #me { order: 4; } #add { order: 5; } #files { order: 6; } #history-panel { order: 7; }
 
 @media (min-width: 960px) {
   .layout { display: grid; grid-template-columns: minmax(320px, 5fr) 7fr; gap: 28px; align-items: start; }
   .col { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
-  #workspace { grid-column: 1 / -1; }
+  #workspace, #resources { grid-column: 1 / -1; }
 }
 
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; min-width: 0; }
@@ -242,6 +242,24 @@ fieldset .hint { margin-top: 12px; }
 .workspace.max .term-wrap { flex: 1; min-height: 0; }
 .workspace.max .term { flex: 1; height: auto; min-height: 0; }
 body.term-max { overflow: hidden; }
+
+/* ---------- Pooled resources ---------- */
+.res-totals { margin-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.res-tile { padding: 12px 14px; border-radius: 10px; background: var(--bg); display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.res-tile b { font-size: 1.5rem; font-weight: 640; font-stretch: 108%; line-height: 1.2; }
+.res-tile span { font-size: 0.8125rem; color: var(--muted); }
+.scroll-x { overflow-x: auto; margin-top: 14px; }
+.res-table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 0.9375rem; }
+.res-table th { text-align: left; font-weight: 500; font-size: 0.8125rem; color: var(--muted); padding: 0 12px 8px 0; border-bottom: 1px solid var(--line); }
+.res-table td { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+.res-table tr[data-off="true"] td { opacity: 0.5; }
+.res-name { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.res-name::before { content: ""; width: 14px; height: 4px; border-radius: 2px; background: var(--wire); flex: none; }
+.res-kind { font-size: 0.8125rem; color: var(--muted); }
+.res-sub { display: block; font-size: 0.8125rem; color: var(--muted); }
+.res-bar { display: block; height: 5px; border-radius: 3px; margin-top: 5px; background: color-mix(in srgb, var(--wire) 22%, transparent); overflow: hidden; }
+.res-bar i { display: block; height: 100%; background: var(--wire); }
+.res-na { color: var(--muted); }
 
 /* ---------- Add a device ---------- */
 .add .field { margin-top: 14px; }

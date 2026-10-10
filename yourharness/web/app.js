@@ -82,12 +82,18 @@ def run(chunk, total):
   function clampThreads(n) {
     return Math.max(1, Math.min(MAX_THREADS, Math.floor(n) || 1));
   }
-  function deviceInfo() {
+  async function deviceInfo() {
+    let storageGB = null;
+    try {
+      const est = await navigator.storage.estimate(); // browser storage this site could use; Safari reports it too
+      if (est && est.quota) storageGB = Math.round(((est.quota - (est.usage || 0)) / 2 ** 30) * 10) / 10;
+    } catch { /* not available */ }
     return {
       platform: PLATFORM,
       cores: CORES,
-      memoryGB: typeof navigator.deviceMemory === 'number' ? navigator.deviceMemory : null,
-      gpu: 'gpu' in navigator,
+      memoryGB: typeof navigator.deviceMemory === 'number' ? navigator.deviceMemory : null, // Safari doesn't report it
+      storageGB,
+      gpus: 'gpu' in navigator ? ['WebGPU'] : [],
     };
   }
 
@@ -132,10 +138,11 @@ def run(chunk, total):
     const ws = new WebSocket(`${proto}//${location.host}/ws`);
     S.ws = ws;
     setConn('connecting');
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        type: 'hello', name: S.name, threads: S.threads, sharing: S.sharing, info: deviceInfo(), runtimes: ['js'],
-      }));
+    ws.onopen = async () => {
+      const info = await deviceInfo();
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'hello', name: S.name, threads: S.threads, sharing: S.sharing, info, runtimes: ['js'] }));
+      }
     };
     ws.onmessage = (e) => {
       let m;
@@ -549,6 +556,7 @@ def run(chunk, total):
       ? `${list.length} ${list.length === 1 ? 'device' : 'devices'} connected, ${sharing.length} sharing ${threads} ${threads === 1 ? 'thread' : 'threads'}.${memText}`
       : 'No devices yet.';
 
+    renderResources();
     const job = viewJob();
     $('#wires').innerHTML = list.map((d) => {
       const share = job && job.total ? ((job.perDevice[d.id]?.chunks || 0) / job.total) * 100 : 0;
@@ -572,6 +580,49 @@ def run(chunk, total):
         <div class="wire-line" data-busy="${d.busy > 0 && !d.stale}" data-sharing="${d.sharing}"><span class="wire-fill" style="width:${share.toFixed(2)}%"></span></div>
         <div class="wire-meta">${meta}</div>
       </li>`;
+    }).join('');
+  }
+
+  // -------------------------------------------------------------------------
+  // Rendering: pooled resources
+  // -------------------------------------------------------------------------
+  function renderResources() {
+    const list = S.devices.slice().sort((a, b) => (b.id === S.id) - (a.id === S.id) || a.joinedAt - b.joinedAt);
+    const live = list.filter((d) => d.sharing && !d.stale);
+    const threads = live.reduce((a, d) => a + d.threads, 0);
+    const cores = live.reduce((a, d) => a + d.info.cores, 0);
+    const memDevs = live.filter((d) => d.info.memoryGB);
+    const mem = memDevs.reduce((a, d) => a + d.info.memoryGB, 0);
+    const memFree = live.reduce((a, d) => a + (d.info.memoryFreeGB || 0), 0);
+    const disk = live.reduce((a, d) => a + (d.info.diskFreeGB || 0), 0);
+    const browserStore = live.filter((d) => d.kind !== 'agent').reduce((a, d) => a + (d.info.storageGB || 0), 0);
+    const gpuDevs = live.filter((d) => d.info.gpus && d.info.gpus.length).length;
+    const tile = (big, label, sub) => `<div class="res-tile"><b>${big}</b><span>${label}</span><span>${sub}</span></div>`;
+    $('#res-totals').innerHTML = [
+      tile(`${live.length} of ${list.length}`, 'devices sharing', list.length - live.length ? `${list.length - live.length} not sharing` : 'all of them'),
+      tile(nf.format(threads), 'threads of compute', `of ${nf.format(cores)} cores on those devices`),
+      tile(mem ? `${gb(mem)} GB` : 'None reported', 'memory', mem ? `${gb(memFree)} GB free, reported by ${memDevs.length} of ${live.length}` : 'iPhone and iPad browsers do not report it'),
+      tile(`${gb(disk)} GB`, 'free disk on computers', browserStore ? `plus up to ${gb(browserStore)} GB of browser storage` : 'agents report their disk'),
+      tile(nf.format(gpuDevs), gpuDevs === 1 ? 'device with graphics' : 'devices with graphics', 'WebGPU in browsers, Metal or CUDA on computers'),
+    ].join('');
+
+    const na = (t) => `<span class="res-na">${t}</span>`;
+    $('#res-table tbody').innerHTML = list.map((d) => {
+      const i = d.info;
+      const off = !d.sharing || d.stale;
+      const pct = i.cores ? Math.min(100, (d.threads / i.cores) * 100) : 0;
+      const memCell = i.memoryGB
+        ? `${gb(i.memoryGB)} GB${i.memoryFreeGB ? `<span class="res-sub">${gb(i.memoryFreeGB)} GB free</span><span class="res-bar"><i style="width:${Math.min(100, (i.memoryFreeGB / i.memoryGB) * 100).toFixed(0)}%"></i></span>` : ''}`
+        : na(d.kind === 'agent' ? 'Not reported' : `Not reported by ${esc(i.platform) === 'iPhone' || esc(i.platform) === 'iPad' ? 'Safari' : 'this browser'}`);
+      const diskCell = d.kind === 'agent'
+        ? (i.diskFreeGB ? `${gb(i.diskFreeGB)} GB free` : na('Not reported'))
+        : (i.storageGB ? `up to ${gb(i.storageGB)} GB<span class="res-sub">browser storage</span>` : na('Not reported'));
+      const gpuCell = i.gpus && i.gpus.length ? esc(i.gpus.join(', ')) : na('None');
+      const status = d.stale ? 'Not responding' : !d.sharing ? 'Not sharing' : null;
+      return `<tr style="--wire:${esc(d.color)}" data-off="${off}">
+        <td><span class="res-name">${esc(d.name)}</span><span class="res-kind">${d.kind === 'agent' ? 'Agent' : 'Browser'}, ${esc(i.platform)}${status ? `, ${status}` : ''}</span></td>
+        <td>${d.threads} of ${i.cores} threads<span class="res-bar"><i style="width:${pct.toFixed(0)}%"></i></span></td>
+        <td>${memCell}</td><td>${diskCell}</td><td>${gpuCell}</td></tr>`;
     }).join('');
   }
 

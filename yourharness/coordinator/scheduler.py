@@ -57,6 +57,7 @@ def sanitize_info(info) -> dict:
         "memoryGB": _num_or_none(info.get("memoryGB"), 0, 65536),
         "memoryFreeGB": _num_or_none(info.get("memoryFreeGB"), 0, 65536),
         "diskFreeGB": _num_or_none(info.get("diskFreeGB"), 0, 10**7),
+        "storageGB": _num_or_none(info.get("storageGB"), 0, 10**7),
         "gpu": bool(info.get("gpu")) or bool(gpus),
         "gpus": [clean_text(g, 80, "GPU") for g in gpus[:4] if isinstance(g, str)],
     }
