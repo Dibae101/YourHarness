@@ -16,6 +16,16 @@ Download from the [Releases page](https://github.com/Dibae101/YourHarness/releas
 
 **What the app does when you launch it:** it looks for a pool on your network. If it finds one it asks for the 4-digit code once, then reconnects by itself on every launch. If it finds none, it starts a pool on that computer. The computer shares its processors in the background (menu bar on Mac, tray on Windows); closing the window keeps sharing, and Quit stops it. The workspace terminal opens in the window. On the Mac the terminal is the Mac's shell; on Windows, add Ubuntu with the PowerShell command below for a Linux terminal.
 
+### Finding your way around
+
+| Section | What it shows |
+| --- | --- |
+| **Overview** | One card per computer or phone: what it shares (processor threads, memory, disk, graphics), its role (*Runs the pool*, *Hosts a terminal*) and *You are here* on the one you're using. Totals at the top. |
+| **Terminal** | Pick a computer, and the shell runs on that computer. The banner says which one ("Runs on DESKTOP-KAMSS80, Ubuntu on Windows (WSL)") and, when it isn't the computer you're on, that your keystrokes go there. Every computer running the app hosts its own terminal: macOS shell on a Mac; Ubuntu through WSL (or PowerShell if WSL isn't set up) on Windows. |
+| **Jobs** | Run a job across every sharing device and watch who computes which piece. |
+| **Files** | Pooled storage spread over the computers, and the shared folder. |
+| **Devices** | The join code and address, this device's sharing settings, and every connection with a Remove button. |
+
 Releases are built by GitHub Actions: push a tag such as `v0.3.0` and the `.dmg` and `.exe` appear on the Releases page. Run `python desktop/make_icons.py` to regenerate icons.
 
 ## What's here
@@ -170,6 +180,7 @@ For HTTPS, which also lets phones keep the screen on and use WebGPU, put the coo
 | `--shared-dir` / `SHARED_DIR` | `~/.yourharness/shared` | The shared folder |
 | `--public-url` | this machine's LAN address | Address printed in the join link |
 | `MAX_UPLOAD_MB` | `4096` | Largest file you can add |
+| `HARNESS_TRUST_PROXY` | unset | Set to `1` behind a proxy so each device keeps its own address (X-Forwarded-For) |
 | `HARNESS_STALE_S` | `20` | Seconds without a check-in before a device's pieces move |
 | `CHUNK_TIMEOUT_S` | `300` | Seconds before a running piece is given to another device |
 

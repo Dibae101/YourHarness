@@ -44,7 +44,11 @@
 <div id="app" class="app" hidden>
   <header class="topbar">
     <span class="wordmark small">YourHarness</span>
-    <span id="conn" class="conn" data-state="connecting">Connecting</span>
+    <div class="top-info">
+      <span id="me-chip" class="chip chip-me"></span>
+      <a id="code-chip" class="chip chip-code" href="#devices"></a>
+      <span id="conn" class="conn" data-state="connecting">Connecting</span>
+    </div>
   </header>
 
   <div id="replaced" class="banner" hidden>
@@ -52,130 +56,70 @@
     <button id="replaced-btn" class="btn ghost small" type="button">Use this tab instead</button>
   </div>
 
-  <main class="layout">
-    <section id="workspace" class="panel workspace" aria-labelledby="ws-h">
-      <div class="panel-head">
-        <div>
-          <h2 id="ws-h">Workspace</h2>
+  <div class="shell">
+    <nav class="nav" aria-label="Sections">
+      <a class="nav-item" href="#overview" data-nav="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z"/></svg><span>Overview</span></a>
+      <a class="nav-item" href="#terminal" data-nav="terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v14H3z"/><path d="M7 10l3 2-3 2M12 15h5"/></svg><span>Terminal</span></a>
+      <a class="nav-item" href="#jobs" data-nav="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/></svg><span>Jobs</span></a>
+      <a class="nav-item" href="#files" data-nav="files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg><span>Files</span></a>
+      <a class="nav-item" href="#devices" data-nav="devices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v9H3zM1 17h16M18 8h4v11h-4z"/></svg><span>Devices</span></a>
+    </nav>
+
+    <main class="views">
+      <section class="view" data-view="overview" aria-labelledby="ov-h">
+        <div class="view-head">
+          <h1 id="ov-h">Overview</h1>
+          <p id="ov-sub" class="hint"></p>
+        </div>
+        <div id="res-totals" class="res-totals"></div>
+        <div class="ov-actions">
+          <a class="btn primary" href="#terminal">Open a terminal</a>
+          <a class="btn ghost" href="#jobs">Run a job</a>
+          <a class="btn ghost" href="#devices">Add a device</a>
+        </div>
+        <div id="ov-job" class="ov-job" hidden></div>
+        <h2 class="section-h">Computers and devices in the pool</h2>
+        <div id="machines" class="machines"></div>
+      </section>
+
+      <section class="view" data-view="terminal" hidden>
+        <section id="workspace" class="workspace" aria-labelledby="ws-h">
+          <div class="view-head">
+            <h1 id="ws-h">Terminal</h1>
+            <p class="hint">Pick a computer. The shell runs on that computer, with its own files, processor and memory.</p>
+          </div>
+          <div id="ws-hosts" class="host-tabs" role="tablist" aria-label="Computer to open a terminal on"></div>
+          <div id="ws-where" class="where" aria-live="polite"></div>
+          <div class="term-actions">
+            <button id="ws-open" class="btn primary" type="button">Open terminal</button>
+            <button id="ws-max" class="btn ghost" type="button" hidden aria-pressed="false">Full screen</button>
+            <button id="ws-close" class="btn ghost" type="button" hidden>Close terminal</button>
+          </div>
+          <div id="term-wrap" class="term-wrap" hidden>
+            <div class="term-title" id="term-title"></div>
+            <div id="term" class="term"></div>
+            <div class="keybar" role="toolbar" aria-label="Terminal keys">
+              <button type="button" data-seq="esc">Esc</button>
+              <button type="button" data-seq="tab">Tab</button>
+              <button type="button" data-seq="ctrlc">Ctrl-C</button>
+              <button type="button" data-seq="ctrld">Ctrl-D</button>
+              <button type="button" data-seq="up" aria-label="Up">↑</button>
+              <button type="button" data-seq="down" aria-label="Down">↓</button>
+              <button type="button" data-seq="left" aria-label="Left">←</button>
+              <button type="button" data-seq="right" aria-label="Right">→</button>
+            </div>
+          </div>
           <p id="ws-status" class="hint"></p>
-        </div>
-        <div class="head-actions">
-          <button id="ws-open" class="btn primary" type="button">Open terminal</button>
-          <button id="ws-max" class="btn ghost" type="button" hidden aria-pressed="false">Full screen</button>
-          <button id="ws-close" class="btn ghost" type="button" hidden>Close terminal</button>
-        </div>
-      </div>
-      <div id="term-wrap" class="term-wrap" hidden>
-        <div id="term" class="term"></div>
-        <div class="keybar" role="toolbar" aria-label="Terminal keys">
-          <button type="button" data-seq="esc">Esc</button>
-          <button type="button" data-seq="tab">Tab</button>
-          <button type="button" data-seq="ctrlc">Ctrl-C</button>
-          <button type="button" data-seq="ctrld">Ctrl-D</button>
-          <button type="button" data-seq="up" aria-label="Up">↑</button>
-          <button type="button" data-seq="down" aria-label="Down">↓</button>
-          <button type="button" data-seq="left" aria-label="Left">←</button>
-          <button type="button" data-seq="right" aria-label="Right">→</button>
-        </div>
-      </div>
-    </section>
-
-    <section id="resources" class="panel resources" aria-labelledby="res-h">
-      <h2 id="res-h">Pooled resources</h2>
-      <p id="res-note" class="hint">What every device that is sharing adds to the pool. Compute is shared now. Memory and storage are the amounts each device could contribute as pooling for them arrives.</p>
-      <div id="res-totals" class="res-totals"></div>
-      <div class="scroll-x"><table id="res-table" class="res-table">
-        <thead><tr><th scope="col">Device</th><th scope="col">Compute</th><th scope="col">Memory</th><th scope="col">Storage</th><th scope="col">Graphics</th></tr></thead>
-        <tbody></tbody>
-      </table></div>
-    </section>
-
-    <div class="col">
-      <section id="pool" class="pool" aria-labelledby="pool-h">
-        <h2 id="pool-h">Devices</h2>
-        <p id="pool-summary" class="summary"></p>
-        <ul id="wires" class="wires"></ul>
+        </section>
       </section>
 
-      <section id="me" class="panel me" aria-labelledby="me-h">
-        <h2 id="me-h">This device</h2>
-        <label class="switch">
-          <input id="me-share" type="checkbox">
-          <span class="switch-track" aria-hidden="true"></span>
-          <span>Share this device's processor</span>
-        </label>
-        <label class="field">
-          <span>Threads to use: <output id="me-threads-out" for="me-threads"></output></span>
-          <input id="me-threads" type="range" min="1" step="1">
-        </label>
-        <label class="field"><span>Device name</span><input id="me-name" maxlength="40" autocomplete="off"></label>
-        <p id="me-awake" class="hint"></p>
-        <button id="me-leave" class="btn ghost" type="button">Leave the pool on this device</button>
-      </section>
-
-      <section id="add" class="panel add" aria-labelledby="add-h">
-        <h2 id="add-h">Add a device</h2>
-        <p class="hint">Other computers running the YourHarness app: File → Join another pool, then enter the address and code. Phones and tablets: open this page's address and enter the join code. Computers: run the command in a terminal on a Mac, on Linux, or in Ubuntu under WSL on Windows. Computers join as agents, which share real memory and disk and run Python.</p>
-        <div class="field">
-          <span id="add-addr-label">Pool address, to type into the YourHarness app on another computer</span>
-          <div class="copyrow">
-            <input id="add-addr" readonly aria-labelledby="add-addr-label">
-            <button class="btn ghost small" type="button" data-copy="add-addr">Copy</button>
-          </div>
+      <section class="view" data-view="jobs" hidden>
+        <div class="view-head">
+          <h1>Jobs</h1>
+          <p class="hint">A job is split into pieces, and every device that is sharing works on them at once.</p>
         </div>
-        <div class="field">
-          <span id="add-code-label">Join code</span>
-          <div class="copyrow">
-            <input id="add-code" class="code-big" readonly aria-labelledby="add-code-label">
-            <button class="btn ghost small" type="button" data-copy="add-code">Copy</button>
-          </div>
-        </div>
-        <div class="field">
-          <span id="add-link-label">Join link, signs in without typing the code</span>
-          <div class="copyrow">
-            <input id="add-link" readonly aria-labelledby="add-link-label">
-            <button class="btn ghost small" type="button" data-copy="add-link">Copy</button>
-          </div>
-        </div>
-        <div class="field">
-          <span id="add-win-label">Windows PC: paste in PowerShell (sets up Ubuntu, asks for the code)</span>
-          <div class="copyrow">
-            <input id="add-win" readonly aria-labelledby="add-win-label">
-            <button class="btn ghost small" type="button" data-copy="add-win">Copy</button>
-          </div>
-        </div>
-        <div class="field">
-          <span id="add-cmd-label">Mac or Linux computer: paste in a terminal</span>
-          <div class="copyrow">
-            <textarea id="add-cmd" rows="4" readonly aria-labelledby="add-cmd-label"></textarea>
-            <button class="btn ghost small" type="button" data-copy="add-cmd">Copy</button>
-          </div>
-        </div>
-        <p class="hint">Keep <code>--workspace</code> only on the computer that should host the shared Linux terminal. Anyone with this link can join the pool and run code on its devices, so share it only with people you trust.</p>
-        <p id="add-status" class="hint" aria-live="polite"></p>
-      </section>
-
-      <section id="pooled" class="panel files" aria-labelledby="pooled-h">
-        <div class="panel-head">
-          <h2 id="pooled-h">Pooled storage</h2>
-          <label class="btn ghost file-btn">Add files<input id="pool-input" type="file" multiple></label>
-        </div>
-        <p id="pool-info" class="hint"></p>
-        <p id="pool-status" class="hint" aria-live="polite"></p>
-        <ul id="pool-list" class="file-list"></ul>
-      </section>
-
-      <section id="files" class="panel files" aria-labelledby="files-h">
-        <div class="panel-head">
-          <h2 id="files-h">Shared files</h2>
-          <label class="btn ghost file-btn">Add files<input id="file-input" type="file" multiple></label>
-        </div>
-        <p id="upload-status" class="hint" aria-live="polite"></p>
-        <ul id="file-list" class="file-list"></ul>
-      </section>
-    </div>
-
-    <div class="col">
+        <div class="grid-2">
+          <div class="stack">
       <section id="run" class="panel run" aria-labelledby="run-h">
         <h2 id="run-h">Run a job</h2>
         <div class="kinds" role="radiogroup" aria-label="Job type">
@@ -280,7 +224,8 @@
           <button id="run-btn" class="btn primary" type="submit">Run on the pool</button>
         </form>
       </section>
-
+          </div>
+          <div class="stack">
       <section id="current" class="panel current" aria-labelledby="current-h">
         <div class="panel-head">
           <h2 id="current-h">Current run</h2>
@@ -303,13 +248,114 @@
           </table>
         </div>
       </section>
-
       <section id="history-panel" class="panel history" aria-labelledby="history-h">
         <h2 id="history-h">All runs</h2>
         <ol id="history" class="history-list"></ol>
       </section>
-    </div>
-  </main>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" data-view="files" hidden>
+        <div class="view-head">
+          <h1>Files</h1>
+          <p class="hint">Pooled storage spreads files over the computers. The shared folder lives on the computer that runs the pool and is what "Search a file" reads.</p>
+        </div>
+        <div class="grid-2">
+      <section id="pooled" class="panel files" aria-labelledby="pooled-h">
+        <div class="panel-head">
+          <h2 id="pooled-h">Pooled storage</h2>
+          <label class="btn ghost file-btn">Add files<input id="pool-input" type="file" multiple></label>
+        </div>
+        <p id="pool-info" class="hint"></p>
+        <p id="pool-status" class="hint" aria-live="polite"></p>
+        <ul id="pool-list" class="file-list"></ul>
+      </section>
+      <section id="files" class="panel files" aria-labelledby="files-h">
+        <div class="panel-head">
+          <h2 id="files-h">Shared files</h2>
+          <label class="btn ghost file-btn">Add files<input id="file-input" type="file" multiple></label>
+        </div>
+        <p id="upload-status" class="hint" aria-live="polite"></p>
+        <ul id="file-list" class="file-list"></ul>
+      </section>
+        </div>
+      </section>
+
+      <section class="view" data-view="devices" hidden>
+        <div class="view-head">
+          <h1>Devices</h1>
+          <p class="hint">Add devices, change what this device shares, and remove devices you no longer use.</p>
+        </div>
+        <div class="grid-2">
+      <section id="add" class="panel add" aria-labelledby="add-h">
+        <h2 id="add-h">Add a device</h2>
+        <p class="hint"><b>Mac or Windows with the YourHarness app:</b> File → Join another pool, then type the address and code below. <b>iPhone, iPad or any browser:</b> open the address and type the code.</p>
+        <div class="field">
+          <span id="add-addr-label">Pool address, to type into the YourHarness app on another computer</span>
+          <div class="copyrow">
+            <input id="add-addr" readonly aria-labelledby="add-addr-label">
+            <button class="btn ghost small" type="button" data-copy="add-addr">Copy</button>
+          </div>
+        </div>
+        <div class="field">
+          <span id="add-code-label">Join code</span>
+          <div class="copyrow">
+            <input id="add-code" class="code-big" readonly aria-labelledby="add-code-label">
+            <button class="btn ghost small" type="button" data-copy="add-code">Copy</button>
+          </div>
+        </div>
+        <div class="field">
+          <span id="add-link-label">Join link, signs in without typing the code</span>
+          <div class="copyrow">
+            <input id="add-link" readonly aria-labelledby="add-link-label">
+            <button class="btn ghost small" type="button" data-copy="add-link">Copy</button>
+          </div>
+        </div>
+        <div class="field">
+          <span id="add-win-label">Windows PC: paste in PowerShell (sets up Ubuntu, asks for the code)</span>
+          <div class="copyrow">
+            <input id="add-win" readonly aria-labelledby="add-win-label">
+            <button class="btn ghost small" type="button" data-copy="add-win">Copy</button>
+          </div>
+        </div>
+        <div class="field">
+          <span id="add-cmd-label">Mac or Linux computer: paste in a terminal</span>
+          <div class="copyrow">
+            <textarea id="add-cmd" rows="4" readonly aria-labelledby="add-cmd-label"></textarea>
+            <button class="btn ghost small" type="button" data-copy="add-cmd">Copy</button>
+          </div>
+        </div>
+        <p class="hint">The commands above are for computers without the app: a Linux machine, or Ubuntu set up under WSL. Anyone with the code can join the pool and run code on its devices, so share it only with people you trust.</p>
+        <p id="add-status" class="hint" aria-live="polite"></p>
+      </section>
+      <section id="me" class="panel me" aria-labelledby="me-h">
+        <h2 id="me-h">This device</h2>
+        <label class="switch">
+          <input id="me-share" type="checkbox">
+          <span class="switch-track" aria-hidden="true"></span>
+          <span>Share this device's processor</span>
+        </label>
+        <label class="field">
+          <span>Threads to use: <output id="me-threads-out" for="me-threads"></output></span>
+          <input id="me-threads" type="range" min="1" step="1">
+        </label>
+        <label class="field"><span>Device name</span><input id="me-name" maxlength="40" autocomplete="off"></label>
+        <p id="me-awake" class="hint"></p>
+        <button id="me-leave" class="btn ghost" type="button">Leave the pool on this device</button>
+      </section>
+        </div>
+        <section id="resources" class="panel resources" aria-labelledby="res-h">
+          <h2 id="res-h">Every connection</h2>
+          <p class="hint">Each row is one connection to the pool. A computer running the YourHarness app and a browser tab shows twice here, and once in Overview.</p>
+          <div class="scroll-x"><table id="res-table" class="res-table">
+            <thead><tr><th scope="col">Device</th><th scope="col">Compute</th><th scope="col">Memory</th><th scope="col">Storage</th><th scope="col">Graphics</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody></tbody>
+          </table></div>
+        </section>
+      </section>
+    </main>
+  </div>
 </div>
 
 </body>

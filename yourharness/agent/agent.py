@@ -82,6 +82,7 @@ class AgentConfig:
     sharing: bool = True
     workspace: bool = False
     home: Path = field(default_factory=default_home)
+    coordinator: bool = False
 
 
 class Agent:
@@ -93,11 +94,18 @@ class Agent:
         self.pool = SlotPool({"server": cfg.server, "token": cfg.token}, self._piece_done, cfg.home / "work")
         self.terms = None
         if cfg.workspace:
-            if os.name != "posix":
-                raise SystemExit("The workspace needs Linux or macOS. On Windows, run the agent inside WSL (Ubuntu).")
-            from .terminal import TerminalHost
+            env = {"HARNESS_URL": cfg.server, "HARNESS_TOKEN": cfg.token}
+            if os.name == "posix":
+                from .terminal import TerminalHost
 
-            self.terms = TerminalHost(self.send, cfg.home, {"HARNESS_URL": cfg.server, "HARNESS_TOKEN": cfg.token})
+                self.terms = TerminalHost(self.send, cfg.home, env)
+            else:
+                try:
+                    from .terminal_win import WinTerminalHost
+
+                    self.terms = WinTerminalHost(self.send, cfg.home, env)
+                except ImportError as e:  # pywinpty missing: share compute without a terminal
+                    log.warning("This computer can't host a terminal (%s). It still shares its processors.", e)
 
     # ------------------------------------------------------------------ sending
     def send(self, msg: dict) -> None:
@@ -150,7 +158,7 @@ class Agent:
         return {
             "type": "hello", "kind": "agent", "name": self.cfg.name, "threads": self.cfg.threads, "sharing": self.cfg.sharing,
             "runtimes": ["python"], "info": sysinfo.collect(str(self.cfg.home)), "version": __version__,
-            "workspace": self.terms.describe() if self.terms else None,
+            "workspace": self.terms.describe() if self.terms else None, "coordinator": self.cfg.coordinator,
         }
 
     async def _connect_once(self) -> int | None:

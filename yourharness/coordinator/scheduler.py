@@ -68,7 +68,8 @@ def sanitize_info(info) -> dict:
 def sanitize_workspace(ws) -> dict | None:
     if not isinstance(ws, dict):
         return None
-    return {"shell": clean_text(ws.get("shell"), 20, "shell"), "shared": bool(ws.get("shared")), "system": clean_text(ws.get("system"), 60, "Linux")}
+    return {"shell": clean_text(ws.get("shell"), 20, "shell"), "shared": bool(ws.get("shared")),
+            "system": clean_text(ws.get("system"), 60, "Linux"), "harness": bool(ws.get("harness"))}
 
 
 class Device:
@@ -86,6 +87,7 @@ class Device:
         allowed = {"python"} if self.kind == "agent" else {"js"}
         self.runtimes = frozenset(r for r in offered if r in allowed) or frozenset(allowed)
         self.workspace = sanitize_workspace(hello.get("workspace")) if self.kind == "agent" else None
+        self.coordinator = self.kind == "agent" and bool(hello.get("coordinator"))  # the computer that runs the pool
         self.inflight: set[tuple[str, int]] = set()
         self.params_sent: set[str] = set()
         self.done = 0
@@ -228,7 +230,7 @@ class Scheduler:
         return {
             "id": d.id, "name": d.name, "kind": d.kind, "color": d.color, "info": d.info, "threads": d.threads,
             "sharing": d.sharing, "runtimes": sorted(d.runtimes), "workspace": d.workspace, "busy": len(d.inflight),
-            "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host,
+            "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host, "coordinator": d.coordinator,
         }
 
     def device_list(self) -> list[dict]:

@@ -26,7 +26,7 @@ class Terminals:
     def hosts(self) -> list["Device"]:
         hosts = [d for d in self.s.devices.values() if d.kind == "agent" and d.workspace and not d.closed]
         # Ubuntu (Linux, or WSL on Windows) is the workspace; other computers are the fallback
-        hosts.sort(key=lambda d: 0 if d.workspace["system"].startswith(("Linux", "Windows (WSL)")) else 1)
+        hosts.sort(key=lambda d: 0 if any(w in d.workspace["system"] for w in ("Ubuntu", "Linux", "Debian", "Fedora")) else 1)
         return hosts
 
     def from_browser(self, browser: "Device", msg: dict) -> None:
@@ -65,7 +65,8 @@ class Terminals:
             "type": "term.open", "sid": sid, "user": browser.name,
             "cols": clamp_int(msg.get("cols"), 2, 500, 80), "rows": clamp_int(msg.get("rows"), 2, 300, 24),
         })
-        browser.send({"type": "term.opened", "sid": sid, "ref": ref, "host": host.name, "hostId": host.id, "workspace": host.workspace})
+        browser.send({"type": "term.opened", "sid": sid, "ref": ref, "host": host.name, "hostId": host.id, "workspace": host.workspace,
+                      "hostInfo": host.info.get("platform")})
 
     def from_agent(self, agent: "Device", msg: dict) -> None:
         sid = msg.get("sid")

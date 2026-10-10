@@ -67,13 +67,9 @@ def cmd_serve(a) -> int:
 
 # ---------------------------------------------------------------------- agent
 def _default_agent_name() -> str:
-    from .sysinfo import is_wsl
+    from .sysinfo import computer_name
 
-    if is_wsl():
-        return "Windows PC (Linux)"
-    if sys.platform == "darwin":
-        return "Mac agent"
-    return socket.gethostname().split(".")[0][:40] or "Computer"
+    return computer_name()
 
 
 def cmd_agent(a) -> int:

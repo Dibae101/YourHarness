@@ -198,8 +198,8 @@ def run(chunk, total):
         setConn('online');
         if ((S.follow || !S.view) && m.snapshot) setView(m.snapshot);
         renderAll();
-        if (T.open) openTerminal();
-        else maybeAutoOpen();
+        if (T.open) openTerminal(T.hostId);
+        else if (currentView() === 'terminal') autoOpenTerminal();
         break;
       case 'denied':
         S.deniedReason = m.reason || '';
@@ -208,7 +208,7 @@ def run(chunk, total):
         S.devices = m.devices;
         renderDevices();
         renderWorkspace();
-        maybeAutoOpen();
+        if (currentView() === 'terminal') autoOpenTerminal();
         break;
       case 'job':
         upsertJob(m.job);
@@ -385,13 +385,26 @@ def run(chunk, total):
     }
     return T.loading;
   }
-  // Landing in the workspace is the point, so open the terminal as soon as a computer can host it.
-  function maybeAutoOpen() {
-    if (T.autoDone || T.open || !S.devices.some((d) => d.workspace)) return;
+  // Which computers can host a terminal, and which one to use when nobody has picked.
+  const terminalHosts = () => S.devices.filter((d) => d.workspace && !d.stale);
+  function defaultHost() {
+    const hosts = terminalHosts();
+    const mine = myHost();
+    return hosts.find((h) => h.host && h.host === mine) // your own computer first
+      || hosts.find((h) => /ubuntu|linux|debian|fedora/i.test(h.workspace.system))
+      || hosts[0] || null;
+  }
+  const selectedHost = () => terminalHosts().find((h) => h.id === T.hostId) || defaultHost();
+
+  function autoOpenTerminal() {
+    if (T.open || T.autoDone || !selectedHost()) return;
     T.autoDone = true;
     openTerminal();
   }
-  async function openTerminal() {
+  async function openTerminal(hostId) {
+    const host = terminalHosts().find((h) => h.id === hostId) || selectedHost();
+    if (!host) { renderWorkspace(); return; }
+    T.hostId = host.id;
     T.open = true;
     renderWorkspace();
     try {
@@ -405,8 +418,8 @@ def run(chunk, total):
     T.sid = null;
     T.ref = newId();
     T.term.reset();
-    T.term.write('\x1b[2mConnecting to the workspace…\x1b[0m\r\n');
-    send({ type: 'term.open', cols: T.term.cols, rows: T.term.rows, ref: T.ref });
+    T.term.write(`\x1b[2mConnecting to ${host.name}…\x1b[0m\r\n`);
+    send({ type: 'term.open', cols: T.term.cols, rows: T.term.rows, ref: T.ref, host: host.id });
   }
   function closeTerminal() {
     if (T.sid) send({ type: 'term.close', sid: T.sid });
@@ -438,6 +451,8 @@ def run(chunk, total):
     if (m.type === 'term.opened' && m.ref === T.ref) {
       T.sid = m.sid;
       T.hostId = m.hostId;
+      const ws = m.workspace || {};
+      T.term.write(`\x1b[1;33mThis shell runs on ${m.host}\x1b[0m\x1b[2m · ${ws.system || ''} · ${ws.shell || ''}. Everything you run here uses that computer.\x1b[0m\r\n`);
       renderWorkspace();
       fitTerminal();
       send({ type: 'term.resize', sid: T.sid, cols: T.term.cols, rows: T.term.rows });
@@ -448,27 +463,42 @@ def run(chunk, total):
       T.term.write(b64bytes(m.data));
     } else if (m.type === 'term.exit' && m.sid === T.sid) {
       T.sid = null;
-      T.term.write(`\r\n\x1b[2m${m.message || 'The shell ended.'} Press Open terminal to start again.\x1b[0m\r\n`);
+      T.term.write(`\r\n\x1b[2m${m.message || 'The shell ended.'} Press Reconnect to start again.\x1b[0m\r\n`);
       renderWorkspace();
     }
   }
   function renderWorkspace() {
-    const hosts = S.devices.filter((d) => d.workspace);
-    const host = hosts.find((h) => h.id === T.hostId) || hosts[0];
-    let status;
-    if (!host) status = 'No computer is hosting the workspace yet. Add one under "Add a device" with --workspace.';
-    else {
+    const hosts = terminalHosts();
+    const host = selectedHost();
+    const mine = myHost();
+    $('#ws-hosts').innerHTML = hosts.map((h) => `<button class="host-tab" type="button" role="tab" data-host="${esc(h.id)}"
+        aria-selected="${!!host && h.id === host.id}" style="--wire:${esc(h.color)}">
+        <b>${esc(h.name)}${h.host && h.host === mine ? ' (this computer)' : ''}</b><span>${esc(h.workspace.system)} · ${esc(h.workspace.shell)}</span></button>`).join('');
+    const where = $('#ws-where');
+    if (!host) {
+      where.style.removeProperty('--wire');
+      where.innerHTML = `<div class="where-main">No computer can host a terminal right now</div>
+        <p>Open the YourHarness app on a Mac or Windows PC, or add a Linux computer under Devices. Phones and tablets can use a terminal but can't host one.</p>`;
+    } else {
       const ws = host.workspace;
-      status = `Linux workspace on ${host.name}${ws.shared ? ', one tmux session shared by every device' : `, a ${ws.shell} shell per terminal`}.`;
-      if (host.stale) status += ' It isn\'t responding right now.';
+      const remote = !(host.host && host.host === mine);
+      const machines = new Set(S.devices.map((d) => d.host || d.id)).size;
+      where.style.setProperty('--wire', host.color);
+      where.innerHTML = `<div class="where-main">Runs on ${esc(host.name)}</div>
+        <p>${esc(ws.system)}, ${esc(ws.shell)} shell${ws.shared ? ', one session shared by every device' : ''}. Commands you type use ${esc(host.name)}'s own processor, memory and files${remote ? `, not ${esc(myMachineName())}'s` : ''}.</p>
+        ${ws.harness && machines > 1 ? `<p>To use all ${machines} computers from here, run <code>harness run …</code> or Python <code>pool.map()</code>.</p>` : ''}
+        ${remote ? `<p>You are typing from ${esc(myMachineName())}. Your keystrokes go to ${esc(host.name)}.</p>` : ''}`;
     }
-    $('#ws-status').textContent = status;
-    $('#ws-open').hidden = T.open && !!T.sid;
-    $('#ws-open').textContent = T.open ? 'Reconnect' : 'Open terminal';
-    $('#ws-open').disabled = !host && !T.open;
+    $('#term-title').textContent = host ? `${host.name} — ${host.workspace.system}` : '';
+    $('#term-title').style.setProperty('--wire', host ? host.color : '');
+    const live = T.open && !!T.sid && host && T.hostId === host.id;
+    $('#ws-open').hidden = live;
+    $('#ws-open').disabled = !host;
+    $('#ws-open').textContent = host ? (T.open ? `Reconnect to ${host.name}` : `Open terminal on ${host.name}`) : 'Open terminal';
     $('#ws-close').hidden = !T.open;
     $('#ws-max').hidden = !T.open;
     $('#term-wrap').hidden = !T.open;
+    $('#ws-status').textContent = host && host.workspace.shared ? 'This session stays open on that computer when you close the terminal or switch devices.' : '';
   }
 
   // -------------------------------------------------------------------------
@@ -554,92 +584,132 @@ def run(chunk, total):
   // -------------------------------------------------------------------------
   const gb = (n) => nf.format(Math.round(n * 10) / 10);
 
-  function renderDevices() {
-    const list = S.devices.slice().sort((a, b) => (b.id === S.id) - (a.id === S.id) || a.joinedAt - b.joinedAt);
-    const sharing = list.filter((d) => d.sharing && !d.stale);
-    const threads = sharing.reduce((a, d) => a + d.threads, 0);
-    const mem = list.filter((d) => d.info.memoryGB);
-    const memText = mem.length ? ` ${gb(mem.reduce((a, d) => a + d.info.memoryGB, 0))} GB of memory reported by ${mem.length === list.length ? 'all of them' : `${mem.length} of them`}.` : '';
-    $('#pool-summary').textContent = list.length
-      ? `${list.length} ${list.length === 1 ? 'device' : 'devices'} connected, ${sharing.length} sharing ${threads} ${threads === 1 ? 'thread' : 'threads'}.${memText}`
-      : 'No devices yet.';
+  const myDevice = () => S.devices.find((d) => d.id === S.id);
+  const myHost = () => (myDevice() || {}).host || null;
+  const naText = (t) => `<span class="res-na">${t}</span>`;
 
-    renderResources();
-    const job = viewJob();
-    $('#wires').innerHTML = list.map((d) => {
-      const share = job && job.total ? ((job.perDevice[d.id]?.chunks || 0) / job.total) * 100 : 0;
-      const info = d.info;
-      const meta = [
-        d.kind === 'agent' ? 'Agent' : 'Browser',
-        esc(info.platform),
-        d.sharing ? `${d.threads} of ${info.cores} threads` : 'Not sharing',
-        info.memoryGB ? `${gb(info.memoryGB)} GB memory${info.memoryFreeGB ? `, ${gb(info.memoryFreeGB)} free` : ''}` : null,
-        info.diskFreeGB ? `${gb(info.diskFreeGB)} GB disk free` : null,
-        info.gpus && info.gpus.length ? esc(info.gpus.join(', ')) : null,
-        d.workspace ? '<strong>Hosts the workspace</strong>' : null,
-        d.stale ? '<strong class="warn">Not responding</strong>' : d.busy ? `<strong>Working on ${d.busy}</strong>` : 'Idle',
-        `${nf.format(d.done)} pieces done`,
-      ].filter(Boolean).map((t) => `<span>${t}</span>`).join('');
-      const side = d.id === S.id
-        ? '<span class="wire-you">This device</span>'
-        : `<button class="btn ghost wire-remove" type="button" data-remove="${esc(d.id)}" data-name="${esc(d.name)}">Remove</button>`;
-      return `<li class="wire" style="--wire:${esc(d.color)}" data-stale="${d.stale}">
-        <div class="wire-head"><span class="wire-name">${esc(d.name)}</span><span class="wire-side">${side}</span></div>
-        <div class="wire-line" data-busy="${d.busy > 0 && !d.stale}" data-sharing="${d.sharing}"><span class="wire-fill" style="width:${share.toFixed(2)}%"></span></div>
-        <div class="wire-meta">${meta}</div>
-      </li>`;
-    }).join('');
+  // Group connections into physical machines: a computer running the app and a browser tab is one machine.
+  function machines() {
+    const groups = new Map();
+    for (const d of S.devices) {
+      const key = d.host || d.id;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(d);
+    }
+    return [...groups.values()].map((list) => {
+      const agent = list.find((d) => d.kind === 'agent');
+      const main = agent || list[0];
+      const live = list.filter((d) => d.sharing && !d.stale);
+      return {
+        key: main.host || main.id, list, main, agent,
+        here: list.some((d) => d.id === S.id) || (!!main.host && main.host === myHost()),
+        coordinator: list.some((d) => d.coordinator),
+        terminal: list.find((d) => d.workspace),
+        stale: list.every((d) => d.stale),
+        sharing: live.length > 0,
+        threads: Math.min(main.info.cores || Infinity, live.reduce((a, d) => a + d.threads, 0)),
+        busy: list.reduce((a, d) => a + d.busy, 0),
+        done: list.reduce((a, d) => a + d.done, 0),
+      };
+    }).sort((a, b) => (b.here - a.here) || (b.coordinator - a.coordinator) || a.main.joinedAt - b.main.joinedAt);
   }
 
-  // -------------------------------------------------------------------------
-  // Rendering: pooled resources
-  // -------------------------------------------------------------------------
-  function renderResources() {
-    const list = S.devices.slice().sort((a, b) => (b.id === S.id) - (a.id === S.id) || a.joinedAt - b.joinedAt);
-    const live = list.filter((d) => d.sharing && !d.stale);
-    const threads = live.reduce((a, d) => a + d.threads, 0);
-    // A computer running an agent and a browser tab is one machine: count its cores and memory once.
-    const byHost = new Map();
-    for (const d of live) {
-      const key = d.host || d.id;
-      const cur = byHost.get(key);
-      if (!cur || (d.kind === 'agent' && cur.kind !== 'agent')) byHost.set(key, d);
-    }
-    const machines = [...byHost.values()];
-    const cores = machines.reduce((a, d) => a + d.info.cores, 0);
-    const memDevs = machines.filter((d) => d.info.memoryGB);
-    const mem = memDevs.reduce((a, d) => a + d.info.memoryGB, 0);
-    const memFree = machines.reduce((a, d) => a + (d.info.memoryFreeGB || 0), 0);
-    const disk = live.reduce((a, d) => a + (d.info.diskFreeGB || 0), 0);
-    const browserStore = live.filter((d) => d.kind !== 'agent').reduce((a, d) => a + (d.info.storageGB || 0), 0);
-    const gpuDevs = live.filter((d) => d.info.gpus && d.info.gpus.length).length;
+  function renderDevices() {
+    const ms = machines();
+    const sharing = ms.filter((m) => m.sharing);
+    const threads = sharing.reduce((a, m) => a + m.threads, 0);
+    const cores = sharing.reduce((a, m) => a + m.main.info.cores, 0);
+    const memMs = sharing.filter((m) => m.main.info.memoryGB);
+    const mem = memMs.reduce((a, m) => a + m.main.info.memoryGB, 0);
+    const memFree = memMs.reduce((a, m) => a + (m.main.info.memoryFreeGB || 0), 0);
+    const disk = sharing.reduce((a, m) => a + (m.agent && m.agent.info.diskFreeGB || 0), 0);
+    const gpus = sharing.filter((m) => m.main.info.gpus && m.main.info.gpus.length).length;
     const tile = (big, label, sub) => `<div class="res-tile"><b>${big}</b><span>${label}</span><span>${sub}</span></div>`;
     $('#res-totals').innerHTML = [
-      tile(`${machines.length}`, machines.length === 1 ? 'computer or device sharing' : 'computers and devices sharing', list.length - live.length ? `${list.length - live.length} not sharing` : live.length > machines.length ? 'a browser tab on a computer with an agent counts once' : 'all of them'),
-      tile(nf.format(threads), 'threads of compute', `of ${nf.format(cores)} cores on those devices`),
-      tile(mem ? `${gb(mem)} GB` : 'None reported', 'memory', mem ? `${gb(memFree)} GB free, reported by ${memDevs.length} of ${machines.length}` : 'iPhone and iPad browsers do not report it'),
-      tile(`${gb(disk)} GB`, 'free disk on computers', browserStore ? `plus up to ${gb(browserStore)} GB of browser storage` : 'agents report their disk'),
-      tile(nf.format(gpuDevs), gpuDevs === 1 ? 'device with graphics' : 'devices with graphics', 'WebGPU in browsers, Metal or CUDA on computers'),
+      tile(`${sharing.length} of ${ms.length}`, ms.length === 1 ? 'device sharing' : 'devices sharing', sharing.length === ms.length ? 'all of them' : `${ms.length - sharing.length} connected but not sharing`),
+      tile(nf.format(threads), 'processor threads', `of ${nf.format(cores)} cores on the sharing devices`),
+      tile(mem ? `${gb(mem)} GB` : '—', 'memory', mem ? `${gb(memFree)} GB free on ${memMs.length} ${memMs.length === 1 ? 'device' : 'devices'}` : 'not reported'),
+      tile(disk ? `${gb(disk)} GB` : '—', 'free disk for pooled storage', disk ? 'on computers running the app' : 'add a computer to store files'),
+      tile(nf.format(gpus), gpus === 1 ? 'device with graphics' : 'devices with graphics', 'listed per device below'),
     ].join('');
+    const here = ms.find((m) => m.here);
+    $('#ov-sub').textContent = ms.length
+      ? `${ms.length} ${ms.length === 1 ? 'device is' : 'devices are'} in this pool. You are on ${here ? here.main.name : S.name}.`
+      : 'No devices yet.';
 
-    const na = (t) => `<span class="res-na">${t}</span>`;
+    $('#machines').innerHTML = ms.map((m) => {
+      const i = m.main.info;
+      const badges = [
+        m.here ? '<span class="badge here">You are here</span>' : '',
+        m.coordinator ? '<span class="badge">Runs the pool</span>' : '',
+        m.terminal ? '<span class="badge">Hosts a terminal</span>' : '',
+        m.stale ? '<span class="badge warn">Not responding</span>' : m.busy ? `<span class="badge ok">Working on ${m.busy}</span>` : m.sharing ? '<span class="badge ok">Sharing</span>' : '<span class="badge">Not sharing</span>',
+      ].join('');
+      const osText = m.terminal ? m.terminal.workspace.system : i.platform;
+      const pct = i.cores ? Math.min(100, (m.threads / i.cores) * 100) : 0;
+      const memText = i.memoryGB ? `${gb(i.memoryGB)} GB${i.memoryFreeGB ? `<small>${gb(i.memoryFreeGB)} GB free</small>` : ''}` : naText(['iPhone', 'iPad'].includes(i.platform) ? 'Safari does not report it' : 'Not reported');
+      const diskText = m.agent && m.agent.info.diskFreeGB ? `${gb(m.agent.info.diskFreeGB)} GB free<small>holds pooled files</small>`
+        : i.storageGB ? `${gb(i.storageGB)} GB<small>browser storage only</small>` : naText('Not reported');
+      const gpuText = i.gpus && i.gpus.length ? esc(i.gpus.join(', ')) : naText('None');
+      const via = m.list.map((d) => {
+        const how = d.kind === 'agent' ? 'YourHarness app' : 'Browser tab';
+        const state = d.stale ? 'not responding' : d.sharing ? `sharing ${d.threads} ${d.threads === 1 ? 'thread' : 'threads'}` : 'connected, not sharing';
+        return `<span><b>${how}</b>: ${state}${d.id === S.id ? ' (this window)' : ''}</span>`;
+      }).join('');
+      const actions = [
+        m.terminal ? `<a class="btn ghost small" href="#terminal" data-open-host="${esc(m.terminal.id)}">Open terminal here</a>` : '',
+      ].join('');
+      return `<article class="machine" style="--wire:${esc(m.main.color)}" data-off="${!m.sharing && !m.terminal}">
+        <div class="machine-head"><span class="machine-name">${esc(m.main.name)}</span><span class="machine-os">${esc(osText)}</span><div class="badges">${badges}</div></div>
+        <dl class="shares">
+          <div><dt>Processor</dt><dd>${m.sharing ? `${m.threads} of ${i.cores} threads` : naText(`0 of ${i.cores} threads`)}<span class="res-bar"><i style="width:${pct.toFixed(0)}%"></i></span></dd></div>
+          <div><dt>Memory</dt><dd>${memText}</dd></div>
+          <div><dt>Storage</dt><dd>${diskText}</dd></div>
+          <div><dt>Graphics</dt><dd>${gpuText}</dd></div>
+        </dl>
+        <div class="via">${via}<span>${nf.format(m.done)} pieces computed so far</span></div>
+        ${actions ? `<div class="machine-actions">${actions}</div>` : ''}
+      </article>`;
+    }).join('') || '<p class="empty">No devices are connected.</p>';
+
+    // the detailed table on the Devices page: one row per connection
+    const list = S.devices.slice().sort((a, b) => (b.id === S.id) - (a.id === S.id) || a.joinedAt - b.joinedAt);
     $('#res-table tbody').innerHTML = list.map((d) => {
       const i = d.info;
       const off = !d.sharing || d.stale;
       const pct = i.cores ? Math.min(100, (d.threads / i.cores) * 100) : 0;
-      const memCell = i.memoryGB
-        ? `${gb(i.memoryGB)} GB${i.memoryFreeGB ? `<span class="res-sub">${gb(i.memoryFreeGB)} GB free</span><span class="res-bar"><i style="width:${Math.min(100, (i.memoryFreeGB / i.memoryGB) * 100).toFixed(0)}%"></i></span>` : ''}`
-        : na(d.kind === 'agent' ? 'Not reported' : `Not reported by ${esc(i.platform) === 'iPhone' || esc(i.platform) === 'iPad' ? 'Safari' : 'this browser'}`);
-      const diskCell = d.kind === 'agent'
-        ? (i.diskFreeGB ? `${gb(i.diskFreeGB)} GB free` : na('Not reported'))
-        : (i.storageGB ? `up to ${gb(i.storageGB)} GB<span class="res-sub">browser storage</span>` : na('Not reported'));
-      const gpuCell = i.gpus && i.gpus.length ? esc(i.gpus.join(', ')) : na('None');
-      const status = d.stale ? 'Not responding' : !d.sharing ? 'Not sharing' : null;
+      const memCell = i.memoryGB ? `${gb(i.memoryGB)} GB${i.memoryFreeGB ? `<span class="res-sub">${gb(i.memoryFreeGB)} GB free</span>` : ''}` : naText('Not reported');
+      const diskCell = d.kind === 'agent' ? (i.diskFreeGB ? `${gb(i.diskFreeGB)} GB free` : naText('Not reported'))
+        : (i.storageGB ? `up to ${gb(i.storageGB)} GB<span class="res-sub">browser storage</span>` : naText('Not reported'));
+      const status = d.stale ? 'not responding' : !d.sharing ? 'not sharing' : null;
+      const action = d.id === S.id ? '<span class="res-kind">This window</span>'
+        : `<button class="btn ghost small" type="button" data-remove="${esc(d.id)}" data-name="${esc(d.name)}">Remove</button>`;
       return `<tr style="--wire:${esc(d.color)}" data-off="${off}">
-        <td><span class="res-name">${esc(d.name)}</span><span class="res-kind">${d.kind === 'agent' ? 'Agent' : 'Browser'}, ${esc(i.platform)}${status ? `, ${status}` : ''}</span></td>
-        <td>${d.threads} of ${i.cores} threads<span class="res-bar"><i style="width:${pct.toFixed(0)}%"></i></span></td>
-        <td>${memCell}</td><td>${diskCell}</td><td>${gpuCell}</td></tr>`;
+        <td><span class="res-name">${esc(d.name)}</span><span class="res-kind">${d.kind === 'agent' ? 'YourHarness app' : 'Browser tab'}, ${esc(i.platform)}${status ? `, ${status}` : ''}</span></td>
+        <td>${d.sharing ? `${d.threads} of ${i.cores} threads` : naText('not sharing')}<span class="res-bar"><i style="width:${d.sharing ? pct.toFixed(0) : 0}%"></i></span></td>
+        <td>${memCell}</td><td>${diskCell}</td><td>${i.gpus && i.gpus.length ? esc(i.gpus.join(', ')) : naText('None')}</td><td>${action}</td></tr>`;
     }).join('');
+
+    renderTopbar();
+    renderOverviewJob();
+  }
+
+  const myMachineName = () => { const m = machines().find((x) => x.here); return m ? m.main.name : S.name; };
+  function renderTopbar() {
+    $('#me-chip').innerHTML = `You are on <b>${esc(myMachineName())}</b>`;
+    $('#me-chip').style.setProperty('--me-color', S.color || 'var(--ok)');
+    const addr = (S.address || location.origin).replace(/^https?:\/\//, '');
+    $('#code-chip').innerHTML = S.joinCode ? `Join code <b>${esc(S.joinCode)}</b> · ${esc(addr)}` : esc(addr);
+  }
+
+  function renderOverviewJob() {
+    const j = S.jobs.slice().reverse().find((x) => x.status === 'running' || x.status === 'queued');
+    const box = $('#ov-job');
+    box.hidden = !j;
+    if (!j) return;
+    const pct = j.total ? (j.done / j.total) * 100 : 0;
+    box.innerHTML = `<p><b>Running:</b> ${esc(j.title)}, ${nf.format(j.done)} of ${nf.format(j.total)} pieces</p>
+      <a class="btn ghost small" href="#jobs">Open Jobs</a><span class="res-bar"><i style="width:${pct.toFixed(1)}%"></i></span>`;
   }
 
   // -------------------------------------------------------------------------
@@ -1010,7 +1080,7 @@ def run(chunk, total):
     signedOut('You left the pool. Open the join link to come back.');
   });
 
-  $('#wires').addEventListener('click', async (e) => {
+  $('#res-table').addEventListener('click', async (e) => {
     const b = e.target.closest('button[data-remove]');
     if (!b) return;
     if (!confirm(`Remove ${b.dataset.name} from the pool? It will need the join link to come back.`)) return;
@@ -1023,7 +1093,21 @@ def run(chunk, total):
   });
 
   // Workspace
-  $('#ws-open').addEventListener('click', openTerminal);
+  $('#ws-open').addEventListener('click', () => openTerminal(T.hostId));
+  $('#ws-hosts').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-host]');
+    if (!b) return;
+    T.hostId = b.dataset.host;
+    if (T.open) openTerminal(T.hostId); // switch the open terminal to the picked computer
+    else renderWorkspace();
+  });
+  $('#machines').addEventListener('click', (e) => {
+    const a = e.target.closest('[data-open-host]');
+    if (!a) return;
+    T.hostId = a.dataset.openHost;
+    T.autoDone = true;
+    setTimeout(() => openTerminal(T.hostId), 0); // after the view switches
+  });
   $('#ws-close').addEventListener('click', closeTerminal);
   $('#ws-max').addEventListener('click', () => setMax(!T.max));
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && T.max && e.target === document.body) setMax(false); });
@@ -1194,10 +1278,35 @@ def run(chunk, total):
       $('input[name="kind"][value="grep"]').checked = true;
       showKind();
       $('#g-file').value = search.dataset.search;
-      $('#run').scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' });
+      location.hash = 'jobs';
       $('#g-term').focus({ preventScroll: true });
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Sections: one view at a time, chosen by the address (#overview, #terminal, ...)
+  // -------------------------------------------------------------------------
+  const VIEWS = ['overview', 'terminal', 'jobs', 'files', 'devices'];
+  function currentView() {
+    const h = location.hash.replace('#', '');
+    return VIEWS.includes(h) ? h : 'overview';
+  }
+  function showView() {
+    const v = currentView();
+    document.querySelectorAll('.view').forEach((el) => { el.hidden = el.dataset.view !== v; });
+    document.querySelectorAll('[data-nav]').forEach((a) => {
+      if (a.dataset.nav === v) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    });
+    store.set('view', v);
+    if (v === 'terminal') {
+      renderWorkspace();
+      requestAnimationFrame(fitTerminal);
+      if (S.joined && S.devices.length) autoOpenTerminal();
+    }
+    if (v === 'jobs') requestAnimationFrame(() => { const j = viewJob(); if (j) renderCurrent(true); });
+    window.scrollTo(0, 0);
+  }
+  window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#join=')) showView(); });
 
   // -------------------------------------------------------------------------
   // Start: a join link in the address bar signs this device in; otherwise try
@@ -1206,12 +1315,14 @@ def run(chunk, total):
   showKind();
   const fromLink = parseJoin(location.hash);
   if (fromLink) {
-    history.replaceState(null, '', location.pathname);
+    history.replaceState(null, '', `${location.pathname}${location.search}#${store.get('view') || 'overview'}`);
     joinWith(fromLink, S.name)
       .then(() => { S.joined = true; connect(); })
       .catch((err) => showJoin(err.message));
   } else {
+    if (!VIEWS.includes(location.hash.replace('#', ''))) history.replaceState(null, '', `${location.pathname}${location.search}#${store.get('view') || 'overview'}`);
     S.joined = true;
     connect();
   }
+  showView();
 })();

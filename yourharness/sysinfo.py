@@ -39,6 +39,37 @@ def platform_name() -> str:
     return platform.system() or "Computer"
 
 
+def computer_name() -> str:
+    """The name people know the computer by, such as "Darshan's MacBook Air"."""
+    import socket
+
+    name = ""
+    if sys.platform == "darwin":
+        name = _run(["scutil", "--get", "ComputerName"]).strip()
+    elif sys.platform.startswith("win"):
+        name = os.environ.get("COMPUTERNAME", "")
+    name = name or socket.gethostname().split(".")[0]
+    if is_wsl():
+        name = f"{name} (Ubuntu)" if "ubuntu" in os_name().lower() else f"{name} (Linux)"
+    return name[:40] or "Computer"
+
+
+def os_name() -> str:
+    """A readable OS name: macOS 15.1, Ubuntu 24.04.1 LTS, Windows 11."""
+    if sys.platform == "darwin":
+        return f"macOS {platform.mac_ver()[0]}".strip()
+    if sys.platform.startswith("win"):
+        return f"Windows {platform.release()}".strip()
+    try:
+        with open("/etc/os-release", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("PRETTY_NAME="):
+                    return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "Linux"
+
+
 def memory() -> tuple[int | None, int | None]:
     """Total and available memory in bytes, or None where the OS won't say."""
     if sys.platform.startswith("linux"):

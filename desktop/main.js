@@ -147,10 +147,7 @@ async function startOwn() {
   ownPort = Number(port);
   const tokenLine = child.tail.join('\n').match(/#join=([A-Za-z0-9_-]+)/);
   const token = tokenLine ? tokenLine[1] : '';
-  writeCfg({ mode: 'own' });
-  if (WIN) { // no pseudo-terminal on Windows, so this computer joins its own pool as a plain agent
-    run(['agent', '--server', `http://127.0.0.1:${port}`, '--join', token, '--name', os.hostname().slice(0, 40)]);
-  }
+  writeCfg({ mode: 'own' }); // the pool's own agent shares this computer and hosts its terminal, on Mac and Windows
   await showPool(`http://127.0.0.1:${port}`, token);
 }
 
@@ -166,7 +163,8 @@ async function joinRemote(info) {
   const url = `http://${host}:${port}`;
   const probe = await check(url);
   if (!probe.ok) return { error: explain(host, port, probe.reason) };
-  const agent = run(['agent', '--server', url, '--join', code, '--name', os.hostname().slice(0, 40)]);
+  // --workspace: this computer offers its own terminal to the pool too (Ubuntu via WSL or PowerShell on Windows)
+  const agent = run(['agent', '--server', url, '--join', code, '--workspace']);
   try {
     await waitFor(agent, /Joined the pool/, 25000);
   } catch (e) {

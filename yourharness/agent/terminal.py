@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from ..sysinfo import platform_name
+from ..sysinfo import os_name
 
 PACKAGE_PARENT = str(Path(__file__).resolve().parent.parent.parent)
 
@@ -58,7 +58,7 @@ class TerminalHost:
         self._write_helpers()
 
     def describe(self) -> dict:
-        return {"shell": "tmux" if self.tmux else os.path.basename(self.shell), "shared": bool(self.tmux), "system": platform_name()}
+        return {"shell": "tmux" if self.tmux else os.path.basename(self.shell), "shared": bool(self.tmux), "system": os_name(), "harness": True}
 
     def _write_helpers(self) -> None:
         """A `harness` command for the workspace shell, pointing at this agent's Python."""

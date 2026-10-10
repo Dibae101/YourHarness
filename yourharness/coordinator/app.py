@@ -406,13 +406,13 @@ async def run_local_agent(cfg: Config, coord: "Coordinator", port: int) -> None:
         if coord.store.device_for_token(saved.get("token")):
             token = saved["token"]
     if not token:
-        _, token = coord.store.add_device("agent", f"{sysinfo.platform_name()} (this computer)")
+        _, token = coord.store.add_device("agent", sysinfo.computer_name())
         path.write_text(json.dumps({"token": token}), encoding="utf-8")
         os.chmod(path, 0o600)
     home = default_home() / "local-agent"
     home.mkdir(parents=True, exist_ok=True)
-    agent_cfg = AgentConfig(server=f"http://127.0.0.1:{port}", token=token, name=f"{sysinfo.platform_name()} (this computer)",
-                            threads=max(1, (os.cpu_count() or 2) - 1), workspace=True, home=home)
+    agent_cfg = AgentConfig(server=f"http://127.0.0.1:{port}", token=token, name=sysinfo.computer_name(),
+                            threads=max(1, (os.cpu_count() or 2) - 1), workspace=True, home=home, coordinator=True)
     await Agent(agent_cfg).run()
 
 
@@ -451,7 +451,7 @@ async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True
             pass
     from . import discovery
     beacon = await discovery.start(port, int(os.environ.get("HARNESS_BEACON_PORT", discovery.BEACON_PORT)))
-    local = asyncio.ensure_future(run_local_agent(cfg, coord, port)) if local_agent and os.name == "posix" else None
+    local = asyncio.ensure_future(run_local_agent(cfg, coord, port)) if local_agent else None
     try:
         await asyncio.Event().wait()
     finally:
