@@ -1,130 +1,157 @@
-<<<<<<< HEAD
-# YourHarness-
-=======
 # YourHarness
 
-Pool the processors of every device on your home network into one workbench you open in a browser. Your Mac, Windows PC, iPhone, iPad, or Android phone each open the same page, join with a PIN, and from then on every job you start is split into pieces that all of them work on at once.
+Pool the devices you already own into one workspace for AI work. Open a Linux terminal from any of them, and the jobs you run there borrow processors, memory and storage from the rest.
 
-Nothing to install on the devices. One machine runs a small Node server; everything else is a browser tab.
+Plan and roadmap: https://dibae101.github.io/YourHarness/
+
+## What's here
+
+| Part | What it does | Runs on |
+| --- | --- | --- |
+| **Coordinator** (`harness serve`) | Signs devices in, schedules work, hosts the shared folder, relays the workspace terminal | One machine on your network (today: the Mac) |
+| **Agent** (`harness agent`) | Shares a computer's processors natively in Python, reports real memory, disk and GPUs, and can host the workspace | Mac, Linux, or Ubuntu under WSL on Windows |
+| **Web page** | Dashboard for everyone. Phones and tablets share compute from it in JavaScript | Any browser |
+| **Workspace** | A Linux terminal you open from any device's browser. With tmux, every device attaches to the same session | The agent started with `--workspace` (here: the Windows PC) |
+| **`harness` and `pool.map()`** | Run jobs on the pool from the workspace shell or from Python | Inside the workspace, or any agent computer |
+
+The first prototype (Node, `server.js` and `public/`) is still in the repo and still runs with `npm start`. It will be removed once the Python version replaces it.
 
 ## Quick start
 
-On the machine that will host the pool (any Mac, Windows, or Linux machine with Node 18 or newer):
+### 1. Start the coordinator (Mac)
+
+Stop the Node prototype first if it's running, since both use port 8420.
 
 ```bash
-git clone https://github.com/Dibae101/YourHarness-.git
-cd YourHarness-
-npm install
-npm start
+python3 -m venv .venv
+.venv/bin/pip install -e '.[qr]'
+.venv/bin/harness serve
 ```
 
-The terminal prints a link with the PIN built in, a QR code, and the PIN on its own:
+It prints a join link, a QR code, and the command for adding computers:
 
 ```
-Open this on every device you want in the pool:
-  http://192.168.1.20:8420/?pin=482913
+Open this link on every device you want in the pool. It signs the device in:
+  http://192.168.1.51:8420/#join=Xb2...
 
-PIN: 482913
+Add a computer as an agent (Mac, Linux, or Ubuntu in WSL on Windows):
+  curl -fsSL http://192.168.1.51:8420/install.sh | bash -s -- --join 'http://192.168.1.51:8420/#join=Xb2...' --workspace
 ```
 
-Open that link on every device (scan the QR code with a phone camera). Each device shows up as a colored wire in the Devices list. Pick a job, press **Run on the pool**, and watch the pieces get colored by whichever device computed them.
+The join link stays the same across restarts. `harness serve --new-join-link` replaces it; devices that already joined stay signed in. If macOS asks whether Python may accept incoming connections, allow it.
 
-All devices need to be on the same network as the host.
+### 2. Join phones, tablets and browsers
 
-## What you can run
+Scan the QR code or open the join link. The device signs in once and remembers it. Keep the page open with the screen on; a phone whose page is paused stops checking in, and its pieces move to other devices within about 20 seconds.
 
-| Job | What each device does | Good for |
+### 3. Host the workspace on the Windows PC
+
+In PowerShell as administrator, install Ubuntu under WSL, then restart if asked:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Open Ubuntu from the Start menu and run:
+
+```bash
+sudo apt update && sudo apt install -y python3-venv tmux curl
+curl -fsSL http://192.168.1.51:8420/install.sh | bash -s -- --join '<join link>' --workspace
+```
+
+Use the exact command the coordinator printed. The installer puts everything in `~/.yourharness` and starts the agent. Next time, start it with `~/.yourharness/bin/harness agent`.
+
+Leave out `--workspace` on other computers. They still share compute, memory and disk.
+
+### 4. Work in the workspace
+
+Press **Open terminal** on any device. Inside the shell:
+
+```bash
+harness devices                      # every device, with real memory, disk and GPUs
+harness run primes --below 1e10      # a built-in job across the pool
+harness run python job.py --pieces 64
+harness files put dataset.csv        # the shared folder
+```
+
+From Python:
+
+```python
+from yourharness import pool
+
+def score(n):
+    import math              # import inside the function: it runs on other devices
+    return sum(math.sqrt(i) for i in range(n))
+
+results = pool.map(score, [5_000_000] * 64)   # spread over every agent
+```
+
+Functions are sent as source code, so define them with `def`. Arguments and results must be JSON: numbers, text, lists, dicts.
+
+## What can be pooled
+
+Wi-Fi is about 30,000 times slower than memory inside a device, so the pool never pretends to be one big computer. It splits work so each device computes on its own memory and only inputs and results cross the network.
+
+| Resource | Today | Next |
 | --- | --- | --- |
-| Render a fractal | Computes strips of a Mandelbrot image. Each strip is marked with the color of the device that drew it. | Seeing the split happen live |
-| Count primes | Sieves its own slice of the number range | Raw CPU comparison between devices |
-| Estimate π | Throws random points at its own batch | Long, even workloads |
-| Search a file | Reads its own byte range of a shared file over HTTP and counts matches | Combining shared storage with shared compute |
-| Your own code | Calls your `run(chunk, total)` function for each piece it gets | Anything you can split into independent pieces |
-
-### Writing your own job
-
-```js
-function run(chunk, total) {
-  // chunk goes from 0 to total - 1. Do 1/total of the work.
-  let sum = 0;
-  for (let i = chunk; i < 2e9; i += total) sum += Math.sqrt(i);
-  return sum; // a number, or anything JSON can hold
-}
-```
-
-Pick how many pieces to split into and how to combine the results (add, largest, smallest, or keep the list). `run` can be `async`, so it can `fetch('/api/files/<name>', { headers: { 'x-harness-pin': '<pin>' } })` to read shared files.
+| Processors | Jobs split into pieces; every device pulls a piece when it has a free thread | |
+| Storage | One shared folder on the coordinator, readable by byte range | Chunks stored on several devices, mounted as `/pool` |
+| Memory | Each device works in its own memory | Model layers split across devices by free memory |
+| GPUs | Reported by agents | CUDA and Metal through agents, WebGPU in browsers over HTTPS |
 
 ## How it works
 
-```
- Browser tab on each device                 Host machine (npm start)
- ┌───────────────────────────┐   WebSocket  ┌──────────────────────────────┐
- │ Portal UI                 │◄────────────►│ Device registry              │
- │ Web Workers, one per      │   pieces,    │ Scheduler (pull based)       │
- │ shared thread             │   results    │ Job planning and combining   │
- └───────────────────────────┘              │ Shared folder (HTTP, ranges) │
-                                            └──────────────────────────────┘
-```
-
-- **Pull-based scheduling.** A device receives a new piece whenever one of its threads is free, so a fast PC naturally does more than a phone, and a slow device never holds up the run.
-- **Dropped devices are handled.** If a phone locks or a tab closes, the server notices the missed heartbeat (about 10 to 20 seconds) and hands that device's pieces to someone else. Pieces that run far too long are reassigned after `CHUNK_TIMEOUT_S`.
-- **Shared folder.** Files added from any device land in `./shared` on the host. Every device can list, download, and read byte ranges, which is how the file search splits work.
-- **One run at a time.** New runs queue behind the current one.
-
-## Honest limits
-
-This pools *processors*, not memory. Each device works on its own pieces with its own RAM; the network is far too slow to make several devices act like one machine with one big memory. What works well is any job that splits into independent pieces. A single program that is not written that way will not get faster.
-
-- **Phones and tablets pause background tabs.** Keep the page open and the screen on. Over HTTPS the page holds a screen wake lock for you; over plain `http://` on a LAN, browsers do not allow that.
-- **Browser tabs get only part of a device's memory**, and Safari does not report memory at all.
-- **Jobs must be JavaScript or WebAssembly.** A Windows `.exe` cannot run on a phone.
-- **Tiny pieces are dominated by Wi-Fi latency.** Aim for pieces that take at least 100 ms each.
+- **Pull scheduling.** A device gets a new piece whenever one of its threads is free, so a fast PC naturally does more than a phone.
+- **Check-ins.** Every device sends a small message every 4 seconds. One that goes quiet for 20 seconds is marked as not responding and its pieces go to other devices. This catches frozen phone pages, which a WebSocket ping doesn't, because browsers answer pings from their network layer. A piece that runs longer than `CHUNK_TIMEOUT_S` is also handed to someone else.
+- **Runtimes.** Browsers run JavaScript, agents run Python. Built-in jobs run on both and their results mix in one run. Your own code goes only to devices that can run its language.
+- **Job settings are sent once per device**, not with every piece.
+- **Agents run pieces in separate worker processes**, so they run in parallel and a cancelled or stuck piece is stopped by ending its process. `print()` in your code shows in the agent's terminal.
+- **The workspace terminal** is a PTY on the hosting agent. The coordinator only relays bytes between it and the browser that opened it.
 
 ## Security
 
-- Anyone with the PIN can run code on every sharing device. Keep the PIN to yourself and run this only on a network you trust.
-- The PIN is random on every start unless you set `HARNESS_PIN`.
-- Custom code runs inside Web Workers in each browser tab, with the same access as any web page.
-- Download links carry the PIN in the URL so they work as plain links. Fine on a home network, not something to share.
+- Devices sign in with a 144-bit join link and then use their own device token. Browsers keep it in an HttpOnly, SameSite=Strict cookie, so no secret stays in the page or in URLs. Agents store it in `~/.yourharness/agent.json` (mode 600).
+- After 10 failed sign-ins from one address in 10 minutes, that address is refused for the rest of the window.
+- Requests and WebSocket connections from other websites are refused.
+- Shared files are always served as downloads, so an HTML file in the shared folder can't run as a page on the pool's address.
+- Remove a lost device from the Devices list. Its token stops working at once.
+- **Anyone in the pool can open the workspace terminal and run code on every sharing device.** Share the join link only with people you'd hand your computers to.
 
-For HTTPS (which also unlocks the screen wake lock and WebGPU), put the server behind something that terminates TLS, for example `tailscale serve --bg 8420`, or Caddy with its local certificate authority.
+For HTTPS, which also lets phones keep the screen on and use WebGPU, put the coordinator behind something that terminates TLS, such as `tailscale serve --bg 8420`, and start it with `--public-url https://<name>.ts.net`. Behind a proxy, every device appears to come from the proxy's address, so the sign-in limit then applies to all of them together.
 
 ## Configuration
 
-| Variable | Default | Meaning |
+| Setting | Default | Meaning |
 | --- | --- | --- |
-| `PORT` | `8420` | Port to listen on |
-| `HOST` | `0.0.0.0` | Address to bind |
-| `HARNESS_PIN` | random 6 digits | Fixed PIN instead of a new one each start |
-| `SHARED_DIR` | `./shared` | Folder used for shared files |
+| `--port` / `PORT` | `8420` | Port to listen on |
+| `--host` / `HOST` | `0.0.0.0` | Address to bind |
+| `--data-dir` / `HARNESS_DATA_DIR` | `~/.yourharness/coordinator` | Join link and device sign-ins |
+| `--shared-dir` / `SHARED_DIR` | `~/.yourharness/shared` | The shared folder |
+| `--public-url` | this machine's LAN address | Address printed in the join link |
 | `MAX_UPLOAD_MB` | `4096` | Largest file you can add |
-| `CHUNK_TIMEOUT_S` | `300` | Seconds before a stuck piece is given to another device |
-| `NO_QR` | unset | Set to skip the terminal QR code |
+| `HARNESS_STALE_S` | `20` | Seconds without a check-in before a device's pieces move |
+| `CHUNK_TIMEOUT_S` | `300` | Seconds before a running piece is given to another device |
 
-## Project layout
+Agent: `harness agent [--join LINK] [--name NAME] [--threads N] [--workspace | --no-workspace] [--no-share]`. Settings are remembered in `~/.yourharness/agent.json`.
 
-```
-server.js         HTTP server, WebSocket registry, scheduler, shared folder API
-public/index.html Portal markup
-public/style.css  Portal styles
-public/app.js     Joining, the local worker pool, live dashboard, forms
-public/worker.js  One background thread; runs a piece and reports back
-public/jobs.js    The compute code for every job type (shared with the tests)
-test/smoke.mjs    End-to-end test with simulated devices
-```
-
-## Tests
+## Development
 
 ```bash
-npm test
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/python -m pytest
 ```
 
-Starts the server, connects simulated devices that use the same compute code as the browser, runs every job type, drops a device mid-run, and checks the answers (for example, 664,579 primes below 10 million).
+The tests start a real coordinator and real agents as subprocesses and connect fake browsers. They cover sign-in and lockout, cross-site requests, removing devices, jobs split between an agent and a browser, routing code by language, `pool.map`, shared files and search, rejecting malformed results, frozen devices losing their pieces, the workspace terminal, and the installer bundle. They pass on Python 3.12 and 3.14.
 
-## Roadmap
-
-- WebGPU kernels for devices that have it, so GPUs join the pool too
-- Direct device-to-device transfers over WebRTC for jobs that move a lot of data
-- LLM inference across devices by splitting model layers, building on projects such as SwarmLLM or llama.cpp RPC
-- Resumable runs that survive a server restart
->>>>>>> 773c213 (YourHarness: pool home devices into one browser-based workbench)
+```
+yourharness/
+  cli.py              the harness command
+  pool.py, client.py  pool.map() and the API client (standard library only)
+  kernels.py          Python compute for every job type
+  sysinfo.py          memory, disk and GPU detection
+  coordinator/        app.py (HTTP, WebSocket), scheduler.py, jobkinds.py, terminals.py, files.py, auth.py, state.py, install.py
+  agent/              agent.py, slots.py (worker processes), slot.py, terminal.py (PTY)
+  web/                the page: index.html, app.js, jobs.js, worker.js, style.css, vendor/xterm
+tests/                end-to-end tests
+server.js, public/    the Node prototype (npm start, npm test)
+```
