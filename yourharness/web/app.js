@@ -99,7 +99,7 @@ def run(chunk, total):
     const t = String(text || '').trim();
     const m = /[#?&]join=([A-Za-z0-9_-]+)/.exec(t);
     if (m) return m[1];
-    return /^[A-Za-z0-9_-]{16,}$/.test(t) ? t : null;
+    return /^\d{4}$/.test(t) || /^[A-Za-z0-9_-]{16,}$/.test(t) ? t : null;
   }
 
   async function joinWith(token, name) {
@@ -177,6 +177,7 @@ def run(chunk, total):
         S.id = m.id;
         S.color = m.color;
         S.joinToken = m.joinToken;
+        S.joinCode = m.joinCode;
         S.joined = true;
         S.devices = m.devices;
         S.jobs = m.jobs;
@@ -804,8 +805,9 @@ def run(chunk, total):
   function renderAdd() {
     if (!S.joinToken) return;
     const link = `${location.origin}/#join=${S.joinToken}`;
+    $('#add-code').value = S.joinCode || '';
     $('#add-link').value = link;
-    $('#add-cmd').value = `curl -fsSL ${location.origin}/install.sh | bash -s -- --join '${link}' --workspace`;
+    $('#add-cmd').value = `curl -fsSL ${location.origin}/install.sh | bash -s -- --join ${S.joinCode} --workspace`;
   }
 
   function renderAll() {
@@ -852,7 +854,7 @@ def run(chunk, total):
     const name = $('#join-name').value.trim();
     const token = parseJoin($('#join-link').value);
     if (!name) { $('#join-error').textContent = 'Give this device a name so you can tell it apart.'; return; }
-    if (!token) { $('#join-error').textContent = 'Paste the join link the coordinator printed. It ends in #join= followed by letters and numbers.'; return; }
+    if (!token) { $('#join-error').textContent = 'Enter the 4-digit join code shown in the coordinator terminal, or paste the join link.'; return; }
     S.name = name;
     store.set('name', name);
     $('#join-error').textContent = '';

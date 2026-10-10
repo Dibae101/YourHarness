@@ -23,11 +23,12 @@ class Store:
         self.dir = Path(data_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.path = self.dir / "coordinator.json"
-        self.data: dict = {"join_token": None, "devices": {}}
+        self.data: dict = {"join_token": None, "join_code": None, "devices": {}}
         if self.path.exists():
             self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
-        if not self.data.get("join_token"):
-            self.data["join_token"] = secrets.token_urlsafe(18)
+        if not self.data.get("join_token") or not self.data.get("join_code"):
+            self.data["join_token"] = self.data.get("join_token") or secrets.token_urlsafe(18)
+            self.data["join_code"] = self.data.get("join_code") or self._new_code()
             self.save()
 
     def save(self) -> None:
@@ -41,13 +42,31 @@ class Store:
     def join_token(self) -> str:
         return self.data["join_token"]
 
+    @property
+    def join_code(self) -> str:
+        return self.data["join_code"]
+
+    @staticmethod
+    def _new_code() -> str:
+        return f"{secrets.randbelow(10000):04d}"
+
     def rotate_join_token(self) -> str:
         self.data["join_token"] = secrets.token_urlsafe(18)
+        self.data["join_code"] = self._new_code()
         self.save()
         return self.join_token
 
+    def rotate_join_code(self) -> str:
+        self.data["join_code"] = self._new_code()
+        self.save()
+        return self.join_code
+
     def join_ok(self, token) -> bool:
-        return isinstance(token, str) and secrets.compare_digest(token.strip().encode(), self.join_token.encode())
+        """True for the long link token or the current 4-digit code."""
+        if not isinstance(token, str):
+            return False
+        value = token.strip().encode()
+        return secrets.compare_digest(value, self.join_token.encode()) | secrets.compare_digest(value, self.join_code.encode())
 
     # --- devices
     def add_device(self, kind: str, name: str) -> tuple[dict, str]:

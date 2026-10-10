@@ -42,8 +42,17 @@ def parse_join_link(link: str) -> tuple[str, str]:
     return f"{parts.scheme}://{parts.netloc}", token
 
 
-def join(link: str, name: str) -> dict:
-    server, token = parse_join_link(link)
+def join(link_or_code: str, name: str, server: str | None = None) -> dict:
+    """Join with a 4-digit code plus the coordinator's address, or with a full join link."""
+    text = link_or_code.strip()
+    if text.isdigit():
+        if not server:
+            raise SignInError("A join code needs the coordinator's address too: harness agent --server http://192.168.1.20:8420 --join 1234")
+        token = text
+        server = server if "://" in server else f"http://{server}"
+        server = server.rstrip("/")
+    else:
+        server, token = parse_join_link(text)
     req = urllib.request.Request(
         f"{server}/api/join", data=json.dumps({"token": token, "kind": "agent", "name": name}).encode(),
         headers={"Content-Type": "application/json"}, method="POST",

@@ -82,6 +82,7 @@ class Coordinator:
         self.store = Store(cfg.data_dir)
         self.sched = Scheduler(self.store, cfg.shared_dir, stale_s=cfg.stale_s, chunk_timeout_s=cfg.chunk_timeout_s)
         self.limiter = Limiter(max_fails=cfg.max_auth_fails)
+        self.code_guesses = Limiter(max_fails=20)  # wrong join codes from anywhere; a 4-digit code can't survive more
         self.static = {"/": WEB_DIR / "index.html"}
         for path in WEB_DIR.rglob("*"):
             if path.is_file() and path.suffix in MIME:
@@ -152,9 +153,16 @@ class Coordinator:
             body = None
         if not isinstance(body, dict):
             raise fail(400, "Send the join token as JSON.")
+        if self.code_guesses.retry_after("all"):
+            raise fail(429, "Too many wrong join codes. The code was changed; read the new one from the coordinator's terminal.")
         if not self.store.join_ok(body.get("token")):
             self.limiter.fail(ip)
-            raise fail(401, "That join link isn't valid. Copy the current link from the coordinator's terminal.")
+            self.code_guesses.fail("all")
+            if self.code_guesses.retry_after("all"):
+                self.store.rotate_join_code()
+                self.code_guesses = Limiter(max_fails=20)
+                log.warning("20 wrong join codes in a row; the join code was changed.")
+            raise fail(401, "That join code or link isn't valid. Check the coordinator's terminal for the current one.")
         kind = "agent" if body.get("kind") == "agent" else "browser"
         name = clean_text(body.get("name"), 40, "Unnamed device")
         if kind == "browser":
@@ -351,11 +359,13 @@ async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True
     base = (public_url or f"http://{primary_ip() or 'localhost'}:{port}").rstrip("/")
     link = f"{base}/#join={coord.store.join_token}"
     print(f"\nYourHarness coordinator {__version__} is running.\n")
-    print("Open this link on every device you want in the pool. It signs the device in:")
-    print(f"  {link}\n")
-    print("Add a computer as an agent (Mac, Linux, or Ubuntu in WSL on Windows):")
-    print(f"  curl -fsSL {base}/install.sh | bash -s -- --join '{link}' --workspace")
+    print("Phones, tablets and browsers: open this address and enter the join code")
+    print(f"  {base}\n")
+    print(f"  JOIN CODE: {coord.store.join_code}\n")
+    print("Computers (Mac, Linux, or Ubuntu in WSL on Windows): run this in a terminal")
+    print(f"  curl -fsSL {base}/install.sh | bash -s -- --join {coord.store.join_code} --workspace")
     print("  Leave out --workspace on computers that shouldn't host the shared terminal.\n")
+    print(f"Or skip typing the code by opening: {link}\n")
     print(f"Shared folder: {cfg.shared_dir}")
     print(f"Sign-ins are stored in: {cfg.data_dir}")
     print(f"Listening on port {port}", flush=True)

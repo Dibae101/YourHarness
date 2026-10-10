@@ -256,7 +256,7 @@ class Scheduler:
         d.send({
             "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind,
             "devices": self.device_list(), "jobs": [j.summary() for j in self.jobs], "snapshot": self.snapshot(latest),
-            "files": self.list_files(), "joinToken": self.store.join_token,
+            "files": self.list_files(), "joinToken": self.store.join_token, "joinCode": self.store.join_code,
         })
         log.info("%s joined (%s, %s threads)", d.name, d.kind, d.threads)
         self.broadcast_devices()

@@ -28,21 +28,23 @@ python3 -m venv .venv
 .venv/bin/harness serve
 ```
 
-It prints a join link, a QR code, and the command for adding computers:
+It prints a 4-digit join code, a QR code, and the command for adding computers:
 
 ```
-Open this link on every device you want in the pool. It signs the device in:
-  http://192.168.1.51:8420/#join=Xb2...
+Phones, tablets and browsers: open this address and enter the join code
+  http://192.168.1.51:8420
 
-Add a computer as an agent (Mac, Linux, or Ubuntu in WSL on Windows):
-  curl -fsSL http://192.168.1.51:8420/install.sh | bash -s -- --join 'http://192.168.1.51:8420/#join=Xb2...' --workspace
+  JOIN CODE: 4821
+
+Computers (Mac, Linux, or Ubuntu in WSL on Windows): run this in a terminal
+  curl -fsSL http://192.168.1.51:8420/install.sh | bash -s -- --join 4821 --workspace
 ```
 
-The join link stays the same across restarts. `harness serve --new-join-link` replaces it; devices that already joined stay signed in. If macOS asks whether Python may accept incoming connections, allow it.
+The code stays the same across restarts. After 20 wrong guesses in a row it changes by itself, and the long join link (also printed) keeps working. `harness serve --new-join-link` replaces it; devices that already joined stay signed in. If macOS asks whether Python may accept incoming connections, allow it.
 
 ### 2. Join phones, tablets and browsers
 
-Scan the QR code or open the join link. The device signs in once and remembers it. Keep the page open with the screen on; a phone whose page is paused stops checking in, and its pieces move to other devices within about 20 seconds.
+Scan the QR code, or open the coordinator's address and type the code. The device signs in once and remembers it. Keep the page open with the screen on; a phone whose page is paused stops checking in, and its pieces move to other devices within about 20 seconds.
 
 ### 3. Host the workspace on the Windows PC
 
@@ -59,7 +61,7 @@ sudo apt update && sudo apt install -y python3-venv tmux curl
 curl -fsSL http://192.168.1.51:8420/install.sh | bash -s -- --join '<join link>' --workspace
 ```
 
-Use the exact command the coordinator printed. The installer puts everything in `~/.yourharness` and starts the agent. Next time, start it with `~/.yourharness/bin/harness agent`.
+Use the exact command the coordinator printed, with your code. The installer puts everything in `~/.yourharness` and starts the agent. Next time, start it with `~/.yourharness/bin/harness agent`.
 
 Leave out `--workspace` on other computers. They still share compute, memory and disk.
 
@@ -110,7 +112,7 @@ Wi-Fi is about 30,000 times slower than memory inside a device, so the pool neve
 
 ## Security
 
-- Devices sign in with a 144-bit join link and then use their own device token. Browsers keep it in an HttpOnly, SameSite=Strict cookie, so no secret stays in the page or in URLs. Agents store it in `~/.yourharness/agent.json` (mode 600).
+- Devices sign in with the 4-digit join code or a 144-bit join link and then use their own device token. Browsers keep it in an HttpOnly, SameSite=Strict cookie, so no secret stays in the page or in URLs. Agents store it in `~/.yourharness/agent.json` (mode 600).
 - After 10 failed sign-ins from one address in 10 minutes, that address is refused for the rest of the window.
 - Requests and WebSocket connections from other websites are refused.
 - Shared files are always served as downloads, so an HTML file in the shared folder can't run as a page on the pool's address.

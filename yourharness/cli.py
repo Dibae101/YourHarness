@@ -87,12 +87,12 @@ def cmd_agent(a) -> int:
     saved = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
     if a.join:
         try:
-            saved.update(join(a.join, a.name or saved.get("name") or _default_agent_name()))
+            saved.update(join(a.join, a.name or saved.get("name") or _default_agent_name(), a.server))
         except SignInError as e:
             print(e, file=sys.stderr)
             return 1
     if not saved.get("token"):
-        print("This computer hasn't joined a pool yet. Run:\n  harness agent --join '<join link from the coordinator>'", file=sys.stderr)
+        print("This computer hasn't joined a pool yet. Run:\n  harness agent --server http://<coordinator address>:8420 --join <4-digit code>", file=sys.stderr)
         return 1
     if a.name:
         saved["name"] = a.name
@@ -237,8 +237,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("agent", help="share this computer with the pool")
-    s.add_argument("--join", metavar="LINK", help="the join link the coordinator printed")
-    s.add_argument("--server", help=argparse.SUPPRESS)  # passed by install.sh; the join link already names the server
+    s.add_argument("--join", metavar="CODE_OR_LINK", help="the 4-digit join code or the join link the coordinator printed")
+    s.add_argument("--server", help="the coordinator's address, e.g. http://192.168.1.20:8420 (needed with a 4-digit --join code)")
     s.add_argument("--name", help="how this computer shows up in the pool")
     s.add_argument("--threads", type=int, help="worker processes to run (default: cores minus one)")
     s.add_argument("--workspace", action="store_true", help="host the shared Linux workspace terminal")

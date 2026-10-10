@@ -29,8 +29,8 @@
     <h1 class="wordmark">YourHarness</h1>
     <p class="lede">Open the join link on every device you own. Each one adds its processor to a shared pool that runs jobs together.</p>
     <label class="field"><span>Name this device</span><input id="join-name" name="name" autocomplete="off" maxlength="40" required></label>
-    <label class="field"><span>Join link</span><input id="join-link" name="link" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="http://192.168.1.20:8420/#join=…" required></label>
-    <p class="hint">The coordinator prints the join link and a QR code when it starts. Scanning the code signs this device in without typing.</p>
+    <label class="field"><span>Join code</span><input id="join-link" name="link" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="4 digits" required></label>
+    <p class="hint">The join code is shown in the terminal where the coordinator is running, and under "Add a device" on any device already in the pool.</p>
     <p id="join-error" class="error" role="alert"></p>
     <button class="btn primary wide" type="submit">Join the pool</button>
   </form>
@@ -100,9 +100,16 @@
 
       <section id="add" class="panel add" aria-labelledby="add-h">
         <h2 id="add-h">Add a device</h2>
-        <p class="hint">Phones and tablets: open the join link. Computers: run the command in a terminal on a Mac, on Linux, or in Ubuntu under WSL on Windows. Computers join as agents, which share real memory and disk and run Python.</p>
+        <p class="hint">Phones and tablets: open this page's address and enter the join code. Computers: run the command in a terminal on a Mac, on Linux, or in Ubuntu under WSL on Windows. Computers join as agents, which share real memory and disk and run Python.</p>
         <div class="field">
-          <span id="add-link-label">Join link</span>
+          <span id="add-code-label">Join code</span>
+          <div class="copyrow">
+            <input id="add-code" class="code-big" readonly aria-labelledby="add-code-label">
+            <button class="btn ghost small" type="button" data-copy="add-code">Copy</button>
+          </div>
+        </div>
+        <div class="field">
+          <span id="add-link-label">Join link, signs in without typing the code</span>
           <div class="copyrow">
             <input id="add-link" readonly aria-labelledby="add-link-label">
             <button class="btn ghost small" type="button" data-copy="add-link">Copy</button>

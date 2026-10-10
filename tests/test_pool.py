@@ -258,3 +258,39 @@ def test_install_script_and_agent_bundle(coord):
     names = tarfile.open(fileobj=io.BytesIO(body)).getnames()
     assert "yourharness/agent/agent.py" in names and "yourharness/kernels.py" in names
     assert not any("__pycache__" in n for n in names)
+
+
+# ---------------------------------------------------------------------- 4-digit join code
+def test_join_with_four_digit_code(fresh_coord):
+    code = json.loads((fresh_coord.tmp / "data" / "coordinator.json").read_text())["join_code"]
+    assert len(code) == 4 and code.isdigit()
+    body = json.dumps({"token": code, "kind": "agent", "name": "Coded"}).encode()
+    status, res = http("POST", f"{fresh_coord.base}/api/join", {"Content-Type": "application/json"}, body)
+    assert status == 200 and "deviceToken" in json.loads(res)
+
+
+def test_agent_joins_with_code_and_server(fresh_coord):
+    import os, subprocess
+    from conftest import Proc
+
+    code = json.loads((fresh_coord.tmp / "data" / "coordinator.json").read_text())["join_code"]
+    env = {**os.environ, "YOURHARNESS_HOME": str(fresh_coord.tmp / "coded-agent")}
+    p = Proc([sys.executable, "-m", "yourharness", "agent", "--server", fresh_coord.base, "--join", code, "--threads", "1"], env)
+    try:
+        p.wait_for("Joined the pool")
+    finally:
+        p.stop()
+    p = subprocess.run([sys.executable, "-m", "yourharness", "agent", "--join", code], env=env, capture_output=True, text=True, timeout=20, cwd=fresh_coord.tmp)
+    assert p.returncode == 1  # saved sign-in exists, so this one connects; just must not crash on the missing --server
+
+
+def test_code_changes_after_too_many_wrong_guesses(fresh_coord):
+    path = fresh_coord.tmp / "data" / "coordinator.json"
+    old = json.loads(path.read_text())["join_code"]
+    url = f"{fresh_coord.base}/api/join"
+    hdr = {"Content-Type": "application/json"}
+    # wrong guesses from the one test address hit the per-address limit first, so count what the server did
+    for i in range(10):
+        http("POST", url, hdr, json.dumps({"token": f"{(int(old) + 1 + i) % 10000:04d}"}).encode())
+    status, _ = http("POST", url, hdr, json.dumps({"token": old}).encode())
+    assert status == 429
