@@ -187,6 +187,7 @@ def run(chunk, total):
         S.color = m.color;
         S.joinToken = m.joinToken;
         S.joinCode = m.joinCode;
+        S.address = m.address || location.origin;
         S.joined = true;
         S.devices = m.devices;
         S.jobs = m.jobs;
@@ -899,11 +900,13 @@ def run(chunk, total):
 
   function renderAdd() {
     if (!S.joinToken) return;
-    const link = `${location.origin}/#join=${S.joinToken}`;
+    const origin = S.address || location.origin; // the LAN address, even when this window is on 127.0.0.1
+    const link = `${origin}/#join=${S.joinToken}`;
+    $('#add-addr').value = origin.replace(/^https?:\/\//, '');
     $('#add-code').value = S.joinCode || '';
     $('#add-link').value = link;
-    $('#add-cmd').value = `curl -fsSL ${location.origin}/install.sh | bash -s -- --join ${S.joinCode} --workspace`;
-    $('#add-win').value = `irm ${location.origin}/install.ps1 | iex`;
+    $('#add-cmd').value = `curl -fsSL ${origin}/install.sh | bash -s -- --join ${S.joinCode} --workspace`;
+    $('#add-win').value = `irm ${origin}/install.ps1 | iex`;
   }
 
   function renderAll() {

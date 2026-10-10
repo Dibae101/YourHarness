@@ -196,6 +196,7 @@ class Scheduler:
         self.file_meta: dict[str, dict] = {}
         self.terminals = Terminals(self)
         self.pool_store = PoolStore(self, store.dir)
+        self.public_url = ""  # the address other devices use; set once the port is known
         self.repair_s = float(os.environ.get("HARNESS_REPAIR_S", 10))
         self._devices_pending = False
 
@@ -263,7 +264,7 @@ class Scheduler:
         d.send({
             "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind,
             "devices": self.device_list(), "jobs": [j.summary() for j in self.jobs], "snapshot": self.snapshot(latest),
-            "files": self.list_files(), "joinToken": self.store.join_token, "joinCode": self.store.join_code, "pool": self.pool_store.listing(),
+            "files": self.list_files(), "joinToken": self.store.join_token, "joinCode": self.store.join_code, "pool": self.pool_store.listing(), "address": self.public_url,
         })
         log.info("%s joined (%s, %s threads)", d.name, d.kind, d.threads)
         self.broadcast_devices()

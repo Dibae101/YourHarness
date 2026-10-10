@@ -424,6 +424,7 @@ async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True
     await site.start()
     port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
     base = (public_url or f"http://{primary_ip() or 'localhost'}:{port}").rstrip("/")
+    coord.sched.public_url = base
     link = f"{base}/#join={coord.store.join_token}"
     print(f"\nYourHarness coordinator {__version__} is running.\n")
     print("Phones, tablets and browsers: open this address and enter the join code")

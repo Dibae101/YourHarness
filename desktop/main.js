@@ -3,6 +3,7 @@
 // if none does, it starts a pool on this computer. Either way this computer shares in the
 // background (menu bar or tray) and the workspace opens in this window.
 const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, clipboard } = require('electron');
+const MAC = process.platform === 'darwin';
 const { spawn, execFile } = require('child_process');
 const dgram = require('dgram');
 const http = require('http');
@@ -69,10 +70,11 @@ function waitFor(child, regex, ms = 20000) {
 }
 const lastMessage = (child) => child.tail.filter((l) => !/^\d\d:\d\d:\d\d/.test(l)).slice(-2).join(' ');
 
-function killAll() {
-  for (const c of children) {
-    try { WIN ? execFile('taskkill', ['/pid', String(c.pid), '/T', '/F']) : c.kill('SIGTERM'); } catch { /* gone */ }
-  }
+function killOne(c) {
+  try { WIN ? execFile('taskkill', ['/pid', String(c.pid), '/T', '/F']) : c.kill('SIGTERM'); } catch { /* gone */ }
+}
+function killAll(except = null) {
+  for (const c of [...children]) if (c !== except) killOne(c);
 }
 
 // ---------------------------------------------------------------- finding a pool
@@ -111,6 +113,7 @@ async function showPool(url, token) {
 }
 
 async function startOwn() {
+  killAll(); // leave any pool this app was sharing with
   const env = { HARNESS_BEACON_PORT: String(BEACON_PORT) };
   let child = run(['serve', '--host', '0.0.0.0', '--port', String(OWN_PORT), '--no-qr'], env);
   let m;
@@ -131,8 +134,17 @@ async function startOwn() {
   await showPool(`http://127.0.0.1:${port}`, token);
 }
 
-async function joinRemote({ host, port, code }) {
+function parseAddress(text) {
+  const m = /^(?:https?:\/\/)?([^\/:\s]+)(?::(\d{1,5}))?\/?$/.exec(String(text || '').trim());
+  return m ? { host: m[1], port: Number(m[2] || 8420) } : null;
+}
+
+async function joinRemote(info) {
+  const addr = info.address ? parseAddress(info.address) : info;
+  if (!addr || !addr.host) return { error: 'That address does not look right. Use something like 192.168.1.51:8420.' };
+  const { host, port, code } = { ...addr, code: info.code };
   const url = `http://${host}:${port}`;
+  if (!(await reachable(url))) return { error: `Nothing answered at ${host}:${port}. Check the address, and that both computers are on the same network.` };
   const agent = run(['agent', '--server', url, '--join', code, '--name', os.hostname().slice(0, 40)]);
   try {
     await waitFor(agent, /Joined the pool/, 25000);
@@ -140,6 +152,7 @@ async function joinRemote({ host, port, code }) {
     agent.kill();
     return { error: e.message.includes('code') || e.message.includes('join') ? e.message : `Could not join. ${e.message}` };
   }
+  killAll(agent); // stop sharing with the old pool: its coordinator, if this app ran one, and its agent
   writeCfg({ mode: 'remote', server: url });
   await showPool(url, code);
   return { ok: true };
@@ -162,11 +175,29 @@ async function boot() {
 }
 
 // ---------------------------------------------------------------- window and tray
+function showPairPage() {
+  showWindow();
+  win.loadFile(path.join(__dirname, 'pair.html'));
+}
+
+function buildMenu() {
+  const join = { label: 'Join another pool…', accelerator: 'CmdOrCtrl+J', click: showPairPage };
+  const template = [
+    ...(MAC ? [{ role: 'appMenu' }] : []),
+    { label: 'File', submenu: [join, { type: 'separator' }, MAC ? { role: 'close' } : { role: 'quit' }] },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function setStatus() {
   if (!tray) return;
   tray.setToolTip(poolUrl ? `YourHarness: sharing with ${poolUrl}` : 'YourHarness');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open YourHarness', click: showWindow },
+    { label: 'Join another pool…', click: showPairPage },
     { label: poolUrl ? `Pool: ${poolUrl}` : 'Not connected', enabled: false },
     { label: 'Copy pool address', enabled: !!poolUrl, click: () => clipboard.writeText(poolUrl) },
     { type: 'separator' },
@@ -210,6 +241,7 @@ ipcMain.handle('start-own', async () => { try { await startOwn(); return { ok: t
 
 app.whenReady().then(async () => {
   createWindow();
+  buildMenu();
   const icon = nativeImage.createFromPath(path.join(__dirname, 'tray.png')).resize({ width: 18, height: 18 });
   tray = new Tray(icon);
   tray.on('click', showWindow);

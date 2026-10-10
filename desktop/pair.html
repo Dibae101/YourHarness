@@ -5,54 +5,63 @@
   :root { color-scheme: light dark; --bg:#EDF0F3; --ink:#17212B; --muted:#586573; --line:#C9D1DA; --surface:#fff; }
   @media (prefers-color-scheme: dark) { :root { --bg:#11161D; --ink:#E6EBF0; --muted:#9AA6B2; --line:#2F3A47; --surface:#18202A; } }
   body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif; }
-  main { width:min(420px,calc(100vw - 40px)); display:flex; flex-direction:column; gap:14px; }
+  main { width:min(440px,calc(100vw - 40px)); display:flex; flex-direction:column; gap:14px; padding-block:24px; }
   h1 { margin:0; font-size:2rem; letter-spacing:-0.02em; }
   p { margin:0; color:var(--muted); }
-  input { font:inherit; font-size:1.5rem; letter-spacing:0.4em; text-align:center; padding:10px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); width:100%; box-sizing:border-box; }
+  label { display:flex; flex-direction:column; gap:6px; font-size:0.875rem; color:var(--muted); font-weight:500; }
+  input { font:inherit; font-size:1.0625rem; padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); width:100%; box-sizing:border-box; }
+  input.code { font-size:1.5rem; letter-spacing:0.4em; text-align:center; }
   button { font:inherit; font-weight:600; padding:11px 16px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--ink); cursor:pointer; }
   button.primary { background:var(--ink); color:var(--bg); border-color:var(--ink); }
+  button:focus-visible, input:focus-visible { outline:2px solid #2563C9; outline-offset:2px; }
   .err { color:#B3261E; min-height:1.4em; }
   ul { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
   form { display:flex; flex-direction:column; gap:14px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  hr { border:0; border-top:1px solid var(--line); width:100%; margin:4px 0; }
 </style></head>
 <body><main>
-  <h1>YourHarness</h1>
-  <p id="msg">Looking for your pool on this network…</p>
+  <h1>Join a pool</h1>
+  <p id="msg">Looking for pools on this network…</p>
   <ul id="servers"></ul>
-  <form id="f" hidden>
-    <p id="to"></p>
-    <input id="code" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="0000" aria-label="4-digit join code">
+  <form id="f">
+    <label>Pool address<input id="addr" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="192.168.1.51:8420"></label>
+    <label>Join code (4 digits)<input id="code" class="code" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="0000"></label>
     <p class="err" id="err" role="alert"></p>
     <button class="primary" type="submit">Join the pool</button>
   </form>
-  <button id="own" hidden>Start a new pool on this computer</button>
+  <p>The address and code are shown in the YourHarness window of the computer that runs the pool, under "Add a device".</p>
+  <hr>
+  <div class="row">
+    <button id="again">Search again</button>
+    <button id="own">Start my own pool on this computer</button>
+  </div>
 </main>
 <script>
-  let chosen = null;
   const $ = (s) => document.querySelector(s);
   async function look() {
-    $('#msg').textContent = 'Looking for your pool on this network…';
-    const found = await yh.servers();
-    $('#own').hidden = false;
-    if (!found.length) { $('#msg').textContent = 'No pool found on this network.'; return; }
-    $('#msg').textContent = found.length === 1 ? 'Found a pool.' : 'Found these pools. Pick one.';
+    $('#msg').textContent = 'Looking for pools on this network…';
     $('#servers').innerHTML = '';
+    const found = await yh.servers();
+    $('#msg').textContent = found.length ? 'Found on this network. Pick one, or type an address.' : 'No pool answered on this network. Type the address instead.';
     for (const s of found) {
       const li = document.createElement('li'), b = document.createElement('button');
       b.textContent = `${s.name || s.host} (${s.host}:${s.port})`; b.style.width = '100%';
-      b.onclick = () => { chosen = s; $('#to').textContent = `Enter the 4-digit join code shown on ${s.name || s.host}.`; $('#f').hidden = false; $('#code').focus(); };
+      b.onclick = () => { $('#addr').value = `${s.host}:${s.port}`; $('#code').focus(); };
       li.appendChild(b); $('#servers').appendChild(li);
     }
-    if (found.length === 1) $('#servers button').click();
+    if (found.length === 1) { $('#addr').value = `${found[0].host}:${found[0].port}`; $('#code').focus(); }
   }
   $('#f').onsubmit = async (e) => {
     e.preventDefault();
-    const code = $('#code').value.trim();
+    const address = $('#addr').value.trim(), code = $('#code').value.trim();
+    if (!address) { $('#err').textContent = 'Enter the pool address, for example 192.168.1.51:8420.'; return; }
     if (!/^\d{4}$/.test(code)) { $('#err').textContent = 'The join code is 4 digits.'; return; }
     $('#err').textContent = 'Joining…';
-    const r = await yh.pair({ ...chosen, code });
+    const r = await yh.pair({ address, code });
     if (r && r.error) $('#err').textContent = r.error;
   };
-  $('#own').onclick = () => yh.startOwn();
+  $('#again').onclick = look;
+  $('#own').onclick = async () => { $('#err').textContent = 'Starting…'; const r = await yh.startOwn(); if (r && r.error) $('#err').textContent = r.error; };
   look();
 </script></body></html>

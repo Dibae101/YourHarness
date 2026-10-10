@@ -115,7 +115,14 @@
 
       <section id="add" class="panel add" aria-labelledby="add-h">
         <h2 id="add-h">Add a device</h2>
-        <p class="hint">Phones and tablets: open this page's address and enter the join code. Computers: run the command in a terminal on a Mac, on Linux, or in Ubuntu under WSL on Windows. Computers join as agents, which share real memory and disk and run Python.</p>
+        <p class="hint">Other computers running the YourHarness app: File → Join another pool, then enter the address and code. Phones and tablets: open this page's address and enter the join code. Computers: run the command in a terminal on a Mac, on Linux, or in Ubuntu under WSL on Windows. Computers join as agents, which share real memory and disk and run Python.</p>
+        <div class="field">
+          <span id="add-addr-label">Pool address, to type into the YourHarness app on another computer</span>
+          <div class="copyrow">
+            <input id="add-addr" readonly aria-labelledby="add-addr-label">
+            <button class="btn ghost small" type="button" data-copy="add-addr">Copy</button>
+          </div>
+        </div>
         <div class="field">
           <span id="add-code-label">Join code</span>
           <div class="copyrow">
