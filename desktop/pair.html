@@ -39,11 +39,14 @@
 </main>
 <script>
   const $ = (s) => document.querySelector(s);
+  let run = 0;
   async function look() {
+    const mine = ++run; // a newer search replaces an older one, so results never pile up
     $('#msg').textContent = 'Looking for pools on this network…';
-    $('#servers').innerHTML = '';
     const found = await yh.servers();
-    $('#msg').textContent = found.length ? 'Found on this network. Pick one, or type an address.' : 'No pool answered on this network. Type the address instead.';
+    if (mine !== run) return;
+    $('#servers').innerHTML = '';
+    $('#msg').textContent = found.length ? 'Found on this network. Pick one, or type an address.' : 'No other pool answered on this network. Type the address instead.';
     for (const s of found) {
       const li = document.createElement('li'), b = document.createElement('button');
       b.textContent = `${s.name || s.host} (${s.host}:${s.port})`; b.style.width = '100%';

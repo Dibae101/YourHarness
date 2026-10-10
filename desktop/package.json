@@ -18,10 +18,42 @@
     "appId": "app.yourharness.desktop",
     "productName": "YourHarness",
     "artifactName": "YourHarness-${version}-${os}-${arch}.${ext}",
-    "files": ["main.js", "preload.js", "pair.html", "tray.png"],
-    "extraResources": [{ "from": "../build/dist/backend", "to": "backend" }],
-    "mac": { "category": "public.app-category.developer-tools", "target": ["dmg"], "icon": "icon.png", "identity": null },
-    "win": { "target": ["nsis"], "icon": "icon.png" },
-    "nsis": { "oneClick": true, "perMachine": false, "runAfterFinish": true }
+    "files": [
+      "main.js",
+      "preload.js",
+      "pair.html",
+      "tray.png"
+    ],
+    "extraResources": [
+      {
+        "from": "../build/dist/backend",
+        "to": "backend"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg"
+      ],
+      "icon": "icon.png",
+      "identity": null,
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "YourHarness connects to the other computers and phones in your pool on your home network.",
+        "NSBonjourServices": [
+          "_yourharness._tcp"
+        ]
+      }
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true
+    }
   }
 }

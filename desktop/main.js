@@ -22,6 +22,7 @@ let win = null;
 let tray = null;
 let quitting = false;
 let poolUrl = null; // the address of the pool this window shows
+let ownPort = null; // the port of the pool this app started on this computer, if any
 const children = new Set();
 
 const dataDir = () => app.getPath('userData');
@@ -92,18 +93,36 @@ function discover(ms = 1500) {
     sock.bind(0, () => {
       sock.setBroadcast(true);
       for (const t of ['255.255.255.255', '127.0.0.1']) sock.send('YOURHARNESS?', BEACON_PORT, t, () => {});
-      setTimeout(() => { try { sock.close(); } catch { /* closed */ } resolve([...found.values()]); }, ms);
+      setTimeout(() => {
+        try { sock.close(); } catch { /* closed */ }
+        const mine = localAddresses();
+        // this app's own pool is not something to join, and the same pool can answer on several addresses
+        resolve([...found.values()].filter((f) => !(mine.has(f.host) && f.port === ownPort)));
+      }, ms);
     });
   });
 }
 
-function reachable(url) {
+// Resolves { ok: true } or { ok: false, reason } so the screen can say what to try.
+function check(url) {
   return new Promise((resolve) => {
-    const req = http.get(url + '/install.sh', { timeout: 1500 }, (res) => { res.resume(); resolve(res.statusCode === 200); });
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => { req.destroy(); resolve(false); });
+    const req = http.get(url + '/install.sh', { timeout: 4000 }, (res) => { res.resume(); resolve({ ok: res.statusCode === 200, reason: `It answered with status ${res.statusCode}, so it may not be a YourHarness pool.` }); });
+    req.on('error', (e) => resolve({ ok: false, reason: e.code || e.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, reason: 'ETIMEDOUT' }); });
   });
 }
+const reachable = async (url) => (await check(url)).ok;
+
+function explain(host, port, reason) {
+  const where = `${host}:${port}`;
+  const macHint = MAC ? ' On a Mac, open System Settings → Privacy & Security → Local Network and turn on YourHarness, then try again.' : '';
+  if (reason === 'ECONNREFUSED') return `${where} is reachable but no pool is listening on that port. Check the port number in the pool's "Add a device" panel.`;
+  if (reason === 'EHOSTUNREACH' || reason === 'ENETUNREACH' || reason === 'EPERM' || reason === 'EACCES') return `This computer is not allowed to reach ${where}.${macHint}`;
+  if (reason === 'ETIMEDOUT' || reason === 'ECONNRESET') return `${where} did not answer. A firewall on that computer may be blocking YourHarness (on Windows, allow it on Private networks), or the address is wrong.${macHint}`;
+  return `Could not reach ${where} (${reason}).${macHint}`;
+}
+
+const localAddresses = () => new Set(['127.0.0.1', '::1', ...Object.values(os.networkInterfaces()).flat().filter(Boolean).map((i) => i.address)]);
 
 // ---------------------------------------------------------------- joining or starting a pool
 async function showPool(url, token) {
@@ -125,6 +144,7 @@ async function startOwn() {
     m = await waitFor(child, /Listening on port (\d+)/);
   }
   const port = m[1];
+  ownPort = Number(port);
   const tokenLine = child.tail.join('\n').match(/#join=([A-Za-z0-9_-]+)/);
   const token = tokenLine ? tokenLine[1] : '';
   writeCfg({ mode: 'own' });
@@ -144,7 +164,8 @@ async function joinRemote(info) {
   if (!addr || !addr.host) return { error: 'That address does not look right. Use something like 192.168.1.51:8420.' };
   const { host, port, code } = { ...addr, code: info.code };
   const url = `http://${host}:${port}`;
-  if (!(await reachable(url))) return { error: `Nothing answered at ${host}:${port}. Check the address, and that both computers are on the same network.` };
+  const probe = await check(url);
+  if (!probe.ok) return { error: explain(host, port, probe.reason) };
   const agent = run(['agent', '--server', url, '--join', code, '--name', os.hostname().slice(0, 40)]);
   try {
     await waitFor(agent, /Joined the pool/, 25000);
