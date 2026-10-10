@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,10 @@ MIME = {
 }
 SECURITY_HEADERS = {"X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY"}
 COOKIE_MAX_AGE = 400 * 24 * 3600
+
+
+def _reject_constant(name: str):
+    raise ValueError(f"{name} is not valid JSON")
 
 
 def default_home() -> Path:
@@ -266,6 +271,8 @@ class Coordinator:
 
     # ------------------------------------------------------------------ agent install
     async def install_sh(self, request):
+        if not re.fullmatch(r"[A-Za-z0-9.:\-\[\]]+", request.host):
+            raise web.HTTPBadRequest(text="Bad host name.")
         return web.Response(text=install_script(f"{request.scheme}://{request.host}"), content_type="text/x-shellscript")
 
     async def agent_tar(self, request):
@@ -292,7 +299,7 @@ class Coordinator:
             reason = ("Too many failed sign-ins from this address. Try again later." if blocked
                       else "This device isn't signed in. Open a join link from the coordinator.")
             await ws.send_json({"type": "denied", "reason": reason})
-            await ws.close(code=4401, message=b"Sign in")
+            await ws.close(code=4429 if blocked else 4401, message=b"Sign in")
             return ws
         try:
             hello = await ws.receive_json(timeout=10)
@@ -308,7 +315,7 @@ class Coordinator:
                 if msg.type != WSMsgType.TEXT:
                     continue
                 try:
-                    data = json.loads(msg.data)
+                    data = json.loads(msg.data, parse_constant=_reject_constant)
                 except ValueError:
                     continue
                 if isinstance(data, dict):

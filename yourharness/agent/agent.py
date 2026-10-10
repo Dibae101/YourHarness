@@ -120,6 +120,10 @@ class Agent:
                         print("This agent connected again from another process, so this one is stopping.", file=sys.stderr)
                         return 1
                     delay = 1.0
+                    if code == 4429:
+                        log.warning("The coordinator is temporarily refusing this address after failed sign-ins. Retrying in 60 s.")
+                        await asyncio.sleep(60)
+                        continue
                     log.warning("Lost the connection to the coordinator. Reconnecting.")
                     await asyncio.sleep(1.0)
                 except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
@@ -163,6 +167,7 @@ class Agent:
                     self.ws = None
                     self.outbox = None
                     self.params.clear()
+                    self.pool.dropped.clear()  # job ids restart if the coordinator restarts
                     self.pool.take_queued()  # the coordinator hands these to other devices
                     if self.terms:
                         self.terms.close_all()

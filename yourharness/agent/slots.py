@@ -118,7 +118,11 @@ class SlotPool:
             res = None if s.stopping else {"ok": False, "error": f"The worker process stopped unexpectedly ({e}).", "ms": 0}
             s.kill()
             if not s.retire:
-                await s.start(self.work_dir)
+                try:
+                    await s.start(self.work_dir)
+                except OSError:
+                    log.exception("could not restart a worker process")
+                    s.retire = True
         s.task = None
         if s.retire:
             s.kill()
