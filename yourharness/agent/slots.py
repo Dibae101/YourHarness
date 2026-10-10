@@ -31,8 +31,9 @@ class Slot:
         env = dict(os.environ)
         env["PYTHONPATH"] = PACKAGE_PARENT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         env.setdefault("PYTHONUNBUFFERED", "1")
+        cmd = [sys.executable, "__slot__"] if getattr(sys, "frozen", False) else [sys.executable, "-m", "yourharness.agent.slot"]
         self.proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "yourharness.agent.slot",
+            *cmd,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, cwd=str(cwd), env=env, limit=256 * 1024 * 1024,
         )
         self.stopping = False

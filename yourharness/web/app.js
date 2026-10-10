@@ -14,6 +14,7 @@
   const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+  const NATIVE_APP = new URLSearchParams(location.search).has('native');
   const CORES = Math.max(1, navigator.hardwareConcurrency || 4);
   const MAX_THREADS = Math.min(32, CORES);
   const PLATFORM = detectPlatform();
@@ -48,7 +49,7 @@ def run(chunk, total):
   const S = {
     name: store.get('name') || defaultName(),
     threads: clampThreads(Number(store.get('threads')) || Math.max(1, CORES - 1)),
-    sharing: store.get('sharing') !== 'off',
+    sharing: NATIVE_APP ? store.get('sharing') === 'on' : store.get('sharing') !== 'off', // the desktop app shares through its own agent
     id: null,
     color: null,
     joinToken: null,

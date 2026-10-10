@@ -1,0 +1,27 @@
+{
+  "name": "yourharness-desktop",
+  "productName": "YourHarness",
+  "version": "0.3.0",
+  "description": "Pool the devices you own into one workspace.",
+  "author": "Dibae101",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "build": {
+    "appId": "app.yourharness.desktop",
+    "productName": "YourHarness",
+    "artifactName": "YourHarness-${version}-${os}-${arch}.${ext}",
+    "files": ["main.js", "preload.js", "pair.html", "tray.png"],
+    "extraResources": [{ "from": "../build/dist/backend", "to": "backend" }],
+    "mac": { "category": "public.app-category.developer-tools", "target": ["dmg"], "icon": "icon.png", "identity": null },
+    "win": { "target": ["nsis"], "icon": "icon.png" },
+    "nsis": { "oneClick": true, "perMachine": false, "runAfterFinish": true }
+  }
+}

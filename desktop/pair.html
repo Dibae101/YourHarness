@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>YourHarness</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<style>
+  :root { color-scheme: light dark; --bg:#EDF0F3; --ink:#17212B; --muted:#586573; --line:#C9D1DA; --surface:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#11161D; --ink:#E6EBF0; --muted:#9AA6B2; --line:#2F3A47; --surface:#18202A; } }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif; }
+  main { width:min(420px,calc(100vw - 40px)); display:flex; flex-direction:column; gap:14px; }
+  h1 { margin:0; font-size:2rem; letter-spacing:-0.02em; }
+  p { margin:0; color:var(--muted); }
+  input { font:inherit; font-size:1.5rem; letter-spacing:0.4em; text-align:center; padding:10px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); width:100%; box-sizing:border-box; }
+  button { font:inherit; font-weight:600; padding:11px 16px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--ink); cursor:pointer; }
+  button.primary { background:var(--ink); color:var(--bg); border-color:var(--ink); }
+  .err { color:#B3261E; min-height:1.4em; }
+  ul { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
+  form { display:flex; flex-direction:column; gap:14px; }
+</style></head>
+<body><main>
+  <h1>YourHarness</h1>
+  <p id="msg">Looking for your pool on this network…</p>
+  <ul id="servers"></ul>
+  <form id="f" hidden>
+    <p id="to"></p>
+    <input id="code" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="0000" aria-label="4-digit join code">
+    <p class="err" id="err" role="alert"></p>
+    <button class="primary" type="submit">Join the pool</button>
+  </form>
+  <button id="own" hidden>Start a new pool on this computer</button>
+</main>
+<script>
+  let chosen = null;
+  const $ = (s) => document.querySelector(s);
+  async function look() {
+    $('#msg').textContent = 'Looking for your pool on this network…';
+    const found = await yh.servers();
+    $('#own').hidden = false;
+    if (!found.length) { $('#msg').textContent = 'No pool found on this network.'; return; }
+    $('#msg').textContent = found.length === 1 ? 'Found a pool.' : 'Found these pools. Pick one.';
+    $('#servers').innerHTML = '';
+    for (const s of found) {
+      const li = document.createElement('li'), b = document.createElement('button');
+      b.textContent = `${s.name || s.host} (${s.host}:${s.port})`; b.style.width = '100%';
+      b.onclick = () => { chosen = s; $('#to').textContent = `Enter the 4-digit join code shown on ${s.name || s.host}.`; $('#f').hidden = false; $('#code').focus(); };
+      li.appendChild(b); $('#servers').appendChild(li);
+    }
+    if (found.length === 1) $('#servers button').click();
+  }
+  $('#f').onsubmit = async (e) => {
+    e.preventDefault();
+    const code = $('#code').value.trim();
+    if (!/^\d{4}$/.test(code)) { $('#err').textContent = 'The join code is 4 digits.'; return; }
+    $('#err').textContent = 'Joining…';
+    const r = await yh.pair({ ...chosen, code });
+    if (r && r.error) $('#err').textContent = r.error;
+  };
+  $('#own').onclick = () => yh.startOwn();
+  look();
+</script></body></html>

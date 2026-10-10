@@ -4,6 +4,20 @@ Pool the devices you already own into one workspace for AI work. Open a Linux te
 
 Plan and roadmap: https://dibae101.github.io/YourHarness/
 
+## Install the apps
+
+Download from the [Releases page](https://github.com/Dibae101/YourHarness/releases). Nothing else to install, no Python needed.
+
+| Device | Get | Notes |
+| --- | --- | --- |
+| **Mac** (Apple silicon) | `YourHarness-…-mac-arm64.dmg` | Drag to Applications. The app isn't signed with a paid Apple certificate, so the first time: right-click the app, choose **Open**, then **Open** again. If macOS says it's damaged, run `xattr -cr /Applications/YourHarness.app` once. |
+| **Windows** | `YourHarness-…-windows-x64.exe` | Run the installer. SmartScreen may warn because the app isn't code-signed: choose **More info**, then **Run anyway**. |
+| **iPhone / iPad** | The pool's address in Safari | Open the address, tap Share, then **Add to Home Screen**. It then opens full screen like an app. Enter the join code once. |
+
+**What the app does when you launch it:** it looks for a pool on your network. If it finds one it asks for the 4-digit code once, then reconnects by itself on every launch. If it finds none, it starts a pool on that computer. The computer shares its processors in the background (menu bar on Mac, tray on Windows); closing the window keeps sharing, and Quit stops it. The workspace terminal opens in the window. On the Mac the terminal is the Mac's shell; on Windows, add Ubuntu with the PowerShell command below for a Linux terminal.
+
+Releases are built by GitHub Actions: push a tag such as `v0.3.0` and the `.dmg` and `.exe` appear on the Releases page. Run `python desktop/make_icons.py` to regenerate icons.
+
 ## What's here
 
 | Part | What it does | Runs on |

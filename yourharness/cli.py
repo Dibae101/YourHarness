@@ -122,6 +122,18 @@ def _client():
     return Client()
 
 
+def cmd_discover(a) -> int:
+    from .coordinator import discovery
+
+    found = discovery.find(timeout=a.wait)
+    if not found:
+        print("No coordinator answered on this network.")
+        return 1
+    for c in found:
+        print(f"http://{c['host']}:{c['port']}  ({c['name']})")
+    return 0
+
+
 def cmd_devices(a) -> int:
     devices = _client().devices()
     if not devices:
@@ -274,6 +286,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_agent)
 
+    s = sub.add_parser("discover", help="find coordinators on this network")
+    s.add_argument("--wait", type=float, default=1.5)
+    s.set_defaults(fn=cmd_discover)
     sub.add_parser("devices", help="list connected devices").set_defaults(fn=cmd_devices)
     sub.add_parser("jobs", help="list recent runs").set_defaults(fn=cmd_jobs)
 
@@ -311,7 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.cmd not in ("serve", "agent"):
+    if args.cmd not in ("serve", "agent", "discover"):
         from .client import PoolError
 
         try:

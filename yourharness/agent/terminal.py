@@ -64,10 +64,11 @@ class TerminalHost:
         """A `harness` command for the workspace shell, pointing at this agent's Python."""
         self.bin_dir.mkdir(parents=True, exist_ok=True)
         launcher = self.bin_dir / "harness"
-        launcher.write_text(
-            "#!/bin/sh\n"
-            f'PYTHONPATH="{PACKAGE_PARENT}${{PYTHONPATH:+:$PYTHONPATH}}" exec "{sys.executable}" -m yourharness "$@"\n'
-        )
+        if getattr(sys, "frozen", False):  # a packaged build is the executable itself
+            body = f'exec "{sys.executable}" "$@"\n'
+        else:
+            body = f'PYTHONPATH="{PACKAGE_PARENT}${{PYTHONPATH:+:$PYTHONPATH}}" exec "{sys.executable}" -m yourharness "$@"\n'
+        launcher.write_text("#!/bin/sh\n" + body)
         launcher.chmod(0o755)
         (self.home / "tmux.conf").write_text(TMUX_CONF)
 

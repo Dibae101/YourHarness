@@ -359,3 +359,21 @@ def test_pooled_storage_needs_a_computer(fresh_coord):
     src.write_bytes(b"hello")
     with pytest.raises(PoolError, match="No computer is connected"):
         c.pool_put(src)
+
+
+def test_discovery_finds_a_coordinator():
+    import socket
+    from yourharness.coordinator import discovery
+
+    async def main():
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        beacon = await discovery.start(5555, port)
+        assert beacon is not None
+        found = await asyncio.get_running_loop().run_in_executor(None, lambda: discovery.find(1.0, port, ("127.0.0.1",)))
+        beacon.close()
+        return found
+
+    found = asyncio.run(main())
+    assert found and found[0]["port"] == 5555 and found[0]["host"] == "127.0.0.1"

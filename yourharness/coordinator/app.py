@@ -26,7 +26,7 @@ log = logging.getLogger("yourharness")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 MIME = {
     ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
-    ".svg": "image/svg+xml", ".json": "application/json", ".png": "image/png", ".ico": "image/x-icon",
+    ".svg": "image/svg+xml", ".json": "application/json", ".png": "image/png", ".ico": "image/x-icon", ".webmanifest": "application/manifest+json",
 }
 SECURITY_HEADERS = {"X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY"}
 COOKIE_MAX_AGE = 400 * 24 * 3600
@@ -448,10 +448,14 @@ async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True
             qr.print_ascii(invert=True)
         except ImportError:
             pass
+    from . import discovery
+    beacon = await discovery.start(port, int(os.environ.get("HARNESS_BEACON_PORT", discovery.BEACON_PORT)))
     local = asyncio.ensure_future(run_local_agent(cfg, coord, port)) if local_agent and os.name == "posix" else None
     try:
         await asyncio.Event().wait()
     finally:
+        if beacon:
+            beacon.close()
         if local:
             local.cancel()
         await runner.cleanup()
