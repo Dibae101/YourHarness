@@ -18,6 +18,7 @@
     "appId": "app.yourharness.desktop",
     "productName": "YourHarness",
     "artifactName": "YourHarness-${version}-${os}-${arch}.${ext}",
+    "afterPack": "./afterPack.js",
     "files": [
       "main.js",
       "preload.js",
