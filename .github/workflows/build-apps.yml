@@ -37,6 +37,11 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
+      - name: Name the engine after the tag (v1.2.3 becomes 1.2.3)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: python desktop/set_version.py "${GITHUB_REF_NAME#v}"
+
       - name: Build the engine (Python program with everything inside)
         shell: bash
         run: |

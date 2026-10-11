@@ -1,7 +1,7 @@
 {
   "name": "yourharness-desktop",
   "productName": "YourHarness",
-  "version": "0.3.2",
+  "version": "0.7.0",
   "description": "Pool the devices you own into one workspace.",
   "author": "Dibae101",
   "main": "main.js",
