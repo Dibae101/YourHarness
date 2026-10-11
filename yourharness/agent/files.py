@@ -21,9 +21,19 @@ class FileAccessError(Exception):
     pass
 
 
+def default_root() -> Path:
+    """The folder the pool may browse on this computer.
+
+    HOME is honoured on every platform. Python's ``Path.home()`` reads USERPROFILE on
+    Windows and ignores HOME, so a HOME set to confine this to one folder worked on
+    Linux and macOS and silently exposed the whole user profile on Windows.
+    """
+    return Path(os.environ.get("HOME") or Path.home())
+
+
 class HomeFiles:
     def __init__(self, root: Path | None = None):
-        self.root = (root or Path.home()).resolve()
+        self.root = (root or default_root()).resolve()
 
     def describe(self) -> dict:
         return {"root": str(self.root), "sep": os.sep}

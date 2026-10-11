@@ -53,6 +53,8 @@ def run(chunk, total):
     id: null,
     color: null,
     joinToken: null,
+    lendToken: null,
+    caps: [],
     devices: [],
     jobs: [],
     files: [],
@@ -108,6 +110,24 @@ def run(chunk, total):
     const m = /[#?&]join=([A-Za-z0-9_-]+)/.exec(t);
     if (m) return m[1];
     return /^\d{4}$/.test(t) || /^[A-Za-z0-9_-]{16,}$/.test(t) ? t : null;
+  }
+
+  // What this device is allowed to do. A computer that joined with a lend link
+  // computes pieces and nothing else, so the apps it can't use are hidden rather
+  // than left to fail: the coordinator refuses them anyway, and a button that
+  // always errors is worse than no button.
+  function can(cap) { return !S.caps || S.caps.indexOf(cap) >= 0; }
+
+  function applyCaps() {
+    const gated = { terminal: 'shell', files: 'files' };
+    Object.keys(gated).forEach(function (app) {
+      const ok = can(gated[app]);
+      document.querySelectorAll('[data-open="' + app + '"]').forEach(function (b) { b.hidden = !ok; });
+    });
+    const lending = !can('submit') && !can('shell') && !can('files');
+    document.body.classList.toggle('lending', lending);
+    const note = document.getElementById('lend-note');
+    if (note) note.hidden = !lending;
   }
 
   async function joinWith(token, name) {
@@ -188,6 +208,9 @@ def run(chunk, total):
         S.color = m.color;
         S.joinToken = m.joinToken;
         S.joinCode = m.joinCode;
+        S.lendToken = m.lendToken;
+        S.caps = m.caps || [];
+        applyCaps();
         S.procs = m.procs || [];
         S.address = m.address || location.origin;
         S.joined = true;

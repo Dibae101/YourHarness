@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import files as shared_files
 from .jobkinds import KINDS, PlanContext, UserError, clamp_int, clamp_num
+from .state import CAP_ADMIN, CAP_REFUSALS, CAP_SHELL, CAP_SUBMIT, caps_of
 from .execs import Execs
 from .pool_store import PoolStore
 from .poolshell import PoolShell
@@ -80,6 +81,7 @@ class Device:
         self.host = host
         self.id: str = rec["id"]
         self.kind: str = rec["kind"]
+        self.caps = caps_of(rec)  # what this device may do; set by the join link it used
         self.ws = ws
         self.color = color
         self.name = clean_text(hello.get("name"), 40, rec.get("name") or "Unnamed device")
@@ -109,6 +111,17 @@ class Device:
 
     def send(self, msg: dict) -> None:
         self.send_raw(json.dumps(msg, separators=(",", ":")))
+
+    def can(self, cap: str) -> bool:
+        return cap in self.caps
+
+    def refuse(self, cap: str) -> None:
+        """Tell the device why the thing it asked for isn't allowed, and carry on.
+
+        A lender hitting this is not an attack: its page may have been opened before
+        the pool knew what it was, so the honest answer is an explanation, not a drop.
+        """
+        self.send({"type": "error", "message": CAP_REFUSALS.get(cap, "This device isn't allowed to do that.")})
 
     def send_raw(self, data: str) -> None:
         if self.closed:
@@ -276,11 +289,18 @@ class Scheduler:
         self.store.update_device(d.id, name=d.name, color=d.color)
         self.devices[d.id] = d
         latest = self.running_job() or (self.jobs[-1] if self.jobs else None)
-        d.send({
-            "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind,
+        hi = {
+            "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind, "caps": list(d.caps),
             "devices": self.device_list(), "jobs": [j.summary() for j in self.jobs], "snapshot": self.snapshot(latest),
-            "files": self.list_files(), "procs": self.execs.listing(), "joinToken": self.store.join_token, "joinCode": self.store.join_code, "pool": self.pool_store.listing(), "address": self.public_url,
-        })
+            "files": self.list_files(), "procs": self.execs.listing(), "pool": self.pool_store.listing(), "address": self.public_url,
+        }
+        if d.can(CAP_ADMIN):
+            # The join link and the code both add a device with full control, so a lender
+            # must never see them: holding the owner link would undo every limit below.
+            hi["joinToken"] = self.store.join_token
+            hi["joinCode"] = self.store.join_code
+            hi["lendToken"] = self.store.lend_token
+        d.send(hi)
         log.info("%s joined (%s, %s threads)", d.name, d.kind, d.threads)
         self.broadcast_devices()
         self.dispatch()
@@ -355,12 +375,16 @@ class Scheduler:
         elif kind == "release":
             self.release(d, msg)
         elif kind == "submit":
+            if not d.can(CAP_SUBMIT):
+                return d.refuse(CAP_SUBMIT)
             spec = msg.get("job") if isinstance(msg.get("job"), dict) else {}
             try:
                 self.create_job(spec.get("kind"), spec.get("params"), d.name)
             except UserError as e:
                 d.send({"type": "error", "message": str(e)})
         elif kind == "cancel":
+            if not d.can(CAP_SUBMIT):
+                return d.refuse(CAP_SUBMIT)
             job = self.find_job(msg.get("jobId"))
             if job:
                 self.stop_job(job, "cancelled", f"Cancelled by {d.name}.")
@@ -373,6 +397,8 @@ class Scheduler:
                 self.execs.handle(d, msg)
         elif isinstance(kind, str) and kind.startswith("os."):
             if d.kind != "agent":
+                if not d.can(CAP_SHELL):
+                    return d.refuse(CAP_SHELL)
                 self.poolshell.from_browser(d, msg)
         elif kind in ("fs.reply", "fs.error"):
             if d.kind == "agent":
@@ -382,7 +408,10 @@ class Scheduler:
                 self.pool_store.handle(d, msg)
         elif isinstance(kind, str) and kind.startswith("term."):
             if d.kind == "agent":
+                # an agent only ever answers a terminal the pool already opened for it
                 self.terminals.from_agent(d, msg)
+            elif not d.can(CAP_SHELL):
+                return d.refuse(CAP_SHELL)
             else:
                 self.terminals.from_browser(d, msg)
 

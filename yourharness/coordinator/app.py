@@ -19,7 +19,7 @@ from .auth import COOKIE, Limiter, client_ip, same_origin, token_from
 from .install import agent_tarball, install_ps1, install_script
 from .jobkinds import UserError
 from .scheduler import Scheduler, clean_text
-from .state import Store
+from .state import CAP_ADMIN, CAP_FILES, CAP_SHELL, CAP_SUBMIT, CAP_REFUSALS, Store, caps_of
 
 log = logging.getLogger("yourharness")
 
@@ -28,8 +28,22 @@ MIME = {
     ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
     ".svg": "image/svg+xml", ".json": "application/json", ".png": "image/png", ".ico": "image/x-icon", ".webmanifest": "application/manifest+json",
 }
-SECURITY_HEADERS = {"X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY"}
+# 'unsafe-eval' is needed on purpose: the "Your own code" job compiles the code you
+# type with new Function() inside a worker, which is the whole point of that job.
+# Everything else is locked down, so an injected <script> or a stray external URL
+# still cannot run or phone home. font-src is 'self' only, so the page needs no
+# network but the pool's own.
+CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-eval'; worker-src 'self' blob:; "
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; "
+    "connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+    "Content-Security-Policy": CSP,
+}
 COOKIE_MAX_AGE = 400 * 24 * 3600
+CODE_RE = re.compile(r"\d{4}")  # the shape of a join code, so junk doesn't count as guessing one
 
 
 def _reject_constant(name: str):
@@ -90,6 +104,10 @@ class Coordinator:
                 self.static["/" + path.relative_to(WEB_DIR).as_posix()] = path
         self._maintenance: asyncio.Task | None = None
         self.lan_ip = primary_ip() or ""
+        # An online pool accepts join LINKS only. The 4-digit code has 10,000
+        # possibilities, which is fine on a network you own and far too few once the
+        # coordinator can be reached from the internet. Set HARNESS_ONLINE=1 there.
+        self.online = os.environ.get("HARNESS_ONLINE", "").strip().lower() in ("1", "true", "yes", "on")
 
     # ------------------------------------------------------------------ app
     def build(self) -> web.Application:
@@ -154,7 +172,7 @@ class Coordinator:
             raise fail(429, f"Too many failed sign-ins from this address. Try again in {minutes} minute{'s' if minutes > 1 else ''}.", {"Retry-After": str(int(wait))})
         return ip
 
-    def authed(self, request: web.Request, write: bool = False) -> dict:
+    def authed(self, request: web.Request, write: bool = False, need: str | None = None) -> dict:
         ip = self._check_blocked(request)
         token, how = token_from(request)
         rec = self.store.device_for_token(token) if token else None
@@ -164,6 +182,9 @@ class Coordinator:
             raise fail(401, "This device isn't signed in. Open a join link from the coordinator.")
         if how == "cookie" and write and not same_origin(request):
             raise fail(403, "That request came from another website, so it was refused.")
+        if need is not None and need not in caps_of(rec):
+            # a refusal, not a failed sign-in: the device is who it says it is
+            raise fail(403, CAP_REFUSALS.get(need, "This device isn't allowed to do that."))
         return rec
 
     async def join(self, request: web.Request) -> web.Response:
@@ -174,33 +195,46 @@ class Coordinator:
             body = None
         if not isinstance(body, dict):
             raise fail(400, "Send the join token as JSON.")
-        if self.code_guesses.retry_after("all"):
+        offered = body.get("token")
+        code_shaped = isinstance(offered, str) and CODE_RE.fullmatch(offered.strip()) is not None
+        if code_shaped and self.code_guesses.retry_after("all"):
             raise fail(429, "Too many wrong join codes. The code was changed; read the new one from the coordinator's terminal.")
-        if not self.store.join_ok(body.get("token")):
+        caps = self.store.caps_for_join(offered, allow_code=not self.online)
+        if caps is None:
             self.limiter.fail(ip)
-            self.code_guesses.fail("all")
-            if self.code_guesses.retry_after("all"):
-                self.store.rotate_join_code()
-                self.code_guesses = Limiter(max_fails=20)
-                log.warning("20 wrong join codes in a row; the join code was changed.")
+            # Only a code-shaped guess counts toward rotating the code. Otherwise anyone
+            # who can reach this page could keep the printed code churning with junk, and
+            # the devices meant to join could never use the code they were given.
+            if code_shaped:
+                self.code_guesses.fail("all")
+                if self.code_guesses.retry_after("all"):
+                    self.store.rotate_join_code()
+                    self.code_guesses = Limiter(max_fails=20)
+                    log.warning("20 wrong join codes in a row; the join code was changed.")
+            if self.online and code_shaped:
+                raise fail(401, "This pool is reachable from outside your network, so it only accepts join links. Ask for a link.")
             raise fail(401, "That join code or link isn't valid. Check the coordinator's terminal for the current one.")
         kind = "agent" if body.get("kind") == "agent" else "browser"
         name = clean_text(body.get("name"), 40, "Unnamed device")
         if kind == "browser":
             existing, how = token_from(request)
             rec = self.store.device_for_token(existing) if how == "cookie" else None
-            if rec is not None:  # opening the join link again on a signed-in browser
-                return web.json_response({"deviceId": rec["id"], "name": rec["name"]})
-        rec, token = self.store.add_device(kind, name)
+            # Reopening the same kind of link on a signed-in browser keeps the device it
+            # already is. A link granting something different signs it in afresh, so an
+            # owner link opened on a lender's browser is not silently ignored.
+            if rec is not None and caps_of(rec) == caps:
+                return web.json_response({"deviceId": rec["id"], "name": rec["name"], "caps": list(caps)})
+        rec, token = self.store.add_device(kind, name, caps)
         if kind == "agent":
-            return web.json_response({"deviceId": rec["id"], "name": rec["name"], "deviceToken": token})
-        resp = web.json_response({"deviceId": rec["id"], "name": rec["name"]})
+            return web.json_response({"deviceId": rec["id"], "name": rec["name"], "deviceToken": token, "caps": list(caps)})
+        resp = web.json_response({"deviceId": rec["id"], "name": rec["name"], "caps": list(caps)})
         resp.set_cookie(COOKIE, token, max_age=COOKIE_MAX_AGE, httponly=True, samesite="Strict", path="/", secure=request.secure)
         return resp
 
     async def me(self, request):
         rec = self.authed(request)
-        return web.json_response({"deviceId": rec["id"], "name": rec["name"], "kind": rec["kind"], "version": __version__})
+        return web.json_response({"deviceId": rec["id"], "name": rec["name"], "kind": rec["kind"],
+                                  "caps": list(caps_of(rec)), "version": __version__})
 
     async def leave(self, request):
         rec = self.authed(request, write=True)
@@ -214,7 +248,7 @@ class Coordinator:
         return web.json_response({"devices": self.sched.device_list()})
 
     async def remove_device(self, request):
-        rec = self.authed(request, write=True)
+        rec = self.authed(request, write=True, need=CAP_ADMIN)
         target = request.match_info["device_id"]
         if target == rec["id"]:
             raise fail(400, "Use “Leave the pool” to remove the device you're on.")
@@ -228,7 +262,7 @@ class Coordinator:
         return web.json_response({"jobs": [j.summary() for j in self.sched.jobs]})
 
     async def submit_job(self, request):
-        rec = self.authed(request, write=True)
+        rec = self.authed(request, write=True, need=CAP_SUBMIT)
         try:
             body = await request.json()
         except (ValueError, UnicodeDecodeError):
@@ -256,7 +290,7 @@ class Coordinator:
         return web.json_response({"job": job.summary()})
 
     async def cancel_job(self, request):
-        rec = self.authed(request, write=True)
+        rec = self.authed(request, write=True, need=CAP_SUBMIT)
         job = self.sched.find_job(request.match_info["job_id"])
         if job is None:
             raise fail(404, "There is no job with that id.")
@@ -271,15 +305,15 @@ class Coordinator:
         return name
 
     async def list_files(self, request):
-        self.authed(request)
+        self.authed(request, need=CAP_FILES)
         return web.json_response({"files": self.sched.list_files()})
 
     async def download(self, request):
-        self.authed(request)
+        self.authed(request, need=CAP_FILES)
         return shared_files.download(self.cfg.shared_dir, self._name(request))
 
     async def upload(self, request):
-        rec = self.authed(request, write=True)
+        rec = self.authed(request, write=True, need=CAP_FILES)
         name = self._name(request)
         size = await shared_files.receive(request, self.cfg.shared_dir, name, self.cfg.max_upload_mb * 1024 * 1024)
         live = self.sched.devices.get(rec["id"])
@@ -288,7 +322,7 @@ class Coordinator:
         return web.json_response({"ok": True, "name": name, "size": size}, status=201)
 
     async def delete_file(self, request):
-        self.authed(request, write=True)
+        self.authed(request, write=True, need=CAP_FILES)
         name = self._name(request)
         try:
             (self.cfg.shared_dir / name).unlink()
@@ -300,11 +334,11 @@ class Coordinator:
 
     # ------------------------------------------------------------------ pooled storage
     async def pool_list(self, request):
-        self.authed(request)
+        self.authed(request, need=CAP_FILES)
         return web.json_response(self.sched.pool_store.listing())
 
     async def pool_put(self, request):
-        rec = self.authed(request, write=True)
+        rec = self.authed(request, write=True, need=CAP_FILES)
         name = self._name(request)
         live = self.sched.devices.get(rec["id"])
         try:
@@ -314,14 +348,14 @@ class Coordinator:
         return web.json_response({"ok": True, "name": name, "size": size}, status=201)
 
     async def pool_get(self, request):
-        self.authed(request)
+        self.authed(request, need=CAP_FILES)
         try:
             return await self.sched.pool_store.stream(request, self._name(request))
         except UserError as e:
             raise fail(404, str(e))
 
     async def pool_delete(self, request):
-        self.authed(request, write=True)
+        self.authed(request, write=True, need=CAP_FILES)
         name = self._name(request)
         if not self.sched.pool_store.delete(name):
             raise fail(404, f"There is no pooled file named {name}.")
@@ -335,7 +369,7 @@ class Coordinator:
             raise fail(400, str(e))
 
     async def os_list(self, request):
-        self.authed(request)
+        self.authed(request, need=CAP_FILES)
         path = request.query.get("path", "")
         from .pool_store import clean_path
 
@@ -344,11 +378,11 @@ class Coordinator:
         return web.json_response({"path": self._os(clean_path, path), "entries": entries, "free": round(store.listing()["freeGB"] * 2**30), "agents": len(store.live_agents())})
 
     async def os_manifest(self, request):
-        self.authed(request)
+        self.authed(request, need=CAP_FILES)
         return web.json_response(self.sched.pool_store.manifest())
 
     async def os_get(self, request):
-        self.authed(request)
+        self.authed(request, need=CAP_FILES)
         from .pool_store import clean_path
 
         path = self._os(clean_path, request.query.get("path", ""))
@@ -361,7 +395,7 @@ class Coordinator:
             raise fail(404, str(e))
 
     async def os_put(self, request):
-        rec = self.authed(request, write=True)
+        rec = self.authed(request, write=True, need=CAP_FILES)
         live = self.sched.devices.get(rec["id"])
         try:
             size = await self.sched.pool_store.put_file(request.query.get("path", ""), request.content, live.name if live else rec["name"], self.cfg.max_upload_mb * 1024 * 1024)
@@ -373,19 +407,19 @@ class Coordinator:
         return web.json_response({"ok": True, "size": size, "digest": f["digest"], "mtime": f["mtime"]}, status=201)
 
     async def os_delete(self, request):
-        self.authed(request, write=True)
+        self.authed(request, write=True, need=CAP_FILES)
         if not self._os(self.sched.pool_store.delete, request.query.get("path", ""), request.query.get("recursive") == "1"):
             raise fail(404, "There is nothing at that path.")
         return web.json_response({"ok": True})
 
     async def os_mkdir(self, request):
-        self.authed(request, write=True)
+        self.authed(request, write=True, need=CAP_FILES)
         body = await self._fs_body(request)
         self._os(self.sched.pool_store.mkdir, str(body.get("path", "")))
         return web.json_response({"ok": True})
 
     async def os_rename(self, request):
-        self.authed(request, write=True)
+        self.authed(request, write=True, need=CAP_FILES)
         body = await self._fs_body(request)
         self._os(self.sched.pool_store.rename, str(body.get("path", "")), str(body.get("to", "")))
         return web.json_response({"ok": True})
@@ -400,7 +434,7 @@ class Coordinator:
             raise fail(400, str(e))
 
     async def fs_list(self, request):
-        self.authed(request)
+        self.authed(request, need=CAP_FILES)
         res = await self._fs(self.sched.remote_fs.ask(request.match_info["device_id"], "list", path=request.query.get("path", "")))
         return web.json_response({k: res[k] for k in ("path", "entries", "truncated", "free", "total")})
 
@@ -409,7 +443,7 @@ class Coordinator:
 
         from .remote_fs import RemoteFSError
 
-        self.authed(request)
+        self.authed(request, need=CAP_FILES)
         dev, path = request.match_info["device_id"], request.query.get("path", "")
         info = await self._fs(self.sched.remote_fs.ask(dev, "stat", path=path))
         if info.get("dir"):
@@ -429,7 +463,7 @@ class Coordinator:
         return resp
 
     async def fs_upload(self, request):
-        self.authed(request, write=True)
+        self.authed(request, write=True, need=CAP_FILES)
         dev, path = request.match_info["device_id"], request.query.get("path", "")
         limit = self.cfg.max_upload_mb * 1024 * 1024
 
@@ -455,26 +489,26 @@ class Coordinator:
         return body
 
     async def fs_mkdir(self, request):
-        self.authed(request, write=True)
+        self.authed(request, write=True, need=CAP_FILES)
         body = await self._fs_body(request)
         res = await self._fs(self.sched.remote_fs.ask(request.match_info["device_id"], "mkdir", path=str(body.get("path", ""))))
         return web.json_response({"ok": True, "path": res.get("path")})
 
     async def fs_rename(self, request):
-        self.authed(request, write=True)
+        self.authed(request, write=True, need=CAP_FILES)
         body = await self._fs_body(request)
         await self._fs(self.sched.remote_fs.ask(request.match_info["device_id"], "rename", path=str(body.get("path", "")), to=str(body.get("to", ""))))
         return web.json_response({"ok": True})
 
     async def fs_delete(self, request):
-        self.authed(request, write=True)
+        self.authed(request, write=True, need=CAP_FILES)
         await self._fs(self.sched.remote_fs.ask(request.match_info["device_id"], "delete", path=request.query.get("path", ""),
                                                  recursive=request.query.get("recursive") == "1"))
         return web.json_response({"ok": True})
 
     async def fs_copy(self, request):
         """Copy a file from one computer to a folder on another, piece by piece through the coordinator."""
-        self.authed(request, write=True)
+        self.authed(request, write=True, need=CAP_FILES)
         body = await self._fs_body(request)
         src, dst = body.get("from") or {}, body.get("to") or {}
         fs = self.sched.remote_fs
@@ -599,16 +633,25 @@ async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True
     base = (public_url or f"http://{primary_ip() or 'localhost'}:{port}").rstrip("/")
     coord.sched.public_url = base
     link = f"{base}/#join={coord.store.join_token}"
+    lend = f"{base}/#join={coord.store.lend_token}"
     print(f"\nYourHarness coordinator {__version__} is running.\n")
-    print("Phones, tablets and browsers: open this address and enter the join code")
-    print(f"  {base}\n")
-    print(f"  JOIN CODE: {coord.store.join_code}\n")
-    print("Windows PC (sets up Ubuntu for you): in PowerShell run")
-    print(f"  irm {base}/install.ps1 | iex\n")
-    print("Mac or Linux computers: run this in a terminal")
-    print(f"  curl -fsSL {base}/install.sh | bash -s -- --join {coord.store.join_code} --workspace")
-    print("  Leave out --workspace on computers that shouldn't host a terminal.\n")
-    print(f"Or skip typing the code by opening: {link}\n")
+    if coord.online:
+        print("ONLINE MODE: this pool accepts join links only; the 4-digit code is turned off.\n")
+    else:
+        print("Phones, tablets and browsers: open this address and enter the join code")
+        print(f"  {base}\n")
+        print(f"  JOIN CODE: {coord.store.join_code}\n")
+        print("Windows PC (sets up Ubuntu for you): in PowerShell run")
+        print(f"  irm {base}/install.ps1 | iex\n")
+        print("Mac or Linux computers: run this in a terminal")
+        print(f"  curl -fsSL {base}/install.sh | bash -s -- --join {coord.store.join_code} --workspace")
+        print("  Leave out --workspace on computers that shouldn't host a terminal.\n")
+        print(f"Or skip typing the code by opening: {link}\n")
+    print("Your own devices -- full control of the pool, including shells and files:")
+    print(f"  {link}\n")
+    print("Lend link -- give this to someone else. Their computer joins and computes, and")
+    print("cannot start runs, open a terminal, or read files on any computer here:")
+    print(f"  {lend}\n")
     print(f"Shared folder: {cfg.shared_dir}")
     print(f"Sign-ins are stored in: {cfg.data_dir}")
     print(f"Listening on port {port}", flush=True)

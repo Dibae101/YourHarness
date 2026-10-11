@@ -1,6 +1,15 @@
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
 
+/* Shown on a computer that joined with a lend link, so it is obvious why the
+   Terminal and Files apps aren't there. Uses the theme's own colours. */
+.lend-note {
+  position: fixed; inset: 0 0 auto 0; z-index: 50; margin: 0;
+  padding: 8px 14px; font-size: 0.8125rem; line-height: 1.45;
+  background: var(--surface); color: var(--ink);
+  border-bottom: 1px solid var(--line); text-align: center;
+}
+
 :root {
   color-scheme: light dark;
   --bg: #EDF0F3;
