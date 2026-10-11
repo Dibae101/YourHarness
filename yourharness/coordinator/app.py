@@ -44,6 +44,7 @@ SECURITY_HEADERS = {
 }
 COOKIE_MAX_AGE = 400 * 24 * 3600
 CODE_RE = re.compile(r"\d{4}")  # the shape of a join code, so junk doesn't count as guessing one
+CODE_GUESSES = 20  # wrong codes the whole pool may make before code joins turn off: a 0.2% chance to hit
 
 
 def _reject_constant(name: str):
@@ -97,7 +98,10 @@ class Coordinator:
         self.store = Store(cfg.data_dir)
         self.sched = Scheduler(self.store, cfg.shared_dir, stale_s=cfg.stale_s, chunk_timeout_s=cfg.chunk_timeout_s)
         self.limiter = Limiter(max_fails=cfg.max_auth_fails)
-        self.code_guesses = Limiter(max_fails=20)  # wrong join codes from anywhere; a 4-digit code can't survive more
+        # Wrong join codes from anywhere. A 4-digit code is only safe if the whole pool
+        # gets a few guesses at it, so once these run out the code is replaced and code
+        # joins stay off until an owner asks for a new code (or the coordinator restarts).
+        self.code_fails = 0
         self.static = {"/": WEB_DIR / "index.html"}
         for path in WEB_DIR.rglob("*"):
             if path.is_file() and path.suffix in MIME:
@@ -114,6 +118,7 @@ class Coordinator:
         app = web.Application(middlewares=[middleware], client_max_size=2 * 1024 * 1024)
         r = app.router
         r.add_post("/api/join", self.join)
+        r.add_post("/api/join-code", self.new_join_code)
         r.add_get("/api/me", self.me)
         r.add_post("/api/leave", self.leave)
         r.add_get("/api/devices", self.devices)
@@ -173,10 +178,12 @@ class Coordinator:
         return ip
 
     def authed(self, request: web.Request, write: bool = False, need: str | None = None) -> dict:
-        ip = self._check_blocked(request)
         token, how = token_from(request)
         rec = self.store.device_for_token(token) if token else None
         if rec is None:
+            # A signed-in device is never locked out: behind a proxy every device shares
+            # one address, and a stranger's wrong guesses must not cut the others off.
+            ip = self._check_blocked(request)
             if token:
                 self.limiter.fail(ip)
             raise fail(401, "This device isn't signed in. Open a join link from the coordinator.")
@@ -188,6 +195,8 @@ class Coordinator:
         return rec
 
     async def join(self, request: web.Request) -> web.Response:
+        if not same_origin(request):
+            raise fail(403, "That request came from another website, so it was refused.")
         ip = self._check_blocked(request)
         try:
             body = await request.json()
@@ -197,20 +206,20 @@ class Coordinator:
             raise fail(400, "Send the join token as JSON.")
         offered = body.get("token")
         code_shaped = isinstance(offered, str) and CODE_RE.fullmatch(offered.strip()) is not None
-        if code_shaped and self.code_guesses.retry_after("all"):
-            raise fail(429, "Too many wrong join codes. The code was changed; read the new one from the coordinator's terminal.")
+        if code_shaped and self.store.code_locked:
+            raise fail(429, "Too many wrong join codes, so joining by code is off. Use the join link, or ask an owner for a new code.")
         caps = self.store.caps_for_join(offered, allow_code=not self.online)
         if caps is None:
             self.limiter.fail(ip)
-            # Only a code-shaped guess counts toward rotating the code. Otherwise anyone
-            # who can reach this page could keep the printed code churning with junk, and
-            # the devices meant to join could never use the code they were given.
+            # Only a code-shaped guess counts against the code. Otherwise anyone who can
+            # reach this page could switch codes off with junk.
             if code_shaped:
-                self.code_guesses.fail("all")
-                if self.code_guesses.retry_after("all"):
+                self.code_fails += 1
+                if self.code_fails >= CODE_GUESSES:
                     self.store.rotate_join_code()
-                    self.code_guesses = Limiter(max_fails=20)
-                    log.warning("20 wrong join codes in a row; the join code was changed.")
+                    self.store.code_locked = True
+                    self.sched.broadcast({"type": "joinCode", "joinCode": None}, need=CAP_ADMIN)
+                    log.warning("%d wrong join codes; joining by code is off until an owner makes a new code.", CODE_GUESSES)
             if self.online and code_shaped:
                 raise fail(401, "This pool is reachable from outside your network, so it only accepts join links. Ask for a link.")
             raise fail(401, "That join code or link isn't valid. Check the coordinator's terminal for the current one.")
@@ -230,6 +239,14 @@ class Coordinator:
         resp = web.json_response({"deviceId": rec["id"], "name": rec["name"], "caps": list(caps)})
         resp.set_cookie(COOKIE, token, max_age=COOKIE_MAX_AGE, httponly=True, samesite="Strict", path="/", secure=request.secure)
         return resp
+
+    async def new_join_code(self, request):
+        """An owner asks for a fresh 4-digit code, which also turns code joins back on."""
+        self.authed(request, write=True, need=CAP_ADMIN)
+        code = self.store.rotate_join_code()
+        self.code_fails, self.store.code_locked = 0, False
+        self.sched.broadcast({"type": "joinCode", "joinCode": code}, need=CAP_ADMIN)
+        return web.json_response({"joinCode": code})
 
     async def me(self, request):
         rec = self.authed(request)
@@ -476,7 +493,7 @@ class Coordinator:
                 yield part
 
         size = await self._fs(self.sched.remote_fs.write_stream(dev, path, body()))
-        self.sched.broadcast({"type": "fs.changed", "device": dev, "path": path.rsplit("/", 1)[0] if "/" in path else ""})
+        self.sched.broadcast({"type": "fs.changed", "device": dev, "path": path.rsplit("/", 1)[0] if "/" in path else ""}, need=CAP_FILES)
         return web.json_response({"ok": True, "size": size}, status=201)
 
     async def _fs_body(self, request) -> dict:
@@ -517,7 +534,7 @@ class Coordinator:
             raise fail(400, "Copying whole folders isn't supported yet. Pick a file.")
         target = "/".join(x for x in (str(dst.get("dir", "")).strip("/"), info["name"]) if x)
         size = await self._fs(fs.write_stream(str(dst.get("device", "")), target, fs.read_pieces(str(src.get("device", "")), str(src.get("path", "")))))
-        self.sched.broadcast({"type": "fs.changed", "device": str(dst.get("device", "")), "path": str(dst.get("dir", "")).strip("/")})
+        self.sched.broadcast({"type": "fs.changed", "device": str(dst.get("device", "")), "path": str(dst.get("dir", "")).strip("/")}, need=CAP_FILES)
         return web.json_response({"ok": True, "size": size, "path": target})
 
     # ------------------------------------------------------------------ agent install
@@ -550,8 +567,8 @@ class Coordinator:
         ws = web.WebSocketResponse(heartbeat=10.0, max_msg_size=16 * 1024 * 1024)
         ip = client_ip(request)
         token, how = token_from(request)
-        blocked = self.limiter.retry_after(ip)
-        rec = self.store.device_for_token(token) if token and not blocked else None
+        rec = self.store.device_for_token(token) if token else None
+        blocked = self.limiter.retry_after(ip) if rec is None else 0
         await ws.prepare(request)
         if blocked or rec is None or (how == "cookie" and not same_origin(request)):
             if token and rec is None and not blocked:

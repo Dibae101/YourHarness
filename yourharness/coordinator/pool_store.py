@@ -18,9 +18,11 @@ import logging
 import os
 import secrets
 import time
+from collections import Counter
 from pathlib import Path
 
 from .jobkinds import UserError
+from .state import CAP_FILES
 
 log = logging.getLogger("yourharness")
 
@@ -51,21 +53,26 @@ class PoolStore:
         self.files: dict[str, dict] = {}
         self.holders: dict[str, list[str]] = {}
         self.dirs: set[str] = set()  # folders made on purpose; folders that hold files exist without being listed here
+        # chunks deleted while a computer holding them was offline: it is told to delete them when it's back
+        self.dead: dict[str, list[str]] = {}
         if self.path.exists():
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.files, self.holders = data.get("files", {}), data.get("holders", {})
             self.dirs = set(data.get("dirs", []))
+            self.dead = data.get("dead", {})
+        # chunks that an unfinished upload or a repair is counting on, so _gc leaves them alone
+        self.pending: Counter[str] = Counter()
         self.reqs: dict[str, tuple[asyncio.Future, str]] = {}
         self._repairing = False
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"files": self.files, "holders": self.holders, "dirs": sorted(self.dirs)}), encoding="utf-8")
+        tmp.write_text(json.dumps({"files": self.files, "holders": self.holders, "dirs": sorted(self.dirs), "dead": self.dead}), encoding="utf-8")
         os.replace(tmp, self.path)
 
     # ------------------------------------------------------------------ devices
     def live_agents(self):
-        return [d for d in self.s.devices.values() if d.kind == "agent" and not d.closed and not d.stale]
+        return [d for d in self.s.devices.values() if d.trusted and not d.closed and not d.stale]
 
     def _live_holders(self, h: str):
         return [self.s.devices[i] for i in self.holders.get(h, []) if i in self.s.devices and self.s.devices[i] in self.live_agents()]
@@ -98,7 +105,8 @@ class PoolStore:
         live = self.live_agents()
         need = min(REPLICAS, len(live))
         held = {d.id for d in self._live_holders(h)}
-        room = lambda d: (d.info.get("diskFreeGB") or 1e9)  # noqa: E731 - unknown free space counts as plenty
+        # unknown free space counts as plenty; a reported 0 (a full disk) is 0, not unknown
+        room = lambda d: 1e9 if d.info.get("diskFreeGB") is None else d.info["diskFreeGB"]  # noqa: E731
         cands = [d for d in live if d.id not in held and room(d) * 1e9 > size + 5e8]
         cands.sort(key=lambda d: -room(d))
         return cands[: max(0, need - len(held))]
@@ -227,10 +235,11 @@ class PoolStore:
 
         async def flush(chunk: bytes):
             h = hashlib.sha256(chunk).hexdigest()
+            self.pending[h] += 1  # held until this upload commits or fails
+            fresh.append(h)
             await self._put_chunk(h, chunk)
             hashes.append(h)
             sizes.append(len(chunk))
-            fresh.append(h)
 
         try:
             async for part in content.iter_chunked(256 * 1024):
@@ -245,10 +254,12 @@ class PoolStore:
             if buf:
                 await flush(bytes(buf))
         except BaseException:
+            self._release(fresh)
             self._gc(fresh)
             raise
         old = self.files.get(name)
         self.files[name] = {"size": size, "chunks": hashes, "sizes": sizes, "mtime": int(time.time() * 1000), "by": by, "digest": file_digest(hashes)}
+        self._release(fresh)
         if old:
             self._gc(old["chunks"])
         self.save()
@@ -276,14 +287,58 @@ class PoolStore:
         self.changed()
         return True
 
+    def _release(self, hashes: list[str]) -> None:
+        for h in hashes:
+            self.pending[h] -= 1
+            if self.pending[h] <= 0:
+                del self.pending[h]
+
+    def _referenced(self) -> set[str]:
+        return {h for f in self.files.values() for h in f["chunks"]} | set(self.pending)
+
     def _gc(self, hashes: list[str]) -> None:
-        still = {h for f in self.files.values() for h in f["chunks"]}
+        still = self._referenced()
         for h in set(hashes):
             if h in still:
                 continue
-            for dev in self._live_holders(h):
+            live = self._live_holders(h)
+            for dev in live:
                 dev.send({"type": "store.del", "hash": h})
-            self.holders.pop(h, None)
+            offline = [i for i in self.holders.pop(h, []) if i not in {d.id for d in live}]
+            if offline:
+                self.dead[h] = list(dict.fromkeys(self.dead.get(h, []) + offline))
+
+    def _sweep(self) -> bool:
+        """Tell computers that are back to delete chunks removed while they were away,
+        and take copies off computers that shouldn't hold them (lenders) once a trusted
+        copy exists. Returns True if the index changed."""
+        did = False
+        online = {d.id: d for d in self.s.devices.values() if d.kind == "agent" and not d.closed and not d.stale}
+        known = self.s.store.data.get("devices", {})
+        still = self._referenced()
+        for h, who in list(self.dead.items()):
+            if h in still:  # stored again since; whoever has it now keeps it
+                self.dead.pop(h)
+                did = True
+                continue
+            for i in who:
+                if i in online:
+                    online[i].send({"type": "store.del", "hash": h})
+            left = [i for i in who if i not in online and i in known]  # removed devices never come back
+            if left != who:
+                did = True
+                if left:
+                    self.dead[h] = left
+                else:
+                    self.dead.pop(h)
+        for h, who in list(self.holders.items()):
+            untrusted = [i for i in who if i in online and not online[i].trusted]
+            if untrusted and self._live_holders(h):
+                for i in untrusted:
+                    online[i].send({"type": "store.del", "hash": h})
+                self.holders[h] = [i for i in who if i not in untrusted]
+                did = True
+        return did
 
     async def stream(self, request, name: str):
         from aiohttp import web
@@ -308,7 +363,7 @@ class PoolStore:
         return resp
 
     # ------------------------------------------------------------------ health
-    def listing(self) -> dict:
+    def listing(self, names: bool = True) -> dict:
         live_ids = {d.id for d in self.live_agents()}
         want = min(REPLICAS, len(live_ids)) or 1
         files = []
@@ -320,10 +375,10 @@ class PoolStore:
         files.sort(key=lambda x: -x["mtime"])
         stored = sum(sum(f["sizes"]) for f in self.files.values())
         free = sum(d.info.get("diskFreeGB") or 0 for d in self.live_agents())
-        return {"files": files, "agents": len(live_ids), "storedBytes": stored, "freeGB": round(free, 1), "replicas": REPLICAS}
+        return {"files": files if names else [], "agents": len(live_ids), "storedBytes": stored, "freeGB": round(free, 1), "replicas": REPLICAS}
 
     def changed(self) -> None:
-        self.s.broadcast({"type": "pool", "pool": self.listing()})
+        self.s.broadcast({"type": "pool", "pool": self.listing()}, need=CAP_FILES)
 
     async def repair(self) -> None:
         """Copy chunks that have fewer copies than they should onto other computers."""
@@ -331,7 +386,7 @@ class PoolStore:
             return
         self._repairing = True
         try:
-            did = False
+            did = self._sweep()
             budget = 6
             for f in list(self.files.values()):
                 for h, size in zip(f["chunks"], f["sizes"]):
@@ -339,12 +394,16 @@ class PoolStore:
                         break
                     if not self._live_holders(h) or not self._targets(h, size):
                         continue
+                    self.pending[h] += 1  # the file may be deleted while this copy is made
                     try:
                         await self._put_chunk(h, await self._get_chunk(h))
                         did = True
                         budget -= 1
                     except Exception as e:
                         log.warning("repair of a chunk failed: %s", e)
+                    finally:
+                        self._release([h])
+                        self._gc([h])
             if did:
                 self.save()
                 self.changed()

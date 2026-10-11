@@ -231,6 +231,10 @@ function showWindow() {
   win.focus();
 }
 
+function sameOrigin(a, b) {
+  try { return new URL(a).origin === new URL(b).origin; } catch { return false; }
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1280, height: 860, minWidth: 360, minHeight: 500, show: false, title: 'YourHarness',
@@ -241,7 +245,7 @@ function createWindow() {
   win.on('close', (e) => { if (!quitting) { e.preventDefault(); win.hide(); } }); // keep sharing in the background
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
   win.webContents.on('will-navigate', (e, url) => {
-    if (url.startsWith('file:') || (poolUrl && url.startsWith(poolUrl))) return;
+    if (url.startsWith('file:') || (poolUrl && sameOrigin(url, poolUrl))) return;
     e.preventDefault();
     shell.openExternal(url);
   });
@@ -254,9 +258,20 @@ app.on('activate', showWindow);
 app.on('before-quit', () => { quitting = true; killAll(); });
 app.on('window-all-closed', () => { /* stay in the tray */ });
 
-ipcMain.handle('servers', () => discover());
-ipcMain.handle('pair', (_e, info) => joinRemote(info));
-ipcMain.handle('start-own', async () => { try { await startOwn(); return { ok: true }; } catch (e) { return { error: e.message }; } });
+// Answer only the app's own pages, never a pool page that reached the bridge somehow.
+const fromApp = (e) => { try { return new URL(e.senderFrame.url).protocol === 'file:'; } catch { return false; } };
+const refused = { error: 'Only the YourHarness app itself can do that.' };
+
+ipcMain.handle('servers', (e) => (fromApp(e) ? discover() : []));
+ipcMain.handle('pair', (e, info) => {
+  if (!fromApp(e)) return refused;
+  if (!info || typeof info !== 'object' || !/^\d{4}$/.test(String(info.code || ''))) return { error: 'The join code is 4 digits.' };
+  return joinRemote({ address: String(info.address || ''), code: String(info.code) });
+});
+ipcMain.handle('start-own', async (e) => {
+  if (!fromApp(e)) return refused;
+  try { await startOwn(); return { ok: true }; } catch (err) { return { error: err.message }; }
+});
 
 app.whenReady().then(async () => {
   createWindow();

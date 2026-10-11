@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import files as shared_files
 from .jobkinds import KINDS, PlanContext, UserError, clamp_int, clamp_num
-from .state import CAP_ADMIN, CAP_REFUSALS, CAP_SHELL, CAP_SUBMIT, caps_of
+from .state import CAP_ADMIN, CAP_FILES, CAP_REFUSALS, CAP_SHELL, CAP_SUBMIT, OWNER_CAPS, caps_of
 from .execs import Execs
 from .pool_store import PoolStore
 from .poolshell import PoolShell
@@ -91,10 +91,14 @@ class Device:
         offered = hello.get("runtimes") if isinstance(hello.get("runtimes"), list) else []
         allowed = {"python"} if self.kind == "agent" else {"js"}
         self.runtimes = frozenset(r for r in offered if r in allowed) or frozenset(allowed)
-        self.workspace = sanitize_workspace(hello.get("workspace")) if self.kind == "agent" else None
-        self.coordinator = self.kind == "agent" and bool(hello.get("coordinator"))  # the computer that runs the pool
-        self.files = self.kind == "agent" and isinstance(hello.get("files"), dict)  # lets the Files app browse its home folder
-        ex = hello.get("exec") if self.kind == "agent" else None  # can run the pool shell's commands
+        # Only an agent signed in with the owner link may be handed the owners' work:
+        # terminals, pool shell commands, files and /pool chunks. A lender's agent can
+        # claim all of these in its hello, so the claim counts only with owner powers.
+        self.trusted = self.kind == "agent" and set(OWNER_CAPS) <= set(self.caps)
+        self.workspace = sanitize_workspace(hello.get("workspace")) if self.trusted else None
+        self.coordinator = self.trusted and bool(hello.get("coordinator"))  # the computer that runs the pool
+        self.files = self.trusted and isinstance(hello.get("files"), dict)  # lets the Files app browse its home folder
+        ex = hello.get("exec") if self.trusted else None  # can run the pool shell's commands
         self.exec = {"os": clean_text(ex.get("os"), 60, "Linux"), "linux": bool(ex.get("linux"))} if isinstance(ex, dict) else None
         self.load: dict = {}  # live CPU and memory use, reported every few seconds
         self.inflight: set[tuple[str, int]] = set()
@@ -226,10 +230,12 @@ class Scheduler:
         self._devices_pending = False
 
     # ------------------------------------------------------------------ messaging
-    def broadcast(self, msg: dict) -> None:
+    def broadcast(self, msg: dict, need: str | None = None) -> None:
+        """Send to every device, or only to those with capability `need`."""
         data = json.dumps(msg, separators=(",", ":"))
         for d in list(self.devices.values()):
-            d.send_raw(data)
+            if need is None or d.can(need):
+                d.send_raw(data)
 
     def broadcast_devices(self) -> None:
         if self._devices_pending:
@@ -243,7 +249,7 @@ class Scheduler:
         asyncio.get_running_loop().call_later(0.25, flush)
 
     def broadcast_files(self) -> None:
-        self.broadcast({"type": "files", "files": self.list_files()})
+        self.broadcast({"type": "files", "files": self.list_files()}, need=CAP_FILES)
 
     def list_files(self) -> list[dict]:
         return shared_files.list_files(self.shared_dir, self.file_meta)
@@ -292,13 +298,19 @@ class Scheduler:
         hi = {
             "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind, "caps": list(d.caps),
             "devices": self.device_list(), "jobs": [j.summary() for j in self.jobs], "snapshot": self.snapshot(latest),
-            "files": self.list_files(), "procs": self.execs.listing(), "pool": self.pool_store.listing(), "address": self.public_url,
+            "files": [], "procs": [], "pool": self.pool_store.listing(names=False), "address": self.public_url,
         }
+        # A lender sees the pool's devices and runs, but not file names or command lines.
+        if d.can(CAP_FILES):
+            hi["files"] = self.list_files()
+            hi["pool"] = self.pool_store.listing()
+        if d.can(CAP_SHELL):
+            hi["procs"] = self.execs.listing()
         if d.can(CAP_ADMIN):
             # The join link and the code both add a device with full control, so a lender
             # must never see them: holding the owner link would undo every limit below.
             hi["joinToken"] = self.store.join_token
-            hi["joinCode"] = self.store.join_code
+            hi["joinCode"] = None if self.store.code_locked else self.store.join_code
             hi["lendToken"] = self.store.lend_token
         d.send(hi)
         log.info("%s joined (%s, %s threads)", d.name, d.kind, d.threads)

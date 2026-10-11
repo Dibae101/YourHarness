@@ -300,6 +300,8 @@ class PoolShell:
                 self._exec(sess, line, None)
         except UserError as e:
             self._out(sess, f"{C['red']}{e}{C['reset']}\r\n")
+        except ValueError as e:  # shlex: an unclosed quote
+            self._out(sess, f"{C['red']}Can't read that line: {e}.{C['reset']}\r\n")
 
     def _help(self, sess, rest):
         self._out(sess, HELP.replace("\n", "\r\n"))
@@ -420,6 +422,8 @@ class PoolShell:
                 self._out(sess, f"{C['red']}{p.error}{C['reset']}\r\n")
                 if p.runner_name:
                     self._out(sess, self._footer(p))
+            elif p.status == "cancelled" and not p.runner_name:
+                self._out(sess, f"{C['dim']}cancelled before it started{C['reset']}\r\n")
             else:
                 self._out(sess, self._footer(p))
                 if p.new_cwd is not None and p.status == "done":

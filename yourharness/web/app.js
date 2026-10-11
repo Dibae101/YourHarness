@@ -292,6 +292,11 @@ def run(chunk, total):
         S.procs = m.procs;
         renderProcs();
         break;
+      case 'joinCode':
+        S.joinCode = m.joinCode;
+        renderAdd();
+        renderTopbar();
+        break;
       default:
         break;
     }
@@ -1226,9 +1231,9 @@ def run(chunk, total):
     const origin = S.address || location.origin; // the LAN address, even when this window is on 127.0.0.1
     const link = `${origin}/#join=${S.joinToken}`;
     $('#add-addr').value = origin.replace(/^https?:\/\//, '');
-    $('#add-code').value = S.joinCode || '';
+    $('#add-code').value = S.joinCode || 'Off: too many wrong codes. Press New code.';
     $('#add-link').value = link;
-    $('#add-cmd').value = `curl -fsSL ${origin}/install.sh | bash -s -- --join ${S.joinCode} --workspace`;
+    $('#add-cmd').value = `curl -fsSL ${origin}/install.sh | bash -s -- --join ${S.joinCode || `'${link}'`} --workspace`;
     $('#add-win').value = `irm ${origin}/install.ps1 | iex`;
   }
 
@@ -1367,6 +1372,21 @@ def run(chunk, total):
     if (!b || !T.sid) return;
     send(termMsg('in', { data: KEYS[b.dataset.seq] }));
     T.term.focus();
+  });
+
+  // A fresh join code. It also turns code joins back on after too many wrong guesses.
+  $('#add-new-code').addEventListener('click', async () => {
+    const status = $('#add-status');
+    try {
+      const res = await fetch('/api/join-code', { method: 'POST', credentials: 'same-origin' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      S.joinCode = body.joinCode;
+      renderAdd();
+      status.textContent = 'New code made. The old one no longer works.';
+    } catch (err) {
+      status.textContent = `Couldn't make a new code: ${err.message}`;
+    }
   });
 
   // Copy buttons. navigator.clipboard needs HTTPS, so fall back to selecting the text.

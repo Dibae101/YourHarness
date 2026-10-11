@@ -64,6 +64,7 @@ class Store:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.path = self.dir / "coordinator.json"
         self.data: dict = {"join_token": None, "lend_token": None, "join_code": None, "devices": {}}
+        self.code_locked = False  # too many wrong codes; set by the coordinator, cleared by a new code or a restart
         if self.path.exists():
             self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
         if not self.data.get("join_token") or not self.data.get("join_code") or not self.data.get("lend_token"):
@@ -125,7 +126,7 @@ class Store:
         # every branch is compared, so a wrong token takes the same time whichever it missed
         owner = secrets.compare_digest(value, self.join_token.encode())
         lender = secrets.compare_digest(value, self.lend_token.encode())
-        code = secrets.compare_digest(value, self.join_code.encode()) and allow_code
+        code = secrets.compare_digest(value, self.join_code.encode()) and allow_code and not self.code_locked
         if owner or code:
             return OWNER_CAPS
         if lender:

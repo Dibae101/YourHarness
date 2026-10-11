@@ -16,6 +16,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
+from .state import CAP_SHELL
+
 log = logging.getLogger("yourharness")
 RECENT = 30
 
@@ -56,6 +58,8 @@ class Execs:
         self.s = sched
         self.procs: dict[str, Proc] = {}
         self.queue: deque[Proc] = deque()
+        self._pumping = False
+        self._pump_again = False
         self.recent: deque[Proc] = deque(maxlen=RECENT)
 
     # ------------------------------------------------------------------ choosing a computer
@@ -107,8 +111,25 @@ class Execs:
         return p
 
     def pump(self) -> None:
+        # Failing a command calls back into pump(). Run one pass at a time and repeat
+        # it if something asked for another, so the queue never changes under a pass.
+        if self._pumping:
+            self._pump_again = True
+            return
+        self._pumping = True
+        try:
+            self._pump_again = True
+            while self._pump_again:
+                self._pump_again = False
+                self._pump_once()
+        finally:
+            self._pumping = False
+
+    def _pump_once(self) -> None:
         busy = self.busy_ids()
         for p in list(self.queue):
+            if p not in self.queue:
+                continue
             candidates = self.eligible(p.target)
             if not candidates:
                 self.queue.remove(p)
@@ -171,6 +192,9 @@ class Execs:
             p.sync = msg.get("sync") if isinstance(msg.get("sync"), dict) else {}
             err = msg.get("error")
             code = msg.get("code") if isinstance(msg.get("code"), int) else None
+            if p.error == "cancelled":  # cancel() stopped it; however the process ended, that is the outcome
+                self._finish(p, "cancelled", code=code, error="cancelled")
+                return
             self._finish(p, "cancelled" if err == "cancelled" else "done" if not err else "failed", code=code, error=str(err)[:300] if err else None)
 
     def device_gone(self, d) -> None:
@@ -184,4 +208,4 @@ class Execs:
         return live + done
 
     def changed(self) -> None:
-        self.s.broadcast({"type": "procs", "procs": self.listing()})
+        self.s.broadcast({"type": "procs", "procs": self.listing()}, need=CAP_SHELL)

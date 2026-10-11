@@ -87,7 +87,7 @@ Computers (Mac, Linux, or Ubuntu in WSL on Windows): run this in a terminal
   curl -fsSL http://192.168.1.51:8420/install.sh | bash -s -- --join 4821 --workspace
 ```
 
-The code stays the same across restarts. After 20 wrong guesses in a row it changes by itself, and the long join link (also printed) keeps working. `harness serve --new-join-link` replaces it; devices that already joined stay signed in. If macOS asks whether Python may accept incoming connections, allow it.
+The code stays the same across restarts. After 20 wrong codes from anywhere it changes and joining by code turns off, so the code can't be guessed; the long join link (also printed) keeps working. Press **New code** under Add a device (or restart the coordinator) to turn codes back on. `harness serve --new-join-link` replaces it; devices that already joined stay signed in. If macOS asks whether Python may accept incoming connections, allow it.
 
 The coordinator's own computer joins the pool and hosts a workspace by itself, so you have a terminal as soon as it starts. `harness serve --no-local-agent` turns that off.
 
@@ -185,13 +185,15 @@ Wi-Fi is about 30,000 times slower than memory inside a device, so the pool neve
 ## Security
 
 - Devices sign in with the 4-digit join code or a 144-bit join link and then use their own device token. Browsers keep it in an HttpOnly, SameSite=Strict cookie, so no secret stays in the page or in URLs. Agents store it in `~/.yourharness/agent.json` (mode 600).
-- After 10 failed sign-ins from one address in 10 minutes, that address is refused for the rest of the window.
+- After 10 failed sign-ins from one address in 10 minutes, that address is refused for the rest of the window. Devices that are already signed in are never locked out.
+- After 20 wrong join codes from all addresses together, joining by code turns off until an owner makes a new code.
+- A device that joined with a lend link only computes run pieces. It never hosts terminals, runs pool shell commands, holds /pool files or serves the Files app, whatever its agent claims, and it isn't sent file names or command lines.
 - Requests and WebSocket connections from other websites are refused.
 - Shared files are always served as downloads, so an HTML file in the shared folder can't run as a page on the pool's address.
 - Remove a lost device from the Devices list. Its token stops working at once.
 - **Anyone in the pool can open the workspace terminal and run code on every sharing device.** Share the join link only with people you'd hand your computers to.
 
-For HTTPS, which also lets phones keep the screen on and use WebGPU, put the coordinator behind something that terminates TLS, such as `tailscale serve --bg 8420`, and start it with `--public-url https://<name>.ts.net`. Behind a proxy, every device appears to come from the proxy's address, so the sign-in limit then applies to all of them together.
+For HTTPS, which also lets phones keep the screen on and use WebGPU, put the coordinator behind something that terminates TLS, such as `tailscale serve --bg 8420`, and start it with `--public-url https://<name>.ts.net`. Behind a proxy, every device appears to come from the proxy's address unless you set `HARNESS_TRUST_PROXY=1`, which uses the last X-Forwarded-For entry (the one the proxy added).
 
 ## Configuration
 
