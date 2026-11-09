@@ -353,6 +353,9 @@ body.term-max { overflow: hidden; }
 .res-name::before { content: ""; width: 14px; height: 4px; border-radius: 2px; background: var(--wire); flex: none; }
 .res-kind { font-size: 0.8125rem; color: var(--muted); }
 .res-sub { display: block; font-size: 0.8125rem; color: var(--muted); }
+.dev-activity { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+.dev-activity h4 { margin: 14px 0 6px; font-size: 0.9375rem; }
+.dev-trail { margin: 6px 0 0 18px; }
 .res-bar { display: block; height: 5px; border-radius: 3px; margin-top: 5px; background: color-mix(in srgb, var(--wire) 22%, transparent); overflow: hidden; }
 .res-bar i { display: block; height: 100%; background: var(--wire); }
 .res-na { color: var(--muted); }

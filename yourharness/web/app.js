@@ -801,8 +801,9 @@ def run(chunk, total):
       const diskCell = d.kind === 'agent' ? (i.diskFreeGB ? `${gb(i.diskFreeGB)} GB free` : naText('Not reported'))
         : (i.storageGB ? `up to ${gb(i.storageGB)} GB<span class="res-sub">browser storage</span>` : naText('Not reported'));
       const status = d.stale ? 'not responding' : !d.sharing ? 'not sharing' : null;
-      const action = d.id === S.id ? '<span class="res-kind">This window</span>'
-        : `<button class="btn ghost small" type="button" data-remove="${esc(d.id)}" data-name="${esc(d.name)}">Remove</button>`;
+      const activity = `<button class="btn ghost small" type="button" data-activity="${esc(d.id === S.id ? 'me' : d.id)}">Activity</button>`;
+      const action = d.id === S.id ? `<span class="res-kind">This window</span> ${activity}`
+        : `${activity} <button class="btn ghost small" type="button" data-remove="${esc(d.id)}" data-name="${esc(d.name)}">Remove</button>`;
       return `<tr style="--wire:${esc(d.color)}" data-off="${off}">
         <td><span class="res-name">${esc(d.name)}</span><span class="res-kind">${d.kind === 'agent' ? 'YourHarness app' : 'Browser tab'}, ${esc(i.platform)}${status ? `, ${status}` : ''}</span></td>
         <td>${d.sharing ? `${d.threads} of ${i.cores} threads` : naText('not sharing')}<span class="res-bar"><i style="width:${d.sharing ? pct.toFixed(0) : 0}%"></i></span></td>
@@ -1374,7 +1375,51 @@ def run(chunk, total):
     signedOut('You left the pool. Open the join link to come back.');
   });
 
+  // What a device did for the pool: the jobs and data it worked on, the agent tasks it ran, and when it joined
+  // or was removed. The coordinator keeps this after a device is removed, so you can check what it had.
+  async function showActivity(id) {
+    const box = $('#dev-activity');
+    box.hidden = false;
+    box.innerHTML = '<p class="hint">Loading…</p>';
+    let a;
+    try {
+      const res = await fetch(`/api/devices/${encodeURIComponent(id)}/activity`, { credentials: 'same-origin' });
+      a = await res.json();
+      if (!res.ok) throw new Error(a.error || `The pool answered ${res.status}.`);
+    } catch (err) {
+      box.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+      return;
+    }
+    const when = (t) => (t ? new Date(t * 1000).toLocaleString() : '');
+    const d = a.device;
+    const trail = a.audit.map((r) => `<li>${esc(when(r.at))}: ${esc(r.action)}${r.by ? ` by ${esc(r.by)}` : ''}</li>`).join('');
+    const jobs = a.jobs.map((j) => `<tr><td>${esc(j.name)}<span class="res-sub">${esc(j.job)}</span></td>
+      <td>${esc(j.workload)}<span class="res-sub">${esc(j.runtime)}</span></td>
+      <td>${j.dataset ? `${esc(j.dataset.name)}<span class="res-sub">${esc(j.dataset.classification)}</span>` : j.items != null ? `${nf.format(j.items)} items` : ''}</td>
+      <td>${esc([j.code ? 'your code' : 'built-in operators', j.model ? `model ${j.model}` : ''].filter(Boolean).join(', '))}</td>
+      <td>${nf.format(j.accepted)} of ${nf.format(j.partitions)}</td><td>${fmtSize(j.bytes || 0)}</td><td>${esc(when(j.last))}</td></tr>`).join('');
+    const tasks = a.tasks.map((t) => `<tr><td>${esc(t.title || t.task)}<span class="res-sub">${esc(t.runTitle || t.run || '')}</span></td>
+      <td>${esc(t.repo || '')}</td><td>${esc(t.agent || '')}</td><td>${esc(t.status)}${t.error ? `<span class="res-sub">${esc(t.error)}</span>` : ''}</td>
+      <td>${esc(when(t.startedAt))}</td></tr>`).join('');
+    const state = d.removed ? 'removed from the pool' : d.connected ? 'connected' : 'not connected now';
+    box.innerHTML = `<div class="panel-head"><h3>Activity of ${esc(d.name)}</h3><button class="btn ghost small" type="button" data-act="close-activity">Close</button></div>
+      <p class="hint">${d.friend ? 'A friend’s computer' : 'One of your devices'}, ${state}. Partitions count the tries this device made and how many
+        were accepted; “read” is the input of the accepted ones.</p>
+      ${trail ? `<ul class="hint dev-trail">${trail}</ul>` : ''}
+      <h4>Batch jobs</h4>
+      ${jobs ? `<div class="scroll-x"><table class="res-table"><thead><tr><th>Job</th><th>Work</th><th>Data</th><th>Ran</th><th>Partitions</th><th>Read</th><th>Last</th></tr></thead>
+        <tbody>${jobs}</tbody></table></div>` : '<p class="hint">No batch partitions.</p>'}
+      <h4>Agent tasks</h4>
+      ${tasks ? `<div class="scroll-x"><table class="res-table"><thead><tr><th>Task</th><th>Repository</th><th>Agent</th><th>Status</th><th>Started</th></tr></thead>
+        <tbody>${tasks}</tbody></table></div>` : '<p class="hint">No agent tasks.</p>'}`;
+  }
+  $('#dev-activity').addEventListener('click', (e) => {
+    if (e.target.closest('[data-act="close-activity"]')) { $('#dev-activity').hidden = true; $('#dev-activity').innerHTML = ''; }
+  });
+
   $('#res-table').addEventListener('click', async (e) => {
+    const act = e.target.closest('button[data-activity]');
+    if (act) { showActivity(act.dataset.activity); return; }
     const b = e.target.closest('button[data-remove]');
     if (!b) return;
     if (!confirm(`Remove ${b.dataset.name} from the pool? It will need the join link to come back.`)) return;

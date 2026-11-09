@@ -133,8 +133,14 @@
             <div class="ag-grid">
               <label class="field"><span>Python to run it with</span><select id="bj-runtime">
                 <option value="native-python">The Python YourHarness runs on, with its packages</option>
-                <option value="managed-python">An environment of its own: a Python version and packages</option></select></label>
+                <option value="managed-python">An environment of its own: a Python version and packages</option>
+                <option value="isolated-oci">A container (Docker or Podman) with no network</option></select></label>
               <label class="field" data-runtime="managed-python"><span>Python version</span><input id="bj-pyver" value="3.12" maxlength="5" placeholder="3.12"></label>
+            </div>
+            <label class="field" data-runtime="isolated-oci"><span>Image, pinned by its digest</span><input id="bj-image" spellcheck="false" placeholder="python:3.12-slim@sha256:…"></label>
+            <div class="ag-grid" data-runtime="isolated-oci">
+              <label class="field"><span>Memory per partition (MB)</span><input id="bj-mem" type="number" min="128" max="262144" value="2048"></label>
+              <label class="field"><span>CPUs per partition</span><input id="bj-cpus" type="number" min="0.25" max="64" step="0.25" value="1"></label>
             </div>
             <label class="field" data-runtime="managed-python"><span>Packages, one per line (pin versions so every computer gets the same)</span><textarea id="bj-reqs" rows="3" spellcheck="false" placeholder="scikit-learn==1.5.2"></textarea></label>
             <p class="hint" id="bj-rt-hint">Your code runs only on your own computers, with the Python YourHarness runs on and its packages (NumPy is there).</p>
@@ -450,6 +456,10 @@
       const bad = requirements.find((r) => !/^[A-Za-z0-9]/.test(r));
       if (bad) throw new Error(`“${bad}” isn't a package requirement. Write one package per line, like numpy==2.1.3.`);
       runtime = { kind: 'managed-python', python, requirements };
+    } else if (CODE_KINDS.includes(kind) && $('#bj-runtime').value === 'isolated-oci') {
+      const image = $('#bj-image').value.trim();
+      if (!/@sha256:[0-9a-f]{64}$/.test(image)) throw new Error('Name the image by its digest, like python:3.12-slim@sha256:… (docker image inspect shows it), so every computer runs exactly the same one.');
+      runtime = { kind: 'isolated-oci', image, limits: { memoryMB: Number($('#bj-mem').value) || 2048, cpus: Number($('#bj-cpus').value) || 1 } };
     }
     const where = [...document.querySelectorAll('#bj-where .bj-row')].map((r) => {
       const w = { field: $('[data-w="field"]', r).value.trim(), op: $('[data-w="op"]', r).value };
@@ -543,7 +553,9 @@
     document.querySelectorAll('#bj-form [data-runtime]').forEach((el) => { el.hidden = el.dataset.runtime !== rt; });
     $('#bj-rt-hint').textContent = rt === 'managed-python'
       ? 'Your code runs only on your own computers. Each one prepares this environment with uv the first time, after you approve it, and reuses it for later jobs that ask for the same Python and packages.'
-      : 'Your code runs only on your own computers, with the Python YourHarness runs on and its packages (NumPy is there).';
+      : rt === 'isolated-oci'
+        ? 'Your code runs only on your own computers that have Docker or Podman, in that image: no network, read-only system files, not as root, with these limits. Each computer checks the container once, after you approve it; one whose check fails doesn’t run the job.'
+        : 'Your code runs only on your own computers, with the Python YourHarness runs on and its packages (NumPy is there).';
   }
 
   function renderInputs() {
@@ -650,7 +662,8 @@
     body.innerHTML = B.devices.map((d) => {
       const e = d.engine;
       const gpus = e && (e.accelerators || []).length ? `<br><span class="hint">GPU: ${esc(e.accelerators.map((a) => `${a.name}${a.memoryGB ? ` ${a.memoryGB} GB` : ''}`).join(', '))}</span>` : '';
-      const envs = e && e.envs ? ` · ${nf.format(e.envs)} prepared environment${e.envs === 1 ? '' : 's'}` : '';
+      const envs = (e && e.envs ? ` · ${nf.format(e.envs)} prepared environment${e.envs === 1 ? '' : 's'}` : '')
+        + (e && e.oci ? ` · containers: ${esc(e.oci.engine)} ${esc(e.oci.version)}${e.oci.rootless ? ' (rootless)' : ''}` : '');
       const pr = e && e.profile;
       const bat = pr && pr.battery && pr.battery !== 'unknown' ? ` · battery ${Math.round((pr.battery.level || 0) * 100)}%${pr.battery.charging ? ', charging' : ''}` : '';
       const prof = pr ? `<br><span class="hint">${pr.ok ? `measured ${nf.format(pr.recordsPerSecond || 0)} records/s${pr.memoryGB ? ` · about ${pr.memoryGB} GB memory` : ''}${bat}` : esc(pr.why)}${pr.blocked ? ` · not taking partitions: ${esc(pr.blocked)}` : ''}</span>` : '';

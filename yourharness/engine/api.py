@@ -44,6 +44,7 @@ class EngineAPI:
 
     def register(self, r: web.UrlDispatcher) -> None:
         r.add_get("/api/engine", self.overview)
+        r.add_get("/api/engine/policy", self.policy)
         r.add_put("/api/engine/datasets", self.upload_dataset)
         r.add_post("/api/engine/datasets/import", self.import_dataset)
         r.add_get("/api/engine/datasets/{ds}/preview", self.preview)
@@ -97,6 +98,13 @@ class EngineAPI:
             raise _fail(400, str(e))
 
     # ------------------------------------------------------------------ overview, datasets
+    async def policy(self, request):
+        """The trust rules: which kind of computer may run which runtime, and what each runtime isolates."""
+        from .isolation import table
+
+        self._who(request)
+        return web.json_response(table())
+
     async def overview(self, request):
         self._who(request)
         data = self.m.overview()

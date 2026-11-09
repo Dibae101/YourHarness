@@ -19,6 +19,7 @@ from pathlib import Path
 import aiohttp
 
 from .. import __version__, sysinfo
+from .activity import ActivityLog, cleanup
 from .enginehost import EngineHost
 from .slots import SlotPool
 from .taskhost import TaskHost
@@ -65,8 +66,10 @@ def join(link_or_code: str, name: str, server: str | None = None) -> dict:
         f"{server}/api/join", data=json.dumps({"token": token, "kind": "agent", "name": name}).encode(),
         headers={"Content-Type": "application/json"}, method="POST",
     )
+    from ..tls import client_context
+
     try:
-        with urllib.request.urlopen(req, timeout=15) as res:
+        with urllib.request.urlopen(req, timeout=15, context=client_context()) as res:
             body = json.loads(res.read())
     except urllib.error.HTTPError as e:
         try:
@@ -93,6 +96,8 @@ class AgentConfig:
     tasks: bool | None = None  # agent tasks; None means allowed on your own computers, not on a friend's
     task_slots: int = 1
     allow_commands: bool = False  # on a friend's computer, also allow tasks that run commands
+    owned: bool | None = None  # joined with the owner's link (True) or a friend code (False), as the join said
+    ca: str | None = None  # the coordinator's own certificate to trust (a pool served with --tls-self-signed)
 
 
 class Agent:
@@ -108,9 +113,15 @@ class Agent:
         self.cpu = sysinfo.CpuMeter()
         self.taskhost = TaskHost(cfg.server, cfg.home, self.send, cfg.tasks, cfg.task_slots, cfg.allow_commands)
         from ..runtime.envs import EnvManager
+        from ..runtime.oci import OciManager
 
         self.envs = EnvManager(cfg.home, self.send)
-        self.enginehost = EngineHost(cfg.server, cfg.home, self.send, cfg.threads if cfg.sharing else 0, runtimes=self.envs)
+        self.oci = OciManager(cfg.home, self.send)
+        self.enginehost = EngineHost(cfg.server, cfg.home, self.send, cfg.threads if cfg.sharing else 0, runtimes=self.envs, oci=self.oci,
+                                     ca=cfg.ca)
+        self.activity = ActivityLog(cfg.home, cfg.server)  # this computer's own record of what it did for the pool
+        self.enginehost.on_activity = self.activity.add
+        self.taskhost.on_activity = self.activity.add
         if cfg.workspace:  # a computer that hosts a terminal also lets the pool browse its home folder
             from .files import HomeFiles
 
@@ -157,6 +168,7 @@ class Agent:
         from ..runtime.inventory import accelerators
 
         self.enginehost.accelerators = await asyncio.get_running_loop().run_in_executor(None, accelerators)
+        asyncio.ensure_future(self._detect_oci())  # Docker or Podman, in the background: it can take a few seconds to answer
         if os.environ.get("YH_BUSY_LINES") == "1":
             asyncio.ensure_future(self._report_busy())
         delay = 1.0
@@ -167,6 +179,7 @@ class Agent:
                     if code == 4401:
                         print("The coordinator refused this agent's sign-in. It may have been removed from the pool.\n"
                               "Join again with a current link:  harness agent --join '<join link>'", file=sys.stderr)
+                        await self._left_pool()
                         return 1
                     if code == 4002:
                         print("This agent connected again from another process, so this one is stopping.", file=sys.stderr)
@@ -189,6 +202,33 @@ class Agent:
             self.enginehost.stop_all()
             await self.pool.close()
 
+    async def _left_pool(self) -> None:
+        """No longer in the pool: stop everything; a friend's computer deletes what it kept for the pool."""
+        self.taskhost.stop_all()
+        self.enginehost.stop_all()
+        await self.pool.close()
+        self.activity.add({"kind": "pool", "what": "removed from the pool (its sign-in was refused)"})
+        owned = self.enginehost.owned if self.enginehost.owned is not None else self.cfg.owned
+        if owned is False:
+            await asyncio.sleep(0.5)  # let the stopped work end before its folders go
+            images = await self.oci.forget()
+            gone = cleanup(self.cfg.home)
+            what = ", ".join(gone + images) or "nothing was left"
+            self.activity.add({"kind": "pool", "what": f"deleted what this computer kept for the pool: {what}"})
+            print(f"Deleted what this computer kept for the pool ({what}). Its activity record stays: harness agent --activity",
+                  file=sys.stderr)
+        else:
+            print(f"This computer's files for the pool are still in {self.cfg.home}. To delete them: harness agent --cleanup", file=sys.stderr)
+
+    async def _detect_oci(self) -> None:
+        if os.environ.get("HARNESS_OCI") == "0":
+            self.oci.why = "turned off (HARNESS_OCI=0)"
+            return
+        await self.oci.detect()
+        if self.oci.available():
+            log.info("Containers: %s %s%s", self.oci.kind, self.oci.version, " (rootless)" if self.oci.rootless else "")
+            self.send({"type": "update", "engine": self.enginehost.describe()})
+
     def _hello(self) -> dict:
         return {
             "type": "hello", "kind": "agent", "name": self.cfg.name, "threads": self.cfg.threads, "sharing": self.cfg.sharing,
@@ -202,8 +242,12 @@ class Agent:
 
     async def _connect_once(self) -> int | None:
         url = self.cfg.server.replace("https://", "wss://", 1).replace("http://", "ws://", 1) + "/ws"
+        from ..tls import client_context
+
+        ctx = client_context(self.cfg.ca)
         async with aiohttp.ClientSession() as http:
-            async with http.ws_connect(url, headers={"Authorization": f"Bearer {self.cfg.token}"}, heartbeat=10.0, max_msg_size=64 * 1024 * 1024) as ws:
+            async with http.ws_connect(url, headers={"Authorization": f"Bearer {self.cfg.token}"}, heartbeat=10.0, max_msg_size=64 * 1024 * 1024,
+                                       ssl=ctx if ctx is not None else True) as ws:
                 self.ws = ws
                 self.outbox = asyncio.Queue()
                 self.send(self._hello())
@@ -290,10 +334,12 @@ class Agent:
         elif isinstance(kind, str) and kind.startswith("eng."):
             self.enginehost.handle(m)
         elif kind == "env.prepare":
-            if self.enginehost.owned:  # installing software for the pool's code only happens on the owner's own computers
-                self.envs.prepare(m)
-            else:
+            if not self.enginehost.owned:  # installing software for the pool's code only happens on the owner's own computers
                 self.send({"type": "env.failed", "env": m.get("env"), "error": "This is a friend's computer: it doesn't prepare environments for the pool's code."})
+            elif m.get("kind") == "isolated-oci":
+                self.oci.prepare(m)
+            else:
+                self.envs.prepare(m)
         elif kind == "denied":
             print(m.get("reason") or "The coordinator refused this agent.", file=sys.stderr)
         elif kind == "chunk":

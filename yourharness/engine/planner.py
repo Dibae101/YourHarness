@@ -1,9 +1,10 @@
 """Who may run a job, where it should run, and how big its partitions should be.
 
 eligible() answers, for one computer, whether it may take the job's partitions at
-all: connected, sharing, able to run the workload and read the format, trusted for
-the data (a friend's computer only gets a dataset you marked shareable, for a job
-that allows friends, and never your own code), and holding the runtime the job needs.
+all: connected, sharing, able to run the workload and read the format, allowed by
+the trust rules (engine/isolation.py: a friend's computer only gets a dataset you
+marked shareable, for a job that allows friends, and never your own code), and
+holding the runtime the job needs.
 
 estimate() predicts how long the job takes kept on one computer against spread over
 every eligible one, counting the time to send the input over the network, and picks
@@ -16,6 +17,7 @@ from __future__ import annotations
 import math
 import os
 
+from . import isolation
 from .partition import target_bytes
 
 # Bytes per second one worker slot gets through, before any history exists.
@@ -63,21 +65,16 @@ class Planner:
             return "can't evaluate regular expressions exactly the way the coordinator does"
         if ds is not None and ds["format"] not in info.get("formats", []):
             return f"can't read {ds['format']} files"
-        if not d.owned:
-            if spec["security"]["allowedTrust"] == "owned-only":
-                return "is a friend's computer, and this job runs on your own computers only"
-            if ds is not None and ds.get("classification") != "shareable":
-                return "is a friend's computer, and the dataset isn't marked shareable"
-            right = spec["inputs"].get("right")
-            if right:
-                r = self.m.db.dataset(right["ref"].split(":", 1)[1])
-                if r is None or r["classification"] != "shareable":
-                    return "is a friend's computer, and the dataset to join with isn't marked shareable"
-            if runtime["kind"] != "builtin":
-                return "is a friend's computer, and your own code runs only on your own computers"
+        right = spec["inputs"].get("right")
+        right_ds = self.m.db.dataset(right["ref"].split(":", 1)[1]) if right and not d.owned else None
+        why = isolation.admit(spec, d, ds, right_ds)  # the trust rules, the same for every job
+        if why:
+            return why
         if runtime["kind"] not in info.get("runtimes", []):
+            if runtime["kind"] == "isolated-oci":
+                return "has no container engine ready (Docker or Podman, running) for isolated-oci"
             return f"doesn't have the {runtime['kind']} runtime"
-        if runtime["kind"] == "managed-python":
+        if runtime["kind"] in ("managed-python", "isolated-oci"):
             why = self.m.runtime_why_not(job, d)
             if why:
                 return why
@@ -117,15 +114,15 @@ class Planner:
                 ok.append((d, row))
         plan: dict = {"units": units, "unit": "items" if items else "bytes", "devices": rows, "pin": None}
         if not ok:
-            from .runtime import SETUP_NEEDED
+            from .runtime import needs_setup
 
-            need_setup = [d for d, r in zip(devices, rows) if r["why"] == SETUP_NEEDED]
+            need_setup = [d for d, r in zip(devices, rows) if needs_setup(r["why"])]
             if need_setup:
+                ready_when = "its container image is checked" if spec["runtime"]["kind"] == "isolated-oci" else "its Python environment is prepared"
                 plan.update(decision="NEEDS_SETUP_APPROVAL", targetBytes=None, itemsPerPartition=None,
                             setup=self.m.runtimes.setup_plan(job, need_setup),
-                            reasons=[f"{', '.join(d.name for d in need_setup)} can run it once its Python environment is prepared. "
-                                     "Approve the setup to start."])
-                plan["itemsPerPartition"] = self._items_per(spec, units, sum(r["slots"] for r in rows if r["why"] == SETUP_NEEDED)) if items else None
+                            reasons=[f"{', '.join(d.name for d in need_setup)} can run it once {ready_when}. Approve the setup to start."])
+                plan["itemsPerPartition"] = self._items_per(spec, units, sum(r["slots"] for r in rows if needs_setup(r["why"]))) if items else None
                 plan["targetBytes"] = None if items else self._target(spec, ds, max(1, len(need_setup) * 2), DEFAULT_RATE.get(wl["type"], 5e6))
                 return plan
             plan.update(decision="WAIT_FOR_ELIGIBLE_WORKER", targetBytes=None,

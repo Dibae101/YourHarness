@@ -96,7 +96,7 @@ rm -rf "$YH_OUT"
 mkdir -p "$YH_OUT"
 if ! git -C "$YH_CACHE" cat-file -e "$YH_BASE^{commit}" 2>/dev/null; then
   echo "Downloading the repository from the pool..."
-  curl -fsS --retry 3 -H "Authorization: Bearer $YH_TOKEN" -o "$YH_OUT/start.bundle" "$YH_URL/api/agent-tasks/$YH_TASK/start.bundle"
+  curl -fsS --retry 3 ${YH_CA:+--cacert "$YH_CA"} -H "Authorization: Bearer $YH_TOKEN" -o "$YH_OUT/start.bundle" "$YH_URL/api/agent-tasks/$YH_TASK/start.bundle"
   git -C "$YH_CACHE" fetch -q "$YH_OUT/start.bundle" "+refs/yh/base/*:refs/yh/base/*"
   rm -f "$YH_OUT/start.bundle"
 fi
@@ -130,7 +130,7 @@ echo "::yh-bytes::$(wc -c < "$YH_OUT/result.bundle" | tr -d ' ')"
 
 UPLOAD = r'''
 set -e
-curl -fsS --retry 2 -H "Authorization: Bearer $YH_TOKEN" -H "Content-Type: application/octet-stream" -T "$YH_OUT/result.bundle" "$YH_URL/api/agent-tasks/$YH_TASK/result.bundle" >/dev/null
+curl -fsS --retry 2 ${YH_CA:+--cacert "$YH_CA"} -H "Authorization: Bearer $YH_TOKEN" -H "Content-Type: application/octet-stream" -T "$YH_OUT/result.bundle" "$YH_URL/api/agent-tasks/$YH_TASK/result.bundle" >/dev/null
 echo "Sent the result to the pool."
 '''
 
@@ -378,6 +378,8 @@ class Attempt:
         self.token = str(m.get("token") or "")
         self.env = {"YH_TASK": self.task, "YH_ATTEMPT": str(self.attempt), "YH_REPO": m["repo"], "YH_BASE": m["base"],
                     "YH_TITLE": self.title, "YH_URL": host.server}
+        if os.environ.get("HARNESS_CA_FILE") and not WINDOWS:  # an HTTPS pool with a private authority (yourharness/tls.py)
+            self.env["YH_CA"] = os.environ["HARNESS_CA_FILE"]
         self.cancelled = False
         self.future: asyncio.Future | None = None
         self.phase = "starting"
@@ -567,6 +569,7 @@ class TaskHost:
         self.shell = Shell(home)
         self.tools: dict = {"git": None, "agents": []}
         self.owned: bool | None = None  # from the welcome message: did this computer join with the owner link?
+        self.on_activity = None  # a line in this computer's own activity log (agent/activity.py)
         self.attempts: dict[str, Attempt] = {}
         self.unacked: dict[tuple[str, int], dict] = {}
         self._detected_at = 0.0
@@ -662,13 +665,21 @@ class TaskHost:
         a = Attempt(self, m, spec)
         self.attempts[task] = a
         log.info("Starting task %s (attempt %s): %s", task, attempt, a.title)
+        self._activity("started", a)
         a.future = asyncio.ensure_future(a.run())
+
+    def _activity(self, what: str, a: Attempt) -> None:
+        if self.on_activity is not None:
+            self.on_activity({"kind": "task", "what": what, "task": a.task, "attempt": a.attempt, "repo": a.env["YH_REPO"],
+                              "agent": a.adapter, "commands": needs_commands(a.spec)})
 
     def finish(self, a: Attempt, ok: bool, error: str | None, result: dict) -> None:
         if self.attempts.get(a.task) is a:
             del self.attempts[a.task]
         if a.cancelled:
+            self._activity("cancelled", a)
             return
+        self._activity("finished" if ok else "failed", a)
         log.info("Task %s %s", a.task, "finished" if ok else f"failed: {error}")
         msg = {"type": "task.done", "task": a.task, "attempt": a.attempt, "ok": ok, "error": error, "result": result}
         self.unacked[(a.task, a.attempt)] = msg

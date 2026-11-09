@@ -50,12 +50,27 @@ def saved_signin() -> tuple[str, str]:
     return url.rstrip("/"), token
 
 
+def saved_ca() -> str | None:
+    """A private authority's certificate for an HTTPS pool: HARNESS_CA_FILE, or the one `harness agent --ca` kept."""
+    ca = os.environ.get("HARNESS_CA_FILE")
+    cfg = home() / "agent.json"
+    if not ca and cfg.exists():
+        try:
+            ca = json.loads(cfg.read_text(encoding="utf-8")).get("ca")
+        except ValueError:
+            ca = None
+    return ca if ca and Path(ca).is_file() else None
+
+
 class Client:
     def __init__(self, server: str | None = None, token: str | None = None):
+        from .tls import client_context
+
         if server and token:
             self.server, self.token = server.rstrip("/"), token
         else:
             self.server, self.token = saved_signin()
+        self.ctx = client_context(saved_ca())
 
     def request(self, method: str, path: str, body=None, data: bytes | None = None, headers: dict | None = None, timeout: float = 90):
         hdrs = {"Authorization": f"Bearer {self.token}", **(headers or {})}
@@ -64,7 +79,7 @@ class Client:
             hdrs["Content-Type"] = "application/json"
         req = urllib.request.Request(self.server + path, data=data, headers=hdrs, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as res:
+            with urllib.request.urlopen(req, context=self.ctx, timeout=timeout) as res:
                 raw = res.read()
                 return json.loads(raw) if res.headers.get_content_type() == "application/json" else raw
         except urllib.error.HTTPError as e:
@@ -127,7 +142,7 @@ class Client:
         with open(path, "rb") as f:
             req = urllib.request.Request(f"{self.server}/api/files/{target}", data=f, headers=hdrs, method="PUT")
             try:
-                with urllib.request.urlopen(req, timeout=3600) as res:
+                with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res:
                     return json.loads(res.read())
             except urllib.error.HTTPError as e:
                 try:
@@ -142,7 +157,7 @@ class Client:
             dest = dest / name
         req = urllib.request.Request(f"{self.server}/api/files/{urllib.parse.quote(name, safe='')}", headers={"Authorization": f"Bearer {self.token}"})
         try:
-            with urllib.request.urlopen(req, timeout=3600) as res, open(dest, "wb") as out:
+            with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res, open(dest, "wb") as out:
                 while chunk := res.read(1024 * 1024):
                     out.write(chunk)
         except urllib.error.HTTPError as e:
@@ -163,7 +178,7 @@ class Client:
         with open(path, "rb") as f:
             req = urllib.request.Request(f"{self.server}/api/pool/{target}", data=f, headers=hdrs, method="PUT")
             try:
-                with urllib.request.urlopen(req, timeout=3600) as res:
+                with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res:
                     return json.loads(res.read())
             except urllib.error.HTTPError as e:
                 try:
@@ -178,7 +193,7 @@ class Client:
             dest = dest / name
         req = urllib.request.Request(f"{self.server}/api/pool/{urllib.parse.quote(name, safe='')}", headers={"Authorization": f"Bearer {self.token}"})
         try:
-            with urllib.request.urlopen(req, timeout=3600) as res, open(dest, "wb") as out:
+            with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res, open(dest, "wb") as out:
                 while chunk := res.read(1024 * 1024):
                     out.write(chunk)
         except urllib.error.HTTPError as e:
@@ -210,7 +225,7 @@ class Client:
         with open(path, "rb") as f:
             req = urllib.request.Request(f"{self.server}{route}?{urllib.parse.urlencode(query)}", data=f, headers=hdrs, method="PUT")
             try:
-                with urllib.request.urlopen(req, timeout=3600) as res:
+                with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res:
                     return json.loads(res.read())
             except urllib.error.HTTPError as e:
                 try:
@@ -292,7 +307,7 @@ class Client:
         req = urllib.request.Request(f"{self.server}/api/engine/jobs/{urllib.parse.quote(job_id)}/result",
                                      headers={"Authorization": f"Bearer {self.token}"})
         try:
-            with urllib.request.urlopen(req, timeout=3600) as res:
+            with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res:
                 if dest is not None:
                     with open(dest, "wb") as out:
                         while chunk := res.read(1024 * 1024):

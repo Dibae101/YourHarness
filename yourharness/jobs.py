@@ -116,7 +116,7 @@ def _ref(ds) -> dict:
 
 
 class SetupNeeded(PoolError):
-    """The job needs a Python environment prepared first; .job lists what each computer would run."""
+    """The job needs a Python environment prepared, or a container image checked, first; .job lists what each computer would run."""
 
     def __init__(self, job: dict):
         super().__init__(setup_text(job) + "\nOr pass approve_setup=True (and downloads=True) to run().")
@@ -126,9 +126,10 @@ class SetupNeeded(PoolError):
 def run(job: dict, wait: bool = True, quiet: bool = False, approve_setup: bool = False, downloads: bool = False):
     """Start a JobSpec and return its result (or, with wait=False, the started job).
 
-    A job with its own Python environment (runtime "managed-python") that no computer
-    has yet stops for your approval: approve_setup=True gives it here, downloads=True
-    also lets the computers download uv, that Python and the packages. Otherwise this
+    A job with its own Python environment (runtime "managed-python") or container image
+    (runtime "isolated-oci") that no computer has yet stops for your approval:
+    approve_setup=True gives it here, downloads=True also lets the computers download uv,
+    that Python and the packages, or the image. Otherwise this
     raises SetupNeeded, which says exactly what would be installed where.
     """
     c = client()
@@ -246,7 +247,14 @@ def _python(fn, reducer: str, best_by: str | None, best: str, batch: int) -> dic
 
 
 def _runtime(spec: dict, python: str | None, requirements) -> dict:
-    """python="3.12" and/or requirements=[...] run the function in an environment of its own (prepared with uv)."""
+    """python="3.12" and/or requirements=[...] run the function in an environment of its own (prepared with uv);
+    container="image@sha256:..." (with limits={"memoryMB": ..., "cpus": ..., "pids": ...}) runs it in that container
+    image with no network, on your computers that have Docker or Podman."""
+    image, limits = spec.pop("container", None), spec.pop("limits", None)
+    if image is not None:
+        if python is not None or requirements is not None or "runtime" in spec:
+            raise PoolError("Pass one of container=, python/requirements, or runtime.")
+        return {**spec, "runtime": {"kind": "isolated-oci", "image": image, **({"limits": dict(limits)} if limits else {})}}
     if python is None and requirements is None:
         return spec
     if "runtime" in spec:

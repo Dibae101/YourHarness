@@ -128,8 +128,16 @@ def sanitize_engine(e) -> dict | None:
         "stages": [s for s in (e.get("stages") or STAGE_KINDS) if s in STAGE_KINDS] if isinstance(e.get("stages") or [], list) else list(STAGE_KINDS),
         "unsupported": [u for u in (e.get("unsupported") or []) if u in ENGINE_FEATURES] if isinstance(e.get("unsupported") or [], list) else [],
         "profile": sanitize_profile(e.get("profile")),
+        "oci": sanitize_oci(e.get("oci")),  # Docker or Podman, for the isolated-oci runtime
+        "ociWhy": clean_text(e.get("ociWhy"), 300, ""),
         "running": running,
     }
+
+
+def sanitize_oci(o) -> dict | None:
+    if not isinstance(o, dict) or o.get("engine") not in ("docker", "podman"):
+        return None
+    return {"engine": o["engine"], "version": clean_text(o.get("version"), 40, ""), "rootless": bool(o.get("rootless"))}
 
 
 STAGE_KINDS = ("map", "shuffle-map", "shuffle-reduce", "join-map", "join-reduce")
@@ -442,13 +450,23 @@ class Scheduler:
             self.broadcast_devices()
             self.dispatch()
 
-    def remove_device(self, device_id: str) -> bool:
-        removed = self.store.remove_device(device_id)
+    def remove_device(self, device_id: str, by: str | None = None) -> bool:
+        """Revoke a device: its sign-in stops working, it is disconnected, and its work goes to others at once.
+
+        A friend's computer then deletes what it kept for the pool (agent/activity.py)."""
+        rec = self.store.get(device_id)
+        removed = self.store.remove_device(device_id, by=by)
         d = self.devices.get(device_id)
+        name = d.name if d is not None else (rec or {}).get("name") or device_id
         if d is not None:
-            d.send({"type": "denied", "reason": "This device was removed from the pool. Open a new join link to add it again."})
+            d.send({"type": "denied", "removed": True, "reason": "This device was removed from the pool. Open a new join link to add it again."})
             d.close(4401, "Removed")
             self.disconnect(d)
+        if removed or d is not None:
+            self.engine.device_removed(device_id, name)
+            self.tasks.device_removed(device_id, name)
+            for r in self.resources.held(device_id):
+                self.resources.release(r.key)
         return removed or d is not None
 
     def requeue_device(self, d: Device) -> None:

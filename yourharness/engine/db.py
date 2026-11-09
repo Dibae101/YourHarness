@@ -57,6 +57,10 @@ MIGRATIONS = [
         "ALTER TABLE attempts ADD COLUMN lease_until REAL",
         "CREATE INDEX attempts_by_purpose ON attempts (purpose, status)",
     ],
+    # 2 -> 3: a device's activity (what it worked on), read by device
+    [
+        "CREATE INDEX attempts_by_device ON attempts (device_id, started_at)",
+    ],
 ]
 JSON_COLUMNS = {"meta", "spec", "plan", "result", "outputs", "validation", "depends_on", "input", "output", "checkpoint", "metrics", "data"}
 TABLES = ("artifacts", "datasets", "models", "jobs", "stages", "partitions", "attempts", "events", "perf")

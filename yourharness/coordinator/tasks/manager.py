@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -214,6 +215,31 @@ class TaskManager:
         deadline = time.time() + LEASE_S
         for t in self.db.running_on(d.id):
             self.grace.setdefault(t["id"], deadline)
+
+    def device_removed(self, device_id: str, name: str) -> None:
+        """A computer removed from the pool: its running tasks start again elsewhere now, without waiting out the lease."""
+        for t in self.db.running_on(device_id):
+            self._lost(t, f"{name} was removed from the pool.")
+        for key in [k for k in self.refused if k[1] == device_id]:
+            self.refused.pop(key, None)
+
+    def device_activity(self, device_id: str, limit: int = 100) -> list[dict]:
+        """The agent tasks a computer ran: which run, which repository, when, and how they ended."""
+        rows = self.db.conn.execute(
+            "SELECT t.id, t.title, t.status, t.attempt, t.started_at, t.finished_at, t.error, t.spec, r.id AS run_id, r.title AS run_title, "
+            "r.repo_id FROM tasks t LEFT JOIN runs r ON r.id = t.run_id WHERE t.device_id = ? ORDER BY t.started_at DESC LIMIT ?",
+            (device_id, limit)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                spec = json.loads(r["spec"] or "{}")
+            except ValueError:
+                spec = {}
+            repo = self.db.repo(r["repo_id"]) if r["repo_id"] else None
+            out.append({"task": r["id"], "title": r["title"], "status": r["status"], "attempt": r["attempt"], "startedAt": r["started_at"],
+                        "finishedAt": r["finished_at"], "error": (r["error"] or "")[:300] or None, "run": r["run_id"], "runTitle": r["run_title"],
+                        "repo": repo["name"] if repo else r["repo_id"], "agent": spec.get("adapter")})
+        return out
 
     def sweep(self) -> None:
         now = time.time()

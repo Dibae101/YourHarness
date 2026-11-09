@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 from ..coordinator.state import CAP_SUBMIT
+from . import isolation
 from . import spec as jobspec
 from . import stages
 from .db import EngineDB
@@ -699,7 +700,7 @@ class EngineManager:
                 task["ctx"] = self.store.read_json(st["context"])
             else:
                 task["ctxRef"] = {"sha": st["context"], "size": st["contextSize"]}
-        if runtime["kind"] == "managed-python" and self.runtimes is not None:
+        if runtime["kind"] in ("managed-python", "isolated-oci") and self.runtimes is not None:
             task["env"] = self.runtimes.env_for(job, d)
         model = self.job_model(job) if wl["type"] == "ml.evaluate" else None
         if model is not None:
@@ -757,6 +758,53 @@ class EngineManager:
 
     def device_gone(self, d) -> None:
         pass  # leases run out on their own; the computer may be back in a moment
+
+    def device_removed(self, device_id: str, name: str) -> None:
+        """A computer removed from the pool: what it held goes to the others now, not when its leases run out."""
+        for p in self.db.all("SELECT * FROM partitions WHERE status = 'leased' AND device_id = ?", (device_id,)):
+            self._lose(p, f"{name} was removed from the pool.")
+        for a in self.db.all("SELECT * FROM attempts WHERE device_id = ? AND status = 'running' AND purpose != 'run'", (device_id,)):
+            p = self.db.partition(a["partition_id"])
+            if p is not None:
+                self._cancel_attempt(p, a["n"], "lost")
+        for key in [k for k in self.refused if k[1] == device_id]:
+            self.refused.pop(key, None)
+        for key in [k for k in self.runtimes.status if k[0] == device_id]:
+            self.runtimes.status.pop(key, None)
+        self.dispatch()
+
+    def device_activity(self, device_id: str, limit: int = 300) -> dict:
+        """What a computer did for batch jobs: per job, the data it read, the code and model it ran, and its attempts."""
+        rows = self.db.all(
+            "SELECT a.partition_id, a.n, a.status, a.purpose, a.started_at, a.ended_at, a.error, p.job_id, p.idx, p.bytes, p.records, "
+            "p.accepted_attempt, j.name AS job_name, j.spec AS spec FROM attempts a JOIN partitions p ON p.id = a.partition_id "
+            "JOIN jobs j ON j.id = p.job_id WHERE a.device_id = ? ORDER BY a.started_at DESC LIMIT ?", (device_id, limit))
+        jobs: dict[str, dict] = {}
+        attempts = []
+        for r in rows:
+            spec = r["spec"]["spec"]
+            j = jobs.get(r["job_id"])
+            if j is None:
+                ref = spec["inputs"].get("dataset", {}).get("ref")
+                ds = self.db.dataset(ref.split(":", 1)[1]) if ref else None
+                m = spec["inputs"].get("model")
+                model = self.db.model(m["ref"].split(":", 1)[1]) if m else None
+                j = jobs[r["job_id"]] = {
+                    "job": r["job_id"], "name": r["job_name"], "workload": spec["workload"]["type"], "runtime": spec["runtime"]["kind"],
+                    "dataset": {"name": ds["name"], "classification": ds["classification"]} if ds else None,
+                    "items": len(spec["inputs"]["items"]) if "items" in spec["inputs"] else None,
+                    "model": model["name"] if model else None, "code": bool(spec["workload"].get("code")),
+                    "partitions": 0, "accepted": 0, "bytes": 0, "first": r["started_at"], "last": r["started_at"]}
+            j["partitions"] += 1
+            accepted = r["accepted_attempt"] == r["n"] and r["purpose"] == "run"
+            j["accepted"] += 1 if accepted else 0
+            j["bytes"] += int(r["bytes"] or 0) if accepted else 0
+            j["first"] = min(j["first"] or r["started_at"], r["started_at"] or j["first"])
+            j["last"] = max(j["last"] or 0, r["started_at"] or 0)
+            if len(attempts) < 50:
+                attempts.append({"job": r["job_id"], "partition": r["idx"] + 1, "attempt": r["n"], "purpose": r["purpose"], "status": r["status"],
+                                 "startedAt": r["started_at"], "endedAt": r["ended_at"], "error": (r["error"] or "")[:300] or None})
+        return {"jobs": sorted(jobs.values(), key=lambda j: -(j["last"] or 0)), "attempts": attempts}
 
     def _lose(self, p: dict, why: str) -> None:
         """The partition's computer stopped answering: hand it to another."""
@@ -1102,6 +1150,9 @@ class EngineManager:
         rt = spec["runtime"]
         if rt["kind"] == "managed-python":
             out["environment"] = {"kind": rt["kind"], "id": self.runtimes.fp(job["spec"]), "python": rt["python"], "requirements": rt["requirements"]}
+        elif rt["kind"] == "isolated-oci":
+            out["environment"] = {"kind": rt["kind"], "id": self.runtimes.fp(job["spec"]), "image": rt["image"], "limits": rt["limits"],
+                                  "network": "none"}
         else:
             out["environment"] = {"kind": rt["kind"]}
         return out
@@ -1266,7 +1317,8 @@ class EngineManager:
             return None
         return {"slots": info.get("slots", 0), "ops": info.get("ops", []), "formats": info.get("formats", []), "runtimes": info.get("runtimes", []),
                 "busy": len(self.s.resources.held(d.id, "engine")), "python": info.get("python"),
-                "envs": len(info.get("envs", [])), "accelerators": info.get("accelerators", []), "profile": info.get("profile")}
+                "envs": len(info.get("envs", [])), "accelerators": info.get("accelerators", []), "profile": info.get("profile"),
+                "oci": info.get("oci"), "ociWhy": info.get("ociWhy") or "", "tier": isolation.tier(d)}
 
     def overview(self) -> dict:
         jobs = [self.job_view(j) for j in self.db.all("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 50")]

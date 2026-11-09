@@ -72,6 +72,12 @@ def cmd_serve(a) -> int:
         stale_s=float(os.environ.get("HARNESS_STALE_S", 20)),
         chunk_timeout_s=float(os.environ.get("CHUNK_TIMEOUT_S", 300)),
     )
+    cert, key = a.tls_cert or os.environ.get("HARNESS_TLS_CERT"), a.tls_key or os.environ.get("HARNESS_TLS_KEY")
+    if cert or key:
+        if not (cert and Path(cert).is_file() and (key is None or Path(key).is_file())):
+            print("--tls-cert needs a certificate file (PEM), and --tls-key its key unless the certificate file holds both.", file=sys.stderr)
+            return 1
+        cfg.tls_cert, cfg.tls_key = str(Path(cert).resolve()), str(Path(key).resolve()) if key else None
     if a.new_join_link:
         Store(cfg.data_dir).rotate_join_token()
         print("Made a new join link. Devices that already joined stay signed in; the old link stops working.")
@@ -104,8 +110,23 @@ def cmd_agent(a) -> int:
 
     home = default_home()
     home.mkdir(parents=True, exist_ok=True)
+    if a.activity:
+        from .agent.activity import describe, read
+
+        recs = read(home, 500)
+        print("\n".join(describe(r) for r in recs) if recs else f"Nothing recorded yet ({home / 'activity.jsonl'}).")
+        return 0
+    if a.cleanup:
+        return _agent_cleanup(home)
     cfg_path = home / "agent.json"
     saved = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    if a.ca:
+        if not Path(a.ca).is_file():
+            print(f"There's no certificate file at {a.ca}.", file=sys.stderr)
+            return 1
+        saved["ca"] = str(Path(a.ca).resolve())
+    if saved.get("ca"):  # an HTTPS pool with a private authority: everything this agent starts trusts it too
+        os.environ["HARNESS_CA_FILE"] = saved["ca"]
     if a.join:
         try:
             saved.update(join(a.join, a.name or saved.get("name") or _default_agent_name(), a.server))
@@ -131,10 +152,12 @@ def cmd_agent(a) -> int:
     os.chmod(cfg_path, 0o600)
 
     threads = int(saved.get("threads") or max(1, (os.cpu_count() or 2) - 1))
+    caps = saved.get("caps")
+    ca = saved.get("ca") if saved.get("ca") and Path(saved["ca"]).is_file() else None
     cfg = AgentConfig(server=saved["server"], token=saved["token"], name=saved.get("name") or _default_agent_name(),
                       threads=threads, sharing=not a.no_share, workspace=bool(saved.get("workspace")), home=home,
                       tasks=saved.get("tasks"), task_slots=int(saved.get("task_slots") or 1),
-                      allow_commands=bool(saved.get("allow_commands")))
+                      allow_commands=bool(saved.get("allow_commands")), owned=("submit" in caps) if isinstance(caps, list) else None, ca=ca)
     _setup_logging(a.verbose)
     _stop_cleanly_on_sigterm()
     print(f"Connecting to {cfg.server} as {cfg.name}...", flush=True)
@@ -143,6 +166,27 @@ def cmd_agent(a) -> int:
     except KeyboardInterrupt:
         print("\nStopped the agent.")
         return 0
+
+
+def _agent_cleanup(home: Path) -> int:
+    """harness agent --cleanup: delete what pools left on this computer, and its sign-in (the agent must be stopped)."""
+    import asyncio
+
+    from .agent.activity import ActivityLog, cleanup
+    from .runtime.oci import OciManager
+
+    oci = OciManager(home, lambda m: None)
+
+    async def images() -> list[str]:
+        await oci.detect()
+        return await oci.forget()
+
+    removed = asyncio.run(images())
+    gone = cleanup(home)
+    what = ", ".join(gone + removed) or "nothing was left"
+    ActivityLog(home, "this computer").add({"kind": "pool", "what": f"cleaned up: {what}"})
+    print(f"Deleted from {home}: {what}. The activity record stays (harness agent --activity); join again with a link or code.")
+    return 0
 
 
 # ---------------------------------------------------------------------- client commands
@@ -477,6 +521,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--data-dir", help="where sign-ins are stored (default ~/.yourharness/coordinator)")
     s.add_argument("--shared-dir", help="the shared folder (default ~/.yourharness/shared)")
     s.add_argument("--public-url", help="the address devices use, if not this machine's LAN address, e.g. https://box.tailnet.ts.net")
+    s.add_argument("--tls-cert", metavar="PEM", help="serve HTTPS with this certificate (e.g. from `tailscale cert`, Let's Encrypt or mkcert); "
+                                                    "devices must trust it, see docs/security.md")
+    s.add_argument("--tls-key", metavar="PEM", help="the certificate's private key, unless the certificate file holds it")
     s.add_argument("--new-join-link", action="store_true", help="replace the join link; devices already in stay signed in")
     s.add_argument("--new-lend-link", action="store_true", help="replace the lend link, so computers lent with the old one can't rejoin")
     s.add_argument("--no-qr", action="store_true")
@@ -500,6 +547,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="on a friend's computer, also allow tasks that run the pool owner's commands (the Command agent, "
                         "setup and check commands, AI agents allowed to run commands); implies --tasks")
     s.add_argument("--task-slots", type=int, help="agent tasks to run at the same time (default 1)")
+    s.add_argument("--ca", metavar="PEM", help="for an HTTPS pool whose certificate comes from a private authority (such as mkcert): "
+                                              "that authority's certificate, kept for later starts")
+    s.add_argument("--activity", action="store_true", help="show what this computer did for pools (its own record) and exit")
+    s.add_argument("--cleanup", action="store_true",
+                   help="delete what pools left on this computer (partition files, caches, models, environments, pulled images, "
+                        "task folders) and its sign-in, then exit; stop the agent first")
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_agent)
 

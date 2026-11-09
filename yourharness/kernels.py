@@ -126,7 +126,9 @@ def search_file(p: dict, idx: int, ctx: dict) -> int:
     end = min(int(p["size"]), hi + len(needle) - 1)
     url = f"{ctx['server']}/api/files/{urllib.parse.quote(p['file'], safe='')}"
     req = urllib.request.Request(url, headers={"Range": f"bytes={lo}-{end - 1}", "Authorization": f"Bearer {ctx['token']}"})
-    with urllib.request.urlopen(req, timeout=120) as res:
+    from .tls import client_context
+
+    with urllib.request.urlopen(req, timeout=120, context=client_context()) as res:
         hay = res.read()
         if res.status == 200:  # the server ignored the range
             hay = hay[lo:end]

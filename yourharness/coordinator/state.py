@@ -53,6 +53,7 @@ def _digest(secret: str) -> str:
 # expires, and joining with one gives the same powers as the lend link: none.
 INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 INVITE_RE = re.compile(f"[{INVITE_ALPHABET}]{{16}}")
+AUDIT_KEEP = 2000  # entries in the audit trail (joins, removals, friend codes, replaced links)
 
 
 def normalize_invite(text) -> str | None:
@@ -115,12 +116,12 @@ class Store:
     def rotate_join_token(self) -> str:
         self.data["join_token"] = secrets.token_urlsafe(18)
         self.data["join_code"] = self._new_code()
-        self.save()
+        self.audit("join link replaced")  # saves
         return self.join_token
 
     def rotate_lend_token(self) -> str:
         self.data["lend_token"] = secrets.token_urlsafe(18)
-        self.save()
+        self.audit("lend link replaced")  # saves
         return self.lend_token
 
     def rotate_join_code(self) -> str:
@@ -156,7 +157,7 @@ class Store:
         rec = {"id": secrets.token_hex(4), "label": label, "created": now, "expires": now + hours * 3600, "uses": uses,
                "hash": _digest(code)}
         self.data.setdefault("invites", []).append(rec)
-        self.save()
+        self.audit("friend code made", invite=rec["id"], label=label, hours=hours, uses=uses)  # saves
         return self._invite_view(rec), "-".join(code[i:i + 4] for i in range(0, 16, 4))
 
     def invite_for(self, token) -> dict | None:
@@ -174,7 +175,7 @@ class Store:
         if rec is not None:
             rec["uses"] -= 1
             rec["used"] = time.time()
-            self.save()
+            self.audit("friend code used", invite=rec["id"], label=rec.get("label"))  # saves
 
     def invites(self) -> list[dict]:
         """Invites still usable, and ones used or expired in the last day, newest first."""
@@ -190,7 +191,7 @@ class Store:
         self.data["invites"] = [r for r in self.data.get("invites", []) if r["id"] != invite_id]
         if len(self.data["invites"]) == before:
             return False
-        self.save()
+        self.audit("friend code revoked", invite=invite_id)  # saves
         return True
 
     @staticmethod
@@ -210,7 +211,7 @@ class Store:
         rec = {"id": device_id, "kind": kind, "name": name, "secret": _digest(secret), "created": time.time(),
                "color": None, "caps": list(caps)}
         self.data["devices"][device_id] = rec
-        self.save()
+        self.audit("joined", device=device_id, name=name, kind=kind, friend=tuple(caps) != tuple(OWNER_CAPS))  # saves
         return rec, f"{device_id}.{secret}"
 
     def device_for_token(self, token) -> dict | None:
@@ -234,8 +235,21 @@ class Store:
             rec.update(changed)
             self.save()
 
-    def remove_device(self, device_id: str) -> bool:
-        if self.data["devices"].pop(device_id, None) is None:
+    def remove_device(self, device_id: str, by: str | None = None) -> bool:
+        rec = self.data["devices"].pop(device_id, None)
+        if rec is None:
             return False
-        self.save()
+        self.audit("removed", device=device_id, name=rec.get("name"), by=by)  # saves
         return True
+
+    # --- audit: devices joining and being removed, friend codes made, used and revoked, links replaced
+    def audit(self, action: str, **fields) -> None:
+        trail = self.data.setdefault("audit", [])
+        trail.append({"at": round(time.time(), 3), "action": action, **{k: v for k, v in fields.items() if v is not None}})
+        del trail[:-AUDIT_KEEP]
+        self.save()
+
+    def audit_log(self, device_id: str | None = None, limit: int = 200) -> list[dict]:
+        """Newest first; only one device's entries when device_id is given."""
+        rows = [r for r in self.data.get("audit", []) if device_id is None or r.get("device") == device_id]
+        return rows[::-1][:limit]

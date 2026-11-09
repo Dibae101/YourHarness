@@ -11,7 +11,10 @@ wrote, and reports on stdout as JSON lines:
 
 Anything else printed (your own code's print calls) goes to stderr, so it can never
 be mistaken for a report. Standard library only: this also runs inside a managed
-Python environment that has nothing but the job's own packages.
+Python environment that has nothing but the job's own packages, and inside a
+container image (runtime isolated-oci). In a container it has no network and no
+token: the task names a folder with the input the computer fetched beforehand
+("staged") and a folder for the outputs the computer uploads afterwards (Staged).
 """
 
 from __future__ import annotations
@@ -40,13 +43,20 @@ class Reporter:
 
 
 class Http:
-    def __init__(self, server: str, token: str, pid: str, attempt: int):
+    def __init__(self, server: str, token: str, pid: str, attempt: int, ca: str | None = None):
         self.base = f"{server.rstrip('/')}/api/engine/attempts/{urllib.parse.quote(pid)}/{attempt}"
         self.headers = {"Authorization": f"Bearer {token}"}
+        self.ctx = None
+        ca = ca or os.environ.get("HARNESS_CA_FILE")
+        if ca:  # an HTTPS pool whose certificate comes from a private authority (yourharness/tls.py)
+            import ssl
+
+            self.ctx = ssl.create_default_context()
+            self.ctx.load_verify_locations(cafile=ca)
 
     def chunks(self, path: str, counter: list | None = None):
         req = urllib.request.Request(self.base + path, headers=self.headers)
-        with urllib.request.urlopen(req, timeout=120) as res:
+        with urllib.request.urlopen(req, timeout=120, context=self.ctx) as res:
             while True:
                 data = res.read(READ)
                 if not data:
@@ -60,8 +70,80 @@ class Http:
         with open(path, "rb") as f:
             req = urllib.request.Request(f"{self.base}/outputs/{urllib.parse.quote(name)}", data=f, method="PUT",
                                          headers={**self.headers, "Content-Type": "application/octet-stream", "Content-Length": str(size)})
-            with urllib.request.urlopen(req, timeout=600) as res:
+            with urllib.request.urlopen(req, timeout=600, context=self.ctx) as res:
                 return json.loads(res.read())
+
+
+class Staged:
+    """The partition's files fetched beforehand by the computer, for a worker in a container with no network.
+
+    It reads what Http would have streamed from local files, and "uploads" by putting each
+    output in a folder the computer sends from once the container has ended.
+    """
+
+    def __init__(self, root: str, up: str):
+        self.root, self.up = Path(root), Path(up)
+
+    @staticmethod
+    def name(path: str) -> str:
+        if path in ("/input", "/context", "/model"):
+            return path[1:]
+        if path == "/input?halo=1":
+            return "input.halo"
+        if path.startswith("/parts/") and path[7:].isdigit():
+            return f"part-{int(path[7:])}"
+        raise InputIntegrityError(f"a partition in a container can't read {path}")
+
+    def chunks(self, path: str, counter: list | None = None):
+        with open(self.root / self.name(path), "rb") as f:
+            while data := f.read(READ):
+                if counter is not None:
+                    counter[0] += len(data)
+                yield data
+
+    def upload(self, name: str, path: Path) -> dict:
+        if not name.replace(".", "").replace("-", "").replace("_", "").isalnum() or len(name) > 100:
+            raise ValueError(f"an output can't be named {name!r}")
+        self.up.mkdir(parents=True, exist_ok=True)
+        dest = self.up / name
+        try:
+            os.link(path, dest)  # the original moves into the cache next; the link stays here for the computer to send
+        except OSError:
+            import shutil
+
+            shutil.copyfile(path, dest)
+        h, size = hashlib.sha256(), 0
+        with open(dest, "rb") as f:
+            while data := f.read(READ):
+                h.update(data)
+                size += len(data)
+        return {"sha": h.hexdigest(), "size": size}
+
+
+def staged_paths(task: dict) -> list[str]:
+    """What a partition reads from the coordinator: fetched first when it runs in a container."""
+    inp = task["input"]
+    if task.get("stage") in ("shuffle-reduce", "join-reduce"):
+        return [f"/parts/{i}" for i in range(len(inp["parts"]))]
+    paths = [] if inp["kind"] == "items" else ["/input"]
+    if inp.get("halo"):
+        paths.append("/input?halo=1")
+    if task.get("ctxRef"):
+        paths.append("/context")
+    if task.get("model"):
+        paths.append("/model")
+    return paths
+
+
+def stage_in(http: "Http", task: dict, dest: Path) -> int:
+    """Download everything the partition reads into dest; returns the bytes fetched."""
+    dest.mkdir(parents=True, exist_ok=True)
+    got = [0]
+    for p in staged_paths(task):
+        with open(dest / Staged.name(p), "wb") as f:
+            for data in http.chunks(p, got):
+                f.write(data)
+    return got[0]
 
 
 class RecordFile:
@@ -189,7 +271,10 @@ def run(job: dict, report) -> None:
     task = job["task"]
     wl = task["workload"]
     kind = task.get("stage", "map")
-    http = Http(job["server"], job["token"], job["partition"], job["attempt"])
+    if job.get("staged"):  # in a container: no network, no token; the computer fetched the input and sends the output
+        http = Staged(job["staged"], job["upDir"])
+    else:
+        http = Http(job["server"], job["token"], job["partition"], job["attempt"], job.get("ca"))
     out_dir = Path(job["outDir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     cache_root = Path(job.get("cache") or out_dir.parent / "cache")

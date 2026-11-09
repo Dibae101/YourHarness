@@ -91,9 +91,11 @@ class Coord:
 
         import urllib.request
 
+        from yourharness.tls import client_context
+
         req = urllib.request.Request(f"{self.base}/api/join", data=json.dumps({"token": self.token, "kind": "agent", "name": name}).encode(),
                                      headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req) as res:
+        with urllib.request.urlopen(req, context=client_context()) as res:  # an HTTPS pool's authority, when HARNESS_CA_FILE names one
             token = json.loads(res.read())["deviceToken"]
         return Client(self.base, token)
 

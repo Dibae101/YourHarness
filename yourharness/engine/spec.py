@@ -38,6 +38,8 @@ MAX_ITEMS = 100_000
 MAX_SPEC = 2 * 1024 * 1024
 # A requirement starts with a package name, so a line can't be a pip option (--index-url, -r, -e).
 REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-\[\],<>=!~ ;:'\"*+/@]{0,199}")
+# A container image named by its digest, so every computer runs exactly the same one (never a moving tag like latest).
+OCI_IMAGE = re.compile(r"[a-z0-9][a-z0-9._\-/:]{0,250}@sha256:[0-9a-f]{64}")
 FIELD_RE = re.compile(r"[^\x00-\x1f]{1,200}")
 NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
 
@@ -46,8 +48,8 @@ WORKLOADS = {
     "batch.aggregate": {"input": "dataset", "runtimes": ("builtin",)},
     "batch.groupby": {"input": "dataset", "runtimes": ("builtin",)},
     "batch.transform": {"input": "dataset", "runtimes": ("builtin",)},
-    "python.map": {"input": "dataset|items", "runtimes": ("native-python", "managed-python")},
-    "ml.evaluate": {"input": "dataset", "runtimes": ("native-python", "managed-python")},
+    "python.map": {"input": "dataset|items", "runtimes": ("native-python", "managed-python", "isolated-oci")},
+    "ml.evaluate": {"input": "dataset", "runtimes": ("native-python", "managed-python", "isolated-oci")},
     "batch.join": {"input": "dataset", "runtimes": ("builtin",)},
 }
 CODE_WORKLOADS = ("python.map", "ml.evaluate")  # they run your own code: only on your own computers
@@ -339,8 +341,28 @@ def parse(doc) -> dict:
         raise SpecError("spec.inputs.model.ref", 'should be an uploaded model, like "model:m1a2b3c4"')
     code = any(st["workload"]["type"] in CODE_WORKLOADS for st in stages)
     rt = _obj(s.get("runtime"), "spec.runtime")
-    allowed_rt = ("native-python", "managed-python") if code else ("builtin",)
+    allowed_rt = ("native-python", "managed-python", "isolated-oci") if code else ("builtin",)
     runtime = {"kind": _choice(rt.get("kind"), "spec.runtime.kind", allowed_rt, allowed_rt[0])}
+    iso = rt.get("isolation")
+    if iso is not None and iso not in ("owned-trusted", "isolated"):
+        raise SpecError("spec.runtime.isolation", 'should be "owned-trusted" or "isolated"')
+    if iso == "isolated" and runtime["kind"] != "isolated-oci":
+        raise SpecError("spec.runtime.isolation", f"can't be isolated with {runtime['kind']}: native and managed Python aren't sandboxes, "
+                                                  "use the isolated-oci runtime (a container)")
+    if runtime["kind"] == "isolated-oci":
+        image = rt.get("image")
+        if not isinstance(image, str) or not OCI_IMAGE.fullmatch(image):
+            raise SpecError("spec.runtime.image", 'should be a container image pinned by its digest, like "python:3.12-slim@sha256:<64 hex digits>" '
+                                                  "(a tag alone, such as latest, can change under you)")
+        if rt.get("network", "none") != "none":
+            raise SpecError("spec.runtime.network", 'can only be "none": the container gets no network; the computer fetches its input '
+                                                    "and sends its output")
+        lim = _obj(rt.get("limits"), "spec.runtime.limits")
+        runtime.update(image=image, network="none", limits={
+            "cpus": float(_num(lim.get("cpus"), "spec.runtime.limits.cpus", 0.25, 64, 1)),
+            "memoryMB": _num(lim.get("memoryMB"), "spec.runtime.limits.memoryMB", 128, 262_144, 2048, integer=True),
+            "pids": _num(lim.get("pids"), "spec.runtime.limits.pids", 32, 4096, 256, integer=True),
+        })
     if runtime["kind"] == "managed-python":
         runtime["python"] = rt.get("python") or "3.12"
         if not isinstance(runtime["python"], str) or not re.fullmatch(r"3\.\d{1,2}", runtime["python"]):
@@ -368,7 +390,8 @@ def parse(doc) -> dict:
         raise SpecError("spec.security.allowUntrustedNativeFallback", "can't be turned on: code never falls back to running unisolated on someone else's computer")
     security = {"allowedTrust": _choice(sec.get("allowedTrust"), "spec.security.allowedTrust", TRUST, "owned-only")}
     if security["allowedTrust"] != "owned-only" and code:
-        raise SpecError("spec.security.allowedTrust", "your own code runs only on your own computers until an isolated runtime is available there")
+        raise SpecError("spec.security.allowedTrust", "your own code runs only on your own computers: a friend's computer runs only the "
+                                                      "built-in operators, even when the job uses a container")
     retry = _obj(s.get("retry"), "spec.retry")
     speculate = retry.get("speculate", True)
     if not isinstance(speculate, bool):

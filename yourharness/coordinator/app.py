@@ -19,7 +19,7 @@ from .auth import COOKIE, Limiter, client_ip, same_origin, token_from
 from .install import agent_tarball, install_ps1, install_script
 from .jobkinds import UserError
 from .scheduler import Scheduler, clean_text
-from .state import CAP_ADMIN, CAP_FILES, CAP_SHELL, CAP_SUBMIT, CAP_REFUSALS, LENDER_CAPS, Store, caps_of
+from .state import CAP_ADMIN, CAP_FILES, CAP_SHELL, CAP_SUBMIT, CAP_REFUSALS, LENDER_CAPS, OWNER_CAPS, Store, caps_of
 from .tasks.api import TaskAPI
 
 log = logging.getLogger("yourharness")
@@ -66,6 +66,8 @@ class Config:
     stale_s: float = 20.0
     chunk_timeout_s: float = 300.0
     max_auth_fails: int = 10
+    tls_cert: str | None = None  # serve HTTPS with this certificate (yourharness/tls.py)
+    tls_key: str | None = None
 
 
 _ERRORS = {400: web.HTTPBadRequest, 401: web.HTTPUnauthorized, 403: web.HTTPForbidden, 404: web.HTTPNotFound, 429: web.HTTPTooManyRequests}
@@ -124,6 +126,8 @@ class Coordinator:
         r.add_post("/api/leave", self.leave)
         r.add_get("/api/devices", self.devices)
         r.add_delete("/api/devices/{device_id}", self.remove_device)
+        r.add_get("/api/devices/{device_id}/activity", self.device_activity)
+        r.add_get("/api/audit", self.audit)
         r.add_get("/api/jobs", self.list_jobs)
         r.add_post("/api/jobs", self.submit_job)
         r.add_get("/api/jobs/{job_id}", self.get_job)
@@ -278,9 +282,39 @@ class Coordinator:
         target = request.match_info["device_id"]
         if target == rec["id"]:
             raise fail(400, "Use “Leave the pool” to remove the device you're on.")
-        if not self.sched.remove_device(target):
+        live = self.sched.devices.get(rec["id"])
+        if not self.sched.remove_device(target, by=live.name if live else rec["name"]):
             raise fail(404, "There is no device with that id.")
         return web.json_response({"ok": True})
+
+    async def device_activity(self, request):
+        """What a device did for the pool: the jobs and data it worked on, its agent tasks, and when it joined or was removed.
+
+        The owner can see any device's, including one already removed; any device can see its own (as "me")."""
+        rec = self.authed(request)
+        target = request.match_info["device_id"]
+        if target in ("me", rec["id"]):
+            target = rec["id"]
+        else:
+            self.authed(request, need=CAP_ADMIN)
+        live = self.sched.devices.get(target)
+        stored = self.sched.store.get(target)
+        trail = self.sched.store.audit_log(target, 100)
+        joined = next((a for a in reversed(trail) if a["action"] == "joined"), None)
+        if live is None and stored is None and not trail:
+            raise fail(404, "There is no device with that id.")
+        eng = self.sched.engine.device_activity(target)
+        name = live.name if live else (stored or {}).get("name") or (joined or {}).get("name") or target
+        friend = (not live.owned) if live else (tuple(caps_of(stored)) != OWNER_CAPS if stored else bool((joined or {}).get("friend")))
+        return web.json_response({
+            "device": {"id": target, "name": name, "kind": live.kind if live else (stored or {}).get("kind") or (joined or {}).get("kind"),
+                       "friend": friend, "connected": live is not None and not live.closed, "removed": stored is None},
+            "jobs": eng["jobs"], "attempts": eng["attempts"], "tasks": self.sched.tasks.device_activity(target), "audit": trail,
+        })
+
+    async def audit(self, request):
+        self.authed(request, need=CAP_ADMIN)
+        return web.json_response({"audit": self.sched.store.audit_log(None, 500)})
 
     # ------------------------------------------------------------------ jobs
     async def list_jobs(self, request):
@@ -653,10 +687,20 @@ async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True
     coord = Coordinator(cfg)
     runner = web.AppRunner(coord.build(), access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, cfg.host, cfg.port)
+    ssl_ctx = None
+    if cfg.tls_cert:
+        from ..tls import server_context
+
+        ssl_ctx = server_context(cfg.tls_cert, cfg.tls_key or cfg.tls_cert)
+    site = web.TCPSite(runner, cfg.host, cfg.port, ssl_context=ssl_ctx)
     await site.start()
     port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
-    base = (public_url or f"http://{primary_ip() or 'localhost'}:{port}").rstrip("/")
+    local_port = port
+    if ssl_ctx is not None and local_agent:  # this computer's own agent, over a listener only this computer can reach
+        loopback = web.TCPSite(runner, "127.0.0.1", 0)
+        await loopback.start()
+        local_port = loopback._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+    base = (public_url or f"{'https' if ssl_ctx else 'http'}://{primary_ip() or 'localhost'}:{port}").rstrip("/")
     coord.sched.public_url = base
     link = f"{base}/#join={coord.store.join_token}"
     lend = f"{base}/#join={coord.store.lend_token}"
@@ -693,7 +737,7 @@ async def serve(cfg: Config, public_url: str | None = None, show_qr: bool = True
             pass
     from . import discovery
     beacon = await discovery.start(port, int(os.environ.get("HARNESS_BEACON_PORT", discovery.BEACON_PORT)))
-    local = asyncio.ensure_future(run_local_agent(cfg, coord, port)) if local_agent else None
+    local = asyncio.ensure_future(run_local_agent(cfg, coord, local_port)) if local_agent else None
     try:
         await asyncio.Event().wait()
     finally:
