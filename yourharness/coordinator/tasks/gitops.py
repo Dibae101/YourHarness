@@ -156,7 +156,8 @@ class GitOps:
         ref = f"refs/yh/tasks/{task_id}/{attempt}"
         try:
             await git("-C", path, "bundle", "verify", "-q", bundle)
-            await git("-C", path, "fetch", "-q", bundle, f"+refs/yh/result/{task_id}-{attempt}:{ref}")
+            # a result can come from a friend's computer: check every object it brings, not only the ones git needs
+            await git("-C", path, "-c", "fetch.fsckObjects=true", "fetch", "-q", bundle, f"+refs/yh/result/{task_id}-{attempt}:{ref}")
         except GitError as e:
             raise GitError(f"The result couldn't be read: {str(e)[-300:]}") from None
         return ref
