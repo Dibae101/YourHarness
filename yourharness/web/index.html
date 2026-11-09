@@ -18,6 +18,7 @@
 <link rel="stylesheet" href="vendor/xterm.css">
 <link rel="stylesheet" href="style.css">
 <script src="app.js" defer></script>
+<script src="agents.js" defer></script>
 </head>
 <body>
 
@@ -35,7 +36,7 @@
     <h1 class="wordmark">YourHarness</h1>
     <p class="lede">Open the join link on every device you own. Each one adds its processor to a shared pool that runs jobs together.</p>
     <label class="field"><span>Name this device</span><input id="join-name" name="name" autocomplete="off" maxlength="40" required></label>
-    <label class="field"><span>Join code</span><input id="join-link" name="link" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="4 digits" required></label>
+    <label class="field"><span>Join code</span><input id="join-link" name="link" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="4 digits, or a friend code" required></label>
     <p class="hint">The join code is shown in the terminal where the coordinator is running, and under "Add a device" on any device already in the pool.</p>
     <p id="join-error" class="error" role="alert"></p>
     <button class="btn primary wide" type="submit">Join the pool</button>
@@ -68,6 +69,7 @@
         <button class="tile" type="button" data-open="files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg><span>Files</span></button>
         <button class="tile" type="button" data-open="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/></svg><span>Jobs</span></button>
         <button class="tile" type="button" data-open="devices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v9H3zM1 17h16M18 8h4v11h-4z"/></svg><span>Devices</span></button>
+        <button class="tile" type="button" data-open="agents"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14v11H5zM12 4v4M9 13h.01M15 13h.01M9 16h6"/></svg><span>Agents</span></button>
       </div>
     </div>
       <section class="win" id="win-monitor" data-app="monitor" aria-labelledby="wt-monitor" hidden>
@@ -423,6 +425,21 @@
         </div>
         <div class="win-resize" aria-hidden="true"></div>
       </section>
+      <section class="win" id="win-agents" data-app="agents" aria-labelledby="wt-agents" hidden>
+        <header class="win-bar">
+          <button class="win-back" type="button" data-act="min" aria-label="Back to apps">‹</button>
+          <span class="win-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14v11H5zM12 4v4M9 13h.01M15 13h.01M9 16h6"/></svg></span>
+          <span class="win-title" id="wt-agents">Agents</span>
+          <span class="win-sub" id="wsub-agents">AI agents and commands on your computers</span>
+          <div class="win-ctrl">
+            <button type="button" data-act="min" aria-label="Minimize Agents" title="Minimize">–</button>
+            <button type="button" data-act="max" aria-label="Maximize Agents" title="Maximize">▢</button>
+            <button type="button" data-act="close" aria-label="Close Agents" title="Close">×</button>
+          </div>
+        </header>
+        <div class="win-body" id="ag-body"></div>
+        <div class="win-resize" aria-hidden="true"></div>
+      </section>
   </div>
 
   <nav class="dock" aria-label="Apps">
@@ -431,6 +448,7 @@
     <button class="dock-item" type="button" data-open="files" title="Files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg><span>Files</span></button>
     <button class="dock-item" type="button" data-open="jobs" title="Jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/></svg><span>Jobs</span></button>
     <button class="dock-item" type="button" data-open="devices" title="Devices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v9H3zM1 17h16M18 8h4v11h-4z"/></svg><span>Devices</span></button>
+    <button class="dock-item" type="button" data-open="agents" title="Agents"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14v11H5zM12 4v4M9 13h.01M15 13h.01M9 16h6"/></svg><span>Agents</span></button>
   </nav>
 </div>
 

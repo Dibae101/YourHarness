@@ -529,3 +529,41 @@ button.fm-name:hover { text-decoration: underline; }
 .host-tab { min-width: 0; padding: 8px 12px; }
 .host-tabs { gap: 8px; }
 .term-actions { margin-top: -4px; }
+
+/* ---------------------------------------------------------------- Agents app (agents.js) */
+.ag-tabs { display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.ag-tabs button { font: inherit; font-weight: 600; font-size: 0.9375rem; padding: 7px 14px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; }
+.ag-tabs button[aria-selected="true"] { color: var(--ink); border-color: var(--line); background: var(--surface); }
+.ag-tabs button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.ag-pane { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.ag-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px 16px; margin-bottom: 12px; }
+.ag-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.ag-switch { margin: 6px 0 0; }
+.ag-task h2 { font-size: 1.0625rem; }
+.ag-more { margin-top: 6px; }
+.ag-more summary { cursor: pointer; color: var(--muted); font-size: 0.9375rem; font-weight: 500; margin-bottom: 10px; }
+.ag-warn { color: var(--ink); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line)); border-radius: 8px; padding: 8px 10px; }
+.ag-badge { display: inline-block; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--surface); vertical-align: middle; }
+.ag-badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.ag-badge.bad { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+.ag-badge.warn { color: var(--danger); }
+.ag-badge.live { color: var(--focus); border-color: color-mix(in srgb, var(--focus) 45%, var(--line)); }
+.ag-chip { display: inline-block; font-size: 0.8125rem; padding: 1px 8px; border-radius: 6px; background: var(--line-soft); color: var(--ink); margin: 0 4px 4px 0; }
+.ag-table { min-width: 640px; }
+.ag-table td { font-size: 0.875rem; }
+.ag-detail { margin-top: 4px; font-size: 0.8125rem; color: var(--muted); max-width: 46ch; overflow-wrap: anywhere; }
+.ag-detail .error { font-size: inherit; }
+.ag-acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.ag-run h2 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 1.125rem; }
+.ag-run p { margin: 0 0 8px; overflow-wrap: anywhere; }
+.ag-viewer { position: sticky; bottom: 0; }
+.ag-log { margin: 0; max-height: 46vh; min-height: 120px; overflow: auto; font-family: var(--mono); font-size: 0.8125rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; color: var(--ink); }
+.ag-invite { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 10px; }
+.ag-inv-list { list-style: none; margin: 12px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ag-inv-list li { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 0.875rem; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
+.ag-h3 { font-size: 0.9375rem; margin: 16px 0 4px; }
+@media (max-width: 820px) {
+  .ag-actions { justify-content: stretch; }
+  .ag-actions .btn { flex: 1; }
+  .ag-acts { justify-content: flex-start; }
+}

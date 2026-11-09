@@ -229,6 +229,15 @@ def test_two_computers_each_do_a_task_and_the_results_are_pushed(pool):
     assert b"src/beta.txt" in pool.c.request("GET", f"/api/agent-tasks/{beta_id}/diff")
 
 
+def test_the_page_has_the_agents_app(pool):
+    import urllib.request
+
+    page = urllib.request.urlopen(pool.coord.base + "/").read().decode()
+    assert 'id="win-agents"' in page and 'src="agents.js"' in page and 'data-open="agents"' in page
+    script = urllib.request.urlopen(pool.coord.base + "/agents.js").read().decode()
+    assert "window.YHAgents" in script
+
+
 def test_changes_outside_the_scope_are_rejected_until_you_accept_them(pool):
     origin = make_repo(pool.coord.tmp / "origin-scope")
     run = pool.start({"repo": {"kind": "local", "name": str(origin)}, "tasks": [

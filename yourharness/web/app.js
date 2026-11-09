@@ -107,6 +107,8 @@ def run(chunk, total):
   // -------------------------------------------------------------------------
   function parseJoin(text) {
     const t = String(text || '').trim();
+    const invite = t.toUpperCase().replace(/[\s-]/g, ''); // a friend code, however it was typed
+    if (/^[A-HJ-NP-Z2-9]{16}$/.test(invite)) return invite;
     const m = /[#?&]join=([A-Za-z0-9_-]+)/.exec(t);
     if (m) return m[1];
     return /^\d{4}$/.test(t) || /^[A-Za-z0-9_-]{16,}$/.test(t) ? t : null;
@@ -119,7 +121,7 @@ def run(chunk, total):
   function can(cap) { return !S.caps || S.caps.indexOf(cap) >= 0; }
 
   function applyCaps() {
-    const gated = { terminal: 'shell', files: 'files' };
+    const gated = { terminal: 'shell', files: 'files', agents: 'submit' };
     Object.keys(gated).forEach(function (app) {
       const ok = can(gated[app]);
       document.querySelectorAll('[data-open="' + app + '"]').forEach(function (b) { b.hidden = !ok; });
@@ -199,7 +201,18 @@ def run(chunk, total):
     updateWakeLock();
   });
 
+  // The Agents app (agents.js) gets the device list and its own "agents.*" messages.
+  window.YH = {
+    get devices() { return S.devices; },
+    get address() { return S.address; },
+    get joinCode() { return S.joinCode; },
+    can: (cap) => can(cap),
+  };
+
   function handle(m) {
+    if (m.type === 'welcome' || m.type === 'devices' || (typeof m.type === 'string' && m.type.startsWith('agents.'))) {
+      window.dispatchEvent(new CustomEvent('yh:msg', { detail: m }));
+    }
     switch (m.type) {
       case 'welcome': {
         const termWasOpen = T.open && !!S.id; // a reconnect: reopen the terminal that was open
@@ -1600,7 +1613,7 @@ def run(chunk, total):
   // -------------------------------------------------------------------------
   // Window manager: draggable, resizable windows on wide screens, full-screen apps on phones
   // -------------------------------------------------------------------------
-  const APP_SIZES = { monitor: [720, 640], terminal: [860, 600], files: [920, 600], jobs: [1000, 680], devices: [940, 680] };
+  const APP_SIZES = { monitor: [720, 640], terminal: [860, 600], files: [920, 600], jobs: [1000, 680], devices: [940, 680], agents: [1120, 760] };
   const WM = (() => {
     let z = 10;
     const saved = (() => { try { return JSON.parse(store.get('wm') || '{}'); } catch { return {}; } })();
@@ -1648,6 +1661,7 @@ def run(chunk, total):
       if (app === 'files') fmLoad();
       if (app === 'jobs') requestAnimationFrame(() => { if (viewJob()) renderCurrent(true); });
       if (app === 'monitor') requestAnimationFrame(drawSparks);
+      if (app === 'agents' && window.YHAgents) window.YHAgents.opened(); // agents.js
     }
     function open(app) {
       if (!win(app)) return;
