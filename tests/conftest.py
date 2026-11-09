@@ -68,12 +68,16 @@ class Coord:
     def link(self) -> str:
         return f"{self.base}/#join={self.token}"
 
-    def agent(self, name: str, threads: int = 2, workspace: bool = False) -> Proc:
+    @property
+    def lend_token(self) -> str:
+        return json.loads((self.tmp / "data" / "coordinator.json").read_text())["lend_token"]
+
+    def agent(self, name: str, threads: int = 2, workspace: bool = False, extra: tuple = (), link: str | None = None) -> Proc:
         home = self.tmp / f"agent-{name.replace(' ', '-')}"
         (home / "home").mkdir(parents=True, exist_ok=True)
         # HOME is the folder the Files app may browse; keep it inside the test's temp folder
         env = {**os.environ, "YOURHARNESS_HOME": str(home), "HARNESS_BEAT_S": "0.5", "HOME": str(home / "home")}
-        args = [sys.executable, "-m", "yourharness", "agent", "--join", self.link, "--threads", str(threads), "--name", name]
+        args = [sys.executable, "-m", "yourharness", "agent", "--join", link or self.link, "--threads", str(threads), "--name", name, *extra]
         if workspace:
             args.append("--workspace")
         proc = Proc(args, env)
@@ -125,10 +129,12 @@ def fresh_coord(tmp_path):
 class FakeBrowser:
     """Signs in with a cookie and computes pieces like a browser tab would."""
 
-    def __init__(self, coord: Coord, name: str, threads: int = 2, *, stall: bool = False, beat: bool = True, origin: str | None = None):
+    def __init__(self, coord: Coord, name: str, threads: int = 2, *, stall: bool = False, beat: bool = True, origin: str | None = None,
+                 token: str | None = None):
         self.coord, self.name, self.threads = coord, name, threads
         self.stall, self.beat = stall, beat
         self.origin = origin or coord.base
+        self.join_token = token or coord.token
         self.msgs: list[dict] = []
         self.params: dict[str, dict] = {}
         self.computed = 0
@@ -136,7 +142,7 @@ class FakeBrowser:
 
     async def __aenter__(self):
         self.http = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
-        r = await self.http.post(f"{self.coord.base}/api/join", json={"token": self.coord.token, "name": self.name})
+        r = await self.http.post(f"{self.coord.base}/api/join", json={"token": self.join_token, "name": self.name})
         assert r.status == 200, await r.text()
         self.ws = await self.http.ws_connect(self.coord.base.replace("http", "ws") + "/ws", headers={"Origin": self.origin})
         await self.ws.send_json({"type": "hello", "name": self.name, "threads": self.threads, "sharing": True, "runtimes": ["js"], "info": {"platform": "Test", "cores": self.threads}})

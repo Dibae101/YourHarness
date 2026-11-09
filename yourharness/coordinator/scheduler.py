@@ -94,7 +94,8 @@ class Device:
         # Only an agent signed in with the owner link may be handed the owners' work:
         # terminals, pool shell commands, files and /pool chunks. A lender's agent can
         # claim all of these in its hello, so the claim counts only with owner powers.
-        self.trusted = self.kind == "agent" and set(OWNER_CAPS) <= set(self.caps)
+        self.owned = set(OWNER_CAPS) <= set(self.caps)  # joined with the owner link, not a lend link or friend code
+        self.trusted = self.kind == "agent" and self.owned
         self.workspace = sanitize_workspace(hello.get("workspace")) if self.trusted else None
         self.coordinator = self.trusted and bool(hello.get("coordinator"))  # the computer that runs the pool
         self.files = self.trusted and isinstance(hello.get("files"), dict)  # lets the Files app browse its home folder
@@ -156,7 +157,7 @@ class Device:
             pass
 
     def can_take(self, job: "Job") -> bool:
-        return (self.sharing and not self.stale and not self.closed
+        return (self.sharing and not self.stale and not self.closed and (self.owned or not job.owners_only)
                 and bool(self.runtimes & job.runtimes) and self.threads - len(self.inflight) > 0)
 
 
@@ -169,6 +170,7 @@ class Job:
         self.data = plan.data
         self.total = plan.total
         self.runtimes = plan.runtimes
+        self.owners_only = plan.owners_only
         self.pending: deque[int] = deque(range(plan.total))
         self.pending_set: set[int] = set(range(plan.total))
         self.inflight: dict[int, tuple[str, float]] = {}
