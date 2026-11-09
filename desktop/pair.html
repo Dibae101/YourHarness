@@ -10,7 +10,10 @@
   p { margin:0; color:var(--muted); }
   label { display:flex; flex-direction:column; gap:6px; font-size:0.875rem; color:var(--muted); font-weight:500; }
   input { font:inherit; font-size:1.0625rem; padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); width:100%; box-sizing:border-box; }
-  input.code { font-size:1.5rem; letter-spacing:0.4em; text-align:center; }
+  input.code { font-size:1.25rem; letter-spacing:0.12em; text-align:center; }
+  [hidden] { display:none !important; }
+  label.check { flex-direction:row; align-items:flex-start; gap:10px; font-weight:400; line-height:1.45; }
+  label.check input { width:auto; margin-top:3px; }
   button { font:inherit; font-weight:600; padding:11px 16px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--ink); cursor:pointer; }
   button.primary { background:var(--ink); color:var(--bg); border-color:var(--ink); }
   button:focus-visible, input:focus-visible { outline:2px solid #2563C9; outline-offset:2px; }
@@ -20,13 +23,23 @@
   .row { display:flex; gap:8px; flex-wrap:wrap; }
   hr { border:0; border-top:1px solid var(--line); width:100%; margin:4px 0; }
 </style></head>
-<body><main>
+<body>
+<main id="lending" hidden>
+  <h1>Lending this computer</h1>
+  <p id="lending-pool"></p>
+  <p>It takes part in the pool's runs. The pool can't open a terminal here or read your files.</p>
+  <p id="lending-tasks"></p>
+  <p>Quitting YourHarness (menu bar or tray) stops lending.</p>
+  <div class="row"><button id="lending-other">Join another pool</button></div>
+</main>
+<main id="pair">
   <h1>Join a pool</h1>
   <p id="msg">Looking for pools on this network…</p>
   <ul id="servers"></ul>
   <form id="f">
     <label>Pool address<input id="addr" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="192.168.1.51:8420"></label>
-    <label>Join code (4 digits)<input id="code" class="code" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="0000"></label>
+    <label>Join code (4 digits), or a friend code<input id="code" class="code" maxlength="24" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="0000 or ABCD-EFGH-JKLM-NPQR"></label>
+    <label class="check" id="tasks-row" hidden><input id="tasks" type="checkbox"> Allow agent tasks on this computer: the pool's owner can then have an AI agent or a command work on a copy of their repository here, using this computer's account and any AI tools signed in on it. Tick this only if you trust them.</label>
     <p class="err" id="err" role="alert"></p>
     <button class="primary" type="submit">Join the pool</button>
   </form>
@@ -55,16 +68,29 @@
     }
     if (found.length === 1) { $('#addr').value = `${found[0].host}:${found[0].port}`; $('#code').focus(); }
   }
+  const FRIEND = /^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$/i;
+  $('#code').oninput = () => { $('#tasks-row').hidden = !FRIEND.test($('#code').value.trim()); };
   $('#f').onsubmit = async (e) => {
     e.preventDefault();
     const address = $('#addr').value.trim(), code = $('#code').value.trim();
     if (!address) { $('#err').textContent = 'Enter the pool address, for example 192.168.1.51:8420.'; return; }
-    if (!/^\d{4}$/.test(code)) { $('#err').textContent = 'The join code is 4 digits.'; return; }
+    if (!/^\d{4}$/.test(code) && !FRIEND.test(code)) { $('#err').textContent = 'Type the 4-digit join code, or the friend code you were sent (like ABCD-EFGH-JKLM-NPQR).'; return; }
     $('#err').textContent = 'Joining…';
-    const r = await yh.pair({ address, code });
+    const r = await yh.pair({ address, code, tasks: FRIEND.test(code) && $('#tasks').checked });
     if (r && r.error) $('#err').textContent = r.error;
   };
   $('#again').onclick = look;
   $('#own').onclick = async () => { $('#err').textContent = 'Starting…'; const r = await yh.startOwn(); if (r && r.error) $('#err').textContent = r.error; };
-  look();
+  const params = new URLSearchParams(location.search);
+  if (params.get('lending')) {
+    $('#pair').hidden = true;
+    $('#lending').hidden = false;
+    $('#lending-pool').textContent = `Connected to the pool at ${params.get('lending')} with a friend code.`;
+    $('#lending-tasks').textContent = params.get('tasks') === '1'
+      ? 'Agent tasks are allowed: the pool’s owner can have an AI agent or a command work on a copy of their repository here, with this computer’s account and the AI tools signed in on it.'
+      : 'Agent tasks are not allowed on this computer, so it only computes built-in pieces of work.';
+    $('#lending-other').onclick = () => { $('#lending').hidden = true; $('#pair').hidden = false; look(); };
+  } else {
+    look();
+  }
 </script></body></html>

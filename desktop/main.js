@@ -7,6 +7,7 @@ const MAC = process.platform === 'darwin';
 const { spawn, execFile } = require('child_process');
 const dgram = require('dgram');
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -106,7 +107,8 @@ function discover(ms = 1500) {
 // Resolves { ok: true } or { ok: false, reason } so the screen can say what to try.
 function check(url) {
   return new Promise((resolve) => {
-    const req = http.get(url + '/install.sh', { timeout: 4000 }, (res) => { res.resume(); resolve({ ok: res.statusCode === 200, reason: `It answered with status ${res.statusCode}, so it may not be a YourHarness pool.` }); });
+    const client = url.startsWith('https:') ? https : http;
+    const req = client.get(url + '/install.sh', { timeout: 4000 }, (res) => { res.resume(); resolve({ ok: res.statusCode === 200, reason: `It answered with status ${res.statusCode}, so it may not be a YourHarness pool.` }); });
     req.on('error', (e) => resolve({ ok: false, reason: e.code || e.message }));
     req.on('timeout', () => { req.destroy(); resolve({ ok: false, reason: 'ETIMEDOUT' }); });
   });
@@ -152,19 +154,25 @@ async function startOwn() {
 }
 
 function parseAddress(text) {
-  const m = /^(?:https?:\/\/)?([^\/:\s]+)(?::(\d{1,5}))?\/?$/.exec(String(text || '').trim());
-  return m ? { host: m[1], port: Number(m[2] || 8420) } : null;
+  const m = /^(?:(https?):\/\/)?([^\/:\s]+)(?::(\d{1,5}))?\/?$/.exec(String(text || '').trim());
+  if (!m) return null;
+  const scheme = m[1] || 'http';
+  return { scheme, host: m[2], port: Number(m[3] || (scheme === 'https' ? 443 : 8420)) };
 }
 
 async function joinRemote(info) {
   const addr = info.address ? parseAddress(info.address) : info;
   if (!addr || !addr.host) return { error: 'That address does not look right. Use something like 192.168.1.51:8420.' };
   const { host, port, code } = { ...addr, code: info.code };
-  const url = `http://${host}:${port}`;
+  const scheme = addr.scheme || 'http';
+  const url = `${scheme}://${host}:${port}`;
   const probe = await check(url);
   if (!probe.ok) return { error: explain(host, port, probe.reason) };
-  // --workspace: this computer offers its own terminal to the pool too (Ubuntu via WSL or PowerShell on Windows)
-  const agent = run(['agent', '--server', url, '--join', code, '--workspace']);
+  const friend = FRIEND_CODE.test(code);
+  // --workspace: one of your own computers offers its terminal to the pool too (Ubuntu via WSL or PowerShell on Windows).
+  // A friend's computer never does; it allows agent tasks only if its owner ticked the box.
+  const extra = friend ? (info.tasks ? ['--tasks'] : []) : ['--workspace'];
+  const agent = run(['agent', '--server', url, '--join', code, ...extra]);
   try {
     await waitFor(agent, /Joined the pool/, 25000);
   } catch (e) {
@@ -172,15 +180,29 @@ async function joinRemote(info) {
     return { error: e.message.includes('code') || e.message.includes('join') ? e.message : `Could not join. ${e.message}` };
   }
   killAll(agent); // stop sharing with the old pool: its coordinator, if this app ran one, and its agent
-  writeCfg({ mode: 'remote', server: url });
-  await showPool(url, code);
+  if (friend) {
+    // a friend code works once, and the agent just used it, so the window shows this computer's status instead
+    writeCfg({ mode: 'remote', server: url, lending: true, tasks: !!info.tasks });
+    await showLending(url, !!info.tasks);
+  } else {
+    writeCfg({ mode: 'remote', server: url });
+    await showPool(url, code);
+  }
   return { ok: true };
+}
+
+async function showLending(url, tasks) {
+  poolUrl = url;
+  await win.loadFile(path.join(__dirname, 'pair.html'), { query: { lending: url, tasks: tasks ? '1' : '0' } });
+  setStatus();
 }
 
 async function rejoinSaved(url) {
   const agent = run(['agent']); // reuses the sign-in saved on first join
   try { await waitFor(agent, /Joined the pool/, 20000); } catch { agent.kill(); return false; }
-  await showPool(url);
+  const cfg = readCfg();
+  if (cfg.lending) await showLending(url, !!cfg.tasks);
+  else await showPool(url);
   return true;
 }
 
@@ -263,10 +285,14 @@ const fromApp = (e) => { try { return new URL(e.senderFrame.url).protocol === 'f
 const refused = { error: 'Only the YourHarness app itself can do that.' };
 
 ipcMain.handle('servers', (e) => (fromApp(e) ? discover() : []));
+// A friend code made in the Agents app: joins as a lender, which never controls the pool.
+const FRIEND_CODE = /^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$/i;
+
 ipcMain.handle('pair', (e, info) => {
   if (!fromApp(e)) return refused;
-  if (!info || typeof info !== 'object' || !/^\d{4}$/.test(String(info.code || ''))) return { error: 'The join code is 4 digits.' };
-  return joinRemote({ address: String(info.address || ''), code: String(info.code) });
+  const code = info && typeof info === 'object' ? String(info.code || '').trim() : '';
+  if (!/^\d{4}$/.test(code) && !FRIEND_CODE.test(code)) return { error: 'Type the 4-digit join code, or a friend code like ABCD-EFGH-JKLM-NPQR.' };
+  return joinRemote({ address: String(info.address || ''), code, tasks: FRIEND_CODE.test(code) && info.tasks === true });
 });
 ipcMain.handle('start-own', async (e) => {
   if (!fromApp(e)) return refused;
