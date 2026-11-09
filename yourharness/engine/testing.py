@@ -200,7 +200,9 @@ class PytestOp:
                 self.messages[t] = "pytest didn't report this test"
 
     def _run(self, tests: list[str]) -> tuple[dict, dict, dict]:
-        work = Path(tempfile.mkdtemp(prefix="yh-tests-"))
+        # resolved: pytest names tests relative to --rootdir, from the working directory the system reports, which is
+        # already resolved (macOS's /var and /tmp are links to /private/...), so the two must agree
+        work = Path(tempfile.mkdtemp(prefix="yh-tests-")).resolve()
         try:
             proj = work / "project"
             shutil.copytree(self.project, proj, symlinks=True)  # each run gets a fresh copy: tests may write into it
