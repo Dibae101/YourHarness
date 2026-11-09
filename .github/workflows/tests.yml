@@ -50,10 +50,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Agents app smoke test
+      - name: Web app smoke tests
         run: |
           npm install --no-save --no-audit --no-fund jsdom@26
           node --check yourharness/web/app.js
           node --check yourharness/web/batch.js
+          node --check yourharness/web/engine-ops.js
+          node --check yourharness/web/engine.js
+          node --check yourharness/web/engine-worker.js
+          node --check desktop/main.js
           node tests/web/agents_smoke.mjs
           node tests/web/batch_smoke.mjs
+          node tests/web/engine_smoke.mjs

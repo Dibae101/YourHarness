@@ -95,9 +95,7 @@ class Verifier:
                                         "lease_until": now + spec["retry"]["leaseSeconds"]})
             self.db.event(job["id"], "verify-assigned", {"attempt": n, "device": d.name}, p["id"], d.id)
         self.m._reserve(job, d.id, p["id"], n)
-        task = self.m.task_for(job, meta, p, d, resume=False)
-        d.send({"type": "eng.start", "job": job["id"], "partition": p["id"], "attempt": n, "token": f"{p['id']}.{n}.{secret}",
-                "timeout": spec["retry"]["timeoutSeconds"], "task": task})
+        d.send(self.m.start_message(d, job, p, n, secret, self.m.task_for(job, meta, p, d, resume=False)))
         self.m._changed(job["id"])
 
     # ------------------------------------------------------------------ what the computer reports

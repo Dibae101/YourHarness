@@ -154,6 +154,16 @@ def run(chunk, total):
     if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(msg));
   }
 
+  // Batch-job partitions in this tab (engine.js): it reports through this connection.
+  if (window.YHEngine) {
+    window.YHEngine.attach({
+      send,
+      sendText: (text) => { if (S.ws && S.ws.readyState === 1) S.ws.send(text); },
+      sharing: () => S.sharing && S.joined,
+      threads: () => S.threads,
+    });
+  }
+
   function connect() {
     if (S.ws && S.ws.readyState <= 1) return;
     S.replaced = false;
@@ -164,8 +174,12 @@ def run(chunk, total):
     setConn('connecting');
     ws.onopen = async () => {
       const info = await deviceInfo();
+      let engine = null;
+      if (window.YHEngine) {
+        try { await window.YHEngine.ready(); engine = window.YHEngine.describe(); } catch { engine = null; }
+      }
       if (ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: 'hello', name: S.name, threads: S.threads, sharing: S.sharing, info, runtimes: ['js'] }));
+        ws.send(JSON.stringify({ type: 'hello', name: S.name, threads: S.threads, sharing: S.sharing, info, runtimes: ['js'], ...(engine ? { engine } : {}) }));
       }
     };
     ws.onmessage = (e) => {
@@ -239,8 +253,14 @@ def run(chunk, total):
         if (termWasOpen) openTerminal(T.kind, T.hostId);
         else if (WM.isOpen('terminal')) autoOpenTerminal();
         send({ type: 'ping', t: performance.now() });
+        if (window.YHEngine) window.YHEngine.connected(); // finished partitions the coordinator hasn't acknowledged
         break;
       }
+      case 'eng.start':
+      case 'eng.cancel':
+      case 'eng.ack':
+        if (window.YHEngine) window.YHEngine.handle(m);
+        break;
       case 'denied':
         S.deniedReason = m.reason || '';
         break;
@@ -1325,6 +1345,7 @@ def run(chunk, total):
     }
     resizePool(S.sharing ? S.threads : 0);
     send({ type: 'update', sharing: S.sharing });
+    if (window.YHEngine) window.YHEngine.sharingChanged();
     updateWakeLock();
   });
   $('#me-threads').addEventListener('input', (e) => {
@@ -1335,6 +1356,7 @@ def run(chunk, total):
     store.set('threads', S.threads);
     if (S.sharing) resizePool(S.threads);
     send({ type: 'update', threads: S.threads });
+    if (window.YHEngine) window.YHEngine.sharingChanged();
   });
   $('#me-name').addEventListener('change', (e) => {
     const name = e.target.value.trim();

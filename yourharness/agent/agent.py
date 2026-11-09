@@ -157,6 +157,8 @@ class Agent:
         from ..runtime.inventory import accelerators
 
         self.enginehost.accelerators = await asyncio.get_running_loop().run_in_executor(None, accelerators)
+        if os.environ.get("YH_BUSY_LINES") == "1":
+            asyncio.ensure_future(self._report_busy())
         delay = 1.0
         try:
             while True:
@@ -236,6 +238,20 @@ class Agent:
         while True:
             await asyncio.sleep(BEAT_S)
             self.send({"type": "beat"})
+
+    def busy(self) -> bool:
+        """Whether this computer is working for the pool right now: partitions, agent tasks or pieces."""
+        return bool(self.enginehost.running or self.taskhost.attempts or self.pool.queue or any(s.task for s in self.pool.slots))
+
+    async def _report_busy(self) -> None:
+        """For the desktop app (YH_BUSY_LINES=1), which keeps the computer from sleeping while it works: a line when that changes."""
+        was = None
+        while True:
+            now = self.busy()
+            if now != was:
+                print(f"::yh-busy::{1 if now else 0}", flush=True)
+                was = now
+            await asyncio.sleep(2)
 
     async def _report_load(self) -> None:
         loop = asyncio.get_running_loop()

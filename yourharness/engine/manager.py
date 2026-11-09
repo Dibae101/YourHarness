@@ -52,6 +52,7 @@ CLASSIFICATIONS = ("owned-private", "shareable")
 FORMATS = ("text", "jsonl", "csv")
 FINISHED = ("done", "failed", "cancelled")
 LIVE_ATTEMPT = ("running", "lost")
+STAGE_KINDS = ("map", "shuffle-map", "shuffle-reduce", "join-map", "join-reduce")
 SPECULATE_AFTER_S = float(os.environ.get("HARNESS_SPECULATE_AFTER_S", 10))  # a partition is never duplicated before this
 SPECULATE_FACTOR = 3.0  # ...nor before it has taken this many times its stage's median
 
@@ -530,10 +531,13 @@ class EngineManager:
             job, meta, inflight = jobs[p["job_id"]]
             spec = job["spec"]["spec"]
             best, best_score = None, None
+            kind = self.stage_row(p["stage_id"])["spec"]["kind"]
             for d in devices:
                 if free[d.id] <= 0 or self.refused.get((job["id"], d.id), 0) > now:
                     continue
                 if inflight.get(d.id, 0) >= spec["partitioning"]["maxInflightPerWorker"]:
+                    continue
+                if kind not in (d.engine_info.get("stages") or STAGE_KINDS):
                     continue
                 if self.planner.eligible(job["spec"] | {"plan": job["plan"]}, meta, d):
                     continue
@@ -601,6 +605,8 @@ class EngineManager:
                 for d in devices:
                     if d.id == a["device_id"] or free.get(d.id, 0) <= 0 or self.refused.get((job["id"], d.id), 0) > now:
                         continue
+                    if stage["spec"]["kind"] not in (d.engine_info.get("stages") or STAGE_KINDS):
+                        continue
                     if self.planner.eligible(job["spec"] | {"plan": {}}, meta, d):
                         continue
                     if not self.s.resources.fits(d, "engine", cpu=spec["resources"]["cpuSlots"], mem_gb=spec["resources"]["minFreeMemoryGiB"]):
@@ -625,8 +631,7 @@ class EngineManager:
             self.db.event(job["id"], "speculative", {"attempt": n, "device": d.name, "slowDevice": p["device_name"], "ranSeconds": round(ran, 1),
                                                      "limitSeconds": round(limit, 1)}, p["id"], d.id)
         self._reserve(job, d.id, p["id"], n)
-        d.send({"type": "eng.start", "job": job["id"], "partition": p["id"], "attempt": n, "token": f"{p['id']}.{n}.{secret}",
-                "timeout": spec["retry"]["timeoutSeconds"], "task": self.task_for(job, meta, p, d)})
+        d.send(self.start_message(d, job, p, n, secret, self.task_for(job, meta, p, d)))
         self._changed(job["id"])
 
     def _reserve(self, job, device_id, pid, n) -> None:
@@ -652,9 +657,20 @@ class EngineManager:
                                                           "updated_at": now})
             self.db.event(job["id"], "assigned", {"attempt": n, "device": d.name}, p["id"], d.id)
         self._reserve(job, d.id, p["id"], n)
-        d.send({"type": "eng.start", "job": job["id"], "partition": p["id"], "attempt": n, "token": f"{p['id']}.{n}.{secret}",
-                "timeout": spec["retry"]["timeoutSeconds"], "task": self.task_for(job, meta, p, d)})
+        d.send(self.start_message(d, job, p, n, secret, self.task_for(job, meta, p, d)))
         self._changed(job["id"])
+
+    @staticmethod
+    def start_message(d, job: dict, p: dict, n: int, secret: str, task: dict) -> dict:
+        """eng.start for one attempt. A browser tab gets the task as JSON text, which it reads keeping
+        Python's int and float apart (JavaScript's JSON.parse would make them all floats)."""
+        msg = {"type": "eng.start", "job": job["id"], "partition": p["id"], "attempt": n, "token": f"{p['id']}.{n}.{secret}",
+               "timeout": job["spec"]["spec"]["retry"]["timeoutSeconds"]}
+        if d.kind == "browser":
+            msg["taskJSON"] = json.dumps(task, separators=(",", ":"), allow_nan=False)
+        else:
+            msg["task"] = task
+        return msg
 
     def task_for(self, job: dict, meta: dict | None, p: dict, d, resume: bool = True) -> dict:
         """What a computer needs to run partition p: everything but its input bytes, which it streams."""
@@ -835,6 +851,11 @@ class EngineManager:
                 self.dispatch()
         elif kind == "eng.done":
             self._on_done(p, a, d, msg)
+        elif kind == "eng.release":  # a browser tab that was hidden hands it back; not a failed try
+            if current:
+                self.refused[(p["job_id"], d.id)] = time.time() + 30  # it said it can't work now: give the job to others for a while
+                self._lose(p, f"{d.name} handed it back ({str(msg.get('reason') or 'it stopped')[:120]}).")
+                self.dispatch()
 
     def _speculative_message(self, p: dict, a: dict, d, msg: dict) -> None:
         kind = msg.get("type")
@@ -849,6 +870,8 @@ class EngineManager:
         elif kind == "eng.refuse":
             self.refused[(p["job_id"], d.id)] = time.time() + 60
             self._cancel_attempt(p, a["n"], "failed")
+        elif kind == "eng.release":
+            self._cancel_attempt(p, a["n"], "lost")
 
     def _on_done(self, p: dict, a: dict, d, msg: dict) -> None:
         if p["status"] == "done" or a["status"] not in LIVE_ATTEMPT:
@@ -862,6 +885,13 @@ class EngineManager:
                 return
             kind = msg.get("errorKind")
             error = str(msg.get("error") or "The partition failed.")[:2000]
+            if kind == "unsupported":  # a browser tab that can't be sure to compute it exactly like a computer: not a failed try
+                self.refused[(p["job_id"], d.id)] = time.time() + 600
+                self.db.update("partitions", {"id": p["id"]}, {"status": "ready", "moves": (p["moves"] or 0) + 1, "updated_at": time.time()})
+                self.db.event(p["job_id"], "refused", {"why": error, "device": d.name}, p["id"], d.id)
+                self._changed(p["job_id"])
+                self.dispatch()
+                return
             if kind == "halo":
                 inp = dict(p["input"])
                 inp["halo"] = min(inp["start"], max(4096, inp["halo"] * 4))
@@ -1236,7 +1266,7 @@ class EngineManager:
             return None
         return {"slots": info.get("slots", 0), "ops": info.get("ops", []), "formats": info.get("formats", []), "runtimes": info.get("runtimes", []),
                 "busy": len(self.s.resources.held(d.id, "engine")), "python": info.get("python"),
-                "envs": len(info.get("envs", [])), "accelerators": info.get("accelerators", [])}
+                "envs": len(info.get("envs", [])), "accelerators": info.get("accelerators", []), "profile": info.get("profile")}
 
     def overview(self) -> dict:
         jobs = [self.job_view(j) for j in self.db.all("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 50")]

@@ -651,9 +651,12 @@
       const e = d.engine;
       const gpus = e && (e.accelerators || []).length ? `<br><span class="hint">GPU: ${esc(e.accelerators.map((a) => `${a.name}${a.memoryGB ? ` ${a.memoryGB} GB` : ''}`).join(', '))}</span>` : '';
       const envs = e && e.envs ? ` · ${nf.format(e.envs)} prepared environment${e.envs === 1 ? '' : 's'}` : '';
+      const pr = e && e.profile;
+      const bat = pr && pr.battery && pr.battery !== 'unknown' ? ` · battery ${Math.round((pr.battery.level || 0) * 100)}%${pr.battery.charging ? ', charging' : ''}` : '';
+      const prof = pr ? `<br><span class="hint">${pr.ok ? `measured ${nf.format(pr.recordsPerSecond || 0)} records/s${pr.memoryGB ? ` · about ${pr.memoryGB} GB memory` : ''}${bat}` : esc(pr.why)}${pr.blocked ? ` · not taking partitions: ${esc(pr.blocked)}` : ''}</span>` : '';
       return `<tr><td><b>${esc(d.name)}</b><br><span class="hint">${esc(d.kind)}</span></td><td>${d.owned ? 'Yours' : 'A friend’s'}</td>
-        <td>${e ? e.slots : ''}</td><td>${e ? esc(e.ops.map((o) => (KINDS[o] || o).split(':')[0]).join(', ')) + `<br><span class="hint">${esc(e.formats.join(', '))} · ${esc(e.runtimes.join(', '))}${envs}</span>${gpus}`
-          : `<span class="hint">${d.kind === 'agent' ? 'Runs a YourHarness without batch jobs: update it.' : 'Browser tabs don’t run batch jobs yet.'}</span>`}</td>
+        <td>${e ? e.slots : ''}</td><td>${e ? esc(e.ops.map((o) => (KINDS[o] || o).split(':')[0]).join(', ')) + `<br><span class="hint">${esc(e.formats.join(', '))} · ${esc(e.runtimes.join(', '))}${envs}</span>${gpus}${prof}`
+          : `<span class="hint">${d.kind === 'agent' ? 'Runs a YourHarness without batch jobs: update it.' : 'This page is older than batch jobs in browsers: reload it.'}</span>`}</td>
         <td>${e ? `${e.busy} of ${e.slots}` : ''}</td></tr>`;
     }).join('') || '<tr><td colspan="5" class="hint">No devices are connected.</td></tr>';
     if (B.storage) $('#bj-storage').textContent = `Stored on the coordinator: ${nf.format(B.storage.artifacts)} files, ${bytes(B.storage.bytes)}.`;

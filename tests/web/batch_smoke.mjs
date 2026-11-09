@@ -276,6 +276,6 @@ assert.equal(document.querySelectorAll('#bj-model option').length, 1);
 // computers
 document.querySelector('[data-tab="computers"]').click();
 const comp = document.querySelector('#bj-comp').textContent;
-assert.match(comp, /Mac/); assert.match(comp, /Browser tabs don’t run batch jobs yet/);
+assert.match(comp, /Mac/); assert.match(comp, /older than batch jobs in browsers/);
 assert.match(comp, /GPU: Apple silicon GPU/); assert.match(comp, /2 prepared environments/);
 console.log('batch.js smoke test passed:', calls.length, 'requests');

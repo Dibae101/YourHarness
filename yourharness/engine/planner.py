@@ -50,12 +50,17 @@ class Planner:
         if d.stale:
             return "isn't responding"
         if not info:
-            return "runs a YourHarness without the job engine" if d.kind == "agent" else "is a browser tab, which doesn't run batch jobs yet"
+            return "runs a YourHarness without the job engine" if d.kind == "agent" else "is a browser tab on a page too old for batch jobs (reload it)"
+        if d.kind == "browser" and not info.get("slots") and (info.get("profile") or {}).get("blocked"):
+            return f"is a browser tab that isn't taking partitions ({info['profile']['blocked']})"
         if not d.sharing or not info.get("slots"):
             return "isn't sharing its processor"
-        for t in dict.fromkeys(s["workload"]["type"] for s in (spec.get("stages") or [{"workload": wl}])):
+        workloads = [s["workload"] for s in (spec.get("stages") or [{"workload": wl}])]
+        for t in dict.fromkeys(w["type"] for w in workloads):
             if t not in info.get("ops", []):
-                return f"can't run {t} (it runs an older YourHarness)"
+                return f"can't run {t}" + (" (browser tabs run totals and group-bys)" if d.kind == "browser" else " (it runs an older YourHarness)")
+        if "where.regex" in (info.get("unsupported") or []) and any(f.get("op") == "regex" for w in workloads for f in w.get("where") or []):
+            return "can't evaluate regular expressions exactly the way the coordinator does"
         if ds is not None and ds["format"] not in info.get("formats", []):
             return f"can't read {ds['format']} files"
         if not d.owned:

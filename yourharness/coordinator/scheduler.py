@@ -124,8 +124,30 @@ def sanitize_engine(e) -> dict | None:
         "envErrors": {clean_text(k, 80, ""): clean_text(v, 600, "") for k, v in list((e.get("envErrors") or {}).items())[:50]
                       if isinstance(k, str) and isinstance(v, str)} if isinstance(e.get("envErrors"), dict) else {},
         "accelerators": [sanitize_accelerator(a) for a in (e.get("accelerators") or [])[:16] if isinstance(a, dict)],
+        # a browser tab runs only the first stage of a job, and leaves features it can't match exactly to computers
+        "stages": [s for s in (e.get("stages") or STAGE_KINDS) if s in STAGE_KINDS] if isinstance(e.get("stages") or [], list) else list(STAGE_KINDS),
+        "unsupported": [u for u in (e.get("unsupported") or []) if u in ENGINE_FEATURES] if isinstance(e.get("unsupported") or [], list) else [],
+        "profile": sanitize_profile(e.get("profile")),
         "running": running,
     }
+
+
+STAGE_KINDS = ("map", "shuffle-map", "shuffle-reduce", "join-map", "join-reduce")
+ENGINE_FEATURES = ("where.regex",)
+
+
+def sanitize_profile(p) -> dict | None:
+    """What a browser tab measured about itself (engine.js), as numbers and short text the page can show."""
+    if not isinstance(p, dict):
+        return None
+    bat = p.get("battery")
+    battery = "unknown"
+    if isinstance(bat, dict):
+        battery = {"charging": bool(bat.get("charging")), "level": _num_or_none(bat.get("level"), 0, 1)}
+    return {"ok": bool(p.get("ok")), "why": clean_text(p.get("why"), 200, ""), "blocked": clean_text(p.get("blocked"), 120, ""),
+            "cores": clamp_int(p.get("cores"), 0, 1024, 0) or None, "memoryGB": _num_or_none(p.get("memoryGB"), 0, 4096),
+            "recordsPerSecond": _num_or_none(p.get("recordsPerSecond"), 0, 1e12), "bytesPerSecond": _num_or_none(p.get("bytesPerSecond"), 0, 1e13),
+            "battery": battery, "workers": bool(p.get("workers"))}
 
 
 def sanitize_accelerator(a: dict) -> dict:
