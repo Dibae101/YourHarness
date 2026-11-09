@@ -171,6 +171,41 @@ def test_bad_records_fail_the_job_with_the_offset_or_are_skipped(pool):
     assert job["status"] == "done" and job["result"]["values"] == {"sum_amount": 7} and job["result"]["badRecordsSkipped"] == 1
 
 
+def cube(x):
+    return x ** 3
+
+
+def test_the_command_line_and_the_python_sdk(pool, tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from yourharness import jobs
+
+    env = {**os.environ, "HARNESS_URL": pool.coord.base, "HARNESS_TOKEN": pool.c.token}
+    data = sales(2000)
+    f = tmp_path / "cli.jsonl"
+    f.write_bytes(data)
+    harness = [sys.executable, "-m", "yourharness"]
+    out = subprocess.run(harness + ["dataset", "add", str(f)], env=env, capture_output=True, text=True, check=True).stdout
+    ref = out.split()[1].rstrip(":")
+    assert ref.startswith("dataset:d")
+    spec = tmp_path / "job.json"
+    spec.write_text(json.dumps(pool.job_doc(AGG, {"ref": ref})))
+    plan = subprocess.run(harness + ["job", "plan", str(spec)], env=env, capture_output=True, text=True, check=True).stdout
+    assert plan.startswith("RUN_")
+    done = subprocess.run(harness + ["job", "run", str(spec)], env=env, capture_output=True, text=True, check=True)
+    want = expected(tmp_path, data, "jsonl", AGG)["result"]["values"]
+    assert f"sum_amount: {want['sum_amount']}" in done.stdout and "partitions" in done.stderr
+    monkeypatch.setenv("HARNESS_URL", pool.coord.base)
+    monkeypatch.setenv("HARNESS_TOKEN", pool.c.token)
+    jobs._client = None
+    assert jobs.aggregate(ref, sum="amount", mean="amount", where=jobs.where("qty", ">=", 6))["count"] == \
+        sum(1 for line in data.splitlines() if json.loads(line)["qty"] >= 6)
+    assert [g["key"]["region"] for g in jobs.group_by(ref, by="region", sum="amount")] == ["e", "n", "s", "w"]
+    assert jobs.map_items(cube, range(20), mode="distributed") == [x ** 3 for x in range(20)]
+    assert jobs.transform(ref, select=["id"], where=jobs.where("id", "<", 3)) == [{"id": 0}, {"id": 1}, {"id": 2}]
+
+
 def test_the_page_has_the_batch_app(pool):
     import urllib.request
 

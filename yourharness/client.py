@@ -180,6 +180,96 @@ class Client:
     def pool_rm(self, name: str) -> None:
         self.request("DELETE", f"/api/pool/{urllib.parse.quote(name, safe='')}")
 
+    # --- the job engine: datasets and batch jobs
+    def datasets(self) -> list[dict]:
+        return self.request("GET", "/api/engine")["datasets"]
+
+    def add_dataset(self, path: str | Path, name: str | None = None, fmt: str | None = None, classification: str | None = None) -> dict:
+        path = Path(path)
+        q = {"name": name or path.name}
+        if fmt:
+            q["format"] = fmt
+        if classification:
+            q["classification"] = classification
+        hdrs = {"Authorization": f"Bearer {self.token}", "Content-Length": str(path.stat().st_size), "Content-Type": "application/octet-stream"}
+        with open(path, "rb") as f:
+            req = urllib.request.Request(f"{self.server}/api/engine/datasets?{urllib.parse.urlencode(q)}", data=f, headers=hdrs, method="PUT")
+            try:
+                with urllib.request.urlopen(req, timeout=3600) as res:
+                    return json.loads(res.read())["dataset"]
+            except urllib.error.HTTPError as e:
+                try:
+                    message = json.loads(e.read()).get("error")
+                except ValueError:
+                    message = None
+                raise PoolError(message or f"The coordinator answered {e.code}.") from None
+
+    def import_dataset(self, source: str, path: str, **opts) -> dict:
+        return self.request("POST", "/api/engine/datasets/import", {"source": source, "path": path, **opts}, timeout=3600)["dataset"]
+
+    def delete_dataset(self, ds_id: str) -> None:
+        self.request("DELETE", f"/api/engine/datasets/{urllib.parse.quote(ds_id)}")
+
+    def plan_job(self, job: dict) -> dict:
+        return self.request("POST", "/api/engine/plan", {"job": job})["plan"]
+
+    def start_job(self, job: dict) -> dict:
+        return self.request("POST", "/api/engine/jobs", {"job": job})["job"]
+
+    def engine_jobs(self) -> list[dict]:
+        return self.request("GET", "/api/engine")["jobs"]
+
+    def engine_job(self, job_id: str) -> dict:
+        return self.request("GET", f"/api/engine/jobs/{urllib.parse.quote(job_id)}")["job"]
+
+    def cancel_engine_job(self, job_id: str) -> dict:
+        return self.request("POST", f"/api/engine/jobs/{urllib.parse.quote(job_id)}/cancel", {})["job"]
+
+    def retry_engine_job(self, job_id: str) -> dict:
+        return self.request("POST", f"/api/engine/jobs/{urllib.parse.quote(job_id)}/retry", {})["job"]
+
+    def wait_engine_job(self, job_id: str, quiet: bool = False, poll: float = 0.5) -> dict:
+        import time
+
+        show = not quiet and sys.stderr.isatty()
+        try:
+            while True:
+                job = self.engine_job(job_id)
+                if job["status"] in FINISHED:
+                    break
+                if show:
+                    c = job["counts"]
+                    sys.stderr.write(f"\r\033[K{c.get('done', 0)}/{job['total']} partitions · {job['status']}")
+                    sys.stderr.flush()
+                time.sleep(poll)
+        except KeyboardInterrupt:
+            self.cancel_engine_job(job_id)
+            raise PoolError("Cancelled.") from None
+        finally:
+            if show:
+                sys.stderr.write("\r\033[K")
+        return job
+
+    def engine_result(self, job_id: str, dest: str | Path | None = None):
+        """The job's result: parsed JSON, or the raw records (JSON Lines) saved to dest."""
+        req = urllib.request.Request(f"{self.server}/api/engine/jobs/{urllib.parse.quote(job_id)}/result",
+                                     headers={"Authorization": f"Bearer {self.token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=3600) as res:
+                if dest is not None:
+                    with open(dest, "wb") as out:
+                        while chunk := res.read(1024 * 1024):
+                            out.write(chunk)
+                    return Path(dest)
+                raw = res.read()
+                return json.loads(raw) if res.headers.get_content_type() == "application/json" else raw
+        except urllib.error.HTTPError as e:
+            try:
+                message = json.loads(e.read()).get("error")
+            except ValueError:
+                message = None
+            raise PoolError(message or f"The coordinator answered {e.code}.") from None
+
 
 def progress_line(job: dict) -> str:
     per = sorted(job.get("perDevice", {}).values(), key=lambda p: -p["chunks"])

@@ -8,6 +8,8 @@
     harness run primes --below 1e9         run a job and print the result
     harness run python job.py --pieces 64  run your own run(chunk, total) on every agent
     harness files [ls|put|get|rm]          use the shared folder
+    harness dataset add sales.jsonl        add a dataset for batch jobs
+    harness job run job.json               run a batch job (a JobSpec) and print its result
 """
 
 from __future__ import annotations
@@ -285,6 +287,122 @@ def cmd_pool(a) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------- batch jobs (the job engine)
+def _size(n) -> str:
+    if n is None:
+        return ""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return ""
+
+
+def cmd_dataset(a) -> int:
+    c = _client()
+    if a.action in (None, "ls"):
+        rows = c.datasets()
+        if not rows:
+            print("No datasets yet. Add one with: harness dataset add FILE")
+        for d in rows:
+            share = "shareable" if d["classification"] == "shareable" else "private"
+            print(f"{d['ref']}  {d['format']:<5}  {_size(d['size']):>9}  {d.get('lines') or 0:>10,} lines  {share:<9}  {d['name']}")
+    elif a.action == "add":
+        if not a.args:
+            print("Name the file: harness dataset add FILE [--format jsonl|csv|text] [--shareable]", file=sys.stderr)
+            return 1
+        for p in a.args:
+            d = c.add_dataset(p, name=a.name, fmt=a.format, classification="shareable" if a.shareable else None)
+            print(f"Added {d['ref']}: {d['name']}, {_size(d['size'])}, {d.get('lines') or 0:,} lines.")
+    elif a.action == "import":
+        if len(a.args) != 2 or a.args[0] not in ("shared", "pool"):
+            print("Use: harness dataset import shared|pool PATH", file=sys.stderr)
+            return 1
+        d = c.import_dataset(a.args[0], a.args[1], format=a.format, classification="shareable" if a.shareable else None)
+        print(f"Added {d['ref']}: {d['name']}, {_size(d['size'])}.")
+    elif a.action == "rm":
+        for ref in a.args:
+            c.delete_dataset(ref.split(":", 1)[-1])
+            print(f"Deleted {ref}.")
+    return 0
+
+
+def _load_job(path: str) -> dict:
+    from .engine.spec import loads
+
+    text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
+    return loads(text)
+
+
+def _print_engine_result(job: dict) -> None:
+    r = job.get("result") or {}
+    if job.get("outputs"):
+        print(f"{job['outputs']['records']:,} records written ({_size(job['outputs']['bytes'])}). "
+              f"Save them with: harness job result {job['id']} -o FILE.jsonl")
+    elif "values" in r:
+        for k, v in r["values"].items():
+            print(f"{k}: {v}")
+    else:
+        print(json.dumps(r, indent=2))
+    per = ", ".join(f"{d['name']} {d['n']}" for d in job.get("perDevice", []))
+    took = (job["finishedAt"] or 0) - (job["startedAt"] or 0)
+    v = (job.get("validation") or {}).get("level", "")
+    print(f"  {job['total']} partitions{f' ({per})' if per else ''}, {took:.1f} s{f', {v}' if v else ''}", file=sys.stderr)
+
+
+def cmd_job(a) -> int:
+    c = _client()
+    if a.action in (None, "ls"):
+        for j in c.engine_jobs():
+            done = j["counts"].get("done", 0)
+            print(f"{j['id']}  {j['status']:<9}  {done}/{j['total']}  {j['workload']:<16}  {j['name']}  (by {j['createdBy']})")
+        return 0
+    if a.action in ("run", "plan"):
+        if not a.args:
+            print(f"Give the job file: harness job {a.action} JOB.json (or - for stdin)", file=sys.stderr)
+            return 1
+        job = _load_job(a.args[0])
+        if a.action == "plan":
+            p = c.plan_job(job)
+            print(p["decision"])
+            for line in p.get("reasons", []):
+                print(f"  {line}")
+            for d in p.get("devices", []):
+                print(f"  {'yes' if d['eligible'] else 'no ':<3}  {d['name']}" + ("" if d["eligible"] else f": {d['why']}"))
+            return 0
+        started = c.start_job(job)
+        if a.no_wait:
+            print(started["id"])
+            return 0
+        done = c.wait_engine_job(started["id"])
+        if done["status"] != "done":
+            print(f"{done['id']} {done['status']}: {done.get('error') or ''}", file=sys.stderr)
+            return 1
+        _print_engine_result(done)
+        return 0
+    if not a.args:
+        print(f"Give the job id: harness job {a.action} JOB_ID", file=sys.stderr)
+        return 1
+    job_id = a.args[0]
+    if a.action == "show":
+        j = c.engine_job(job_id)
+        print(json.dumps({k: j[k] for k in ("id", "name", "status", "decision", "counts", "perDevice", "result", "validation", "error")}, indent=2))
+    elif a.action == "wait":
+        j = c.wait_engine_job(job_id)
+        _print_engine_result(j) if j["status"] == "done" else print(j["status"], j.get("error") or "")
+    elif a.action == "result":
+        got = c.engine_result(job_id, a.output)
+        if a.output:
+            print(f"Saved {got}")
+        else:
+            print(json.dumps(got, indent=2) if not isinstance(got, bytes) else got.decode("utf-8"), end="" if isinstance(got, bytes) else "\n")
+    elif a.action == "cancel":
+        print(c.cancel_engine_job(job_id)["status"])
+    elif a.action == "retry":
+        print(c.retry_engine_job(job_id)["status"])
+    return 0
+
+
 # ---------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="harness", description="Pool the devices you own into one workspace.")
@@ -358,6 +476,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", nargs="?", choices=["ls", "put", "get", "rm"])
     s.add_argument("args", nargs="*")
     s.set_defaults(fn=cmd_pool)
+
+    s = sub.add_parser("dataset", help="datasets for batch jobs: ls, add FILE..., import shared|pool PATH, rm REF...")
+    s.add_argument("action", nargs="?", choices=["ls", "add", "import", "rm"])
+    s.add_argument("args", nargs="*")
+    s.add_argument("--name", help="what to call the dataset (default: the file name)")
+    s.add_argument("--format", choices=["jsonl", "csv", "text"], help="default: from the file name")
+    s.add_argument("--shareable", action="store_true", help="friends' computers may process it, for jobs that allow them")
+    s.set_defaults(fn=cmd_dataset)
+
+    s = sub.add_parser("job", help="batch jobs: run JOB.json, plan JOB.json, ls, show ID, wait ID, result ID [-o FILE], cancel ID, retry ID")
+    s.add_argument("action", nargs="?", choices=["run", "plan", "ls", "show", "wait", "result", "cancel", "retry"])
+    s.add_argument("args", nargs="*")
+    s.add_argument("--no-wait", action="store_true", help="print the job id and return at once")
+    s.add_argument("-o", "--output", help="save the result to this file")
+    s.set_defaults(fn=cmd_job)
     return p
 
 
