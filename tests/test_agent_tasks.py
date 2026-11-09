@@ -272,6 +272,14 @@ def test_the_page_has_the_agents_app(pool):
     assert "window.YHAgents" in script
 
 
+def test_the_windows_installer_takes_friend_codes(pool):
+    import urllib.request
+
+    ps1 = urllib.request.urlopen(pool.coord.base + "/install.ps1").read().decode()
+    assert "A-HJ-NP-Z2-9" in ps1 and "'--tasks'" in ps1, "a friend code is accepted, and agent tasks are asked for"
+    assert "'--workspace'" in ps1, "your own PC still hosts a terminal"
+
+
 def test_changes_outside_the_scope_are_rejected_until_you_accept_them(pool):
     origin = make_repo(pool.coord.tmp / "origin-scope")
     run = pool.start({"repo": {"kind": "local", "name": str(origin)}, "tasks": [
@@ -323,7 +331,8 @@ def test_a_friends_computer_takes_tasks_only_when_its_owner_allows_it(pool):
     invite = pool.c.request("POST", "/api/invites", {"label": "Sam"})
     assert invite["link"].endswith(invite["code"])
     # one friend joined with a one-time invite code and allowed tasks; another used the lend link and didn't
-    coord.agent("Sams PC", threads=1, link=f"{coord.base}/#join={invite['code']}", extra=("--tasks", "--no-share"))
+    # the way a friend's computer joins: the pool's address plus the code, as install.sh runs it
+    coord.agent("Sams PC", threads=1, link=invite["code"], extra=("--server", coord.base, "--tasks", "--no-share"))
     coord.agent("Kims PC", threads=1, link=f"{coord.base}/#join={coord.lend_token}", extra=("--no-share",))
     sam = pool.device("Sams PC")
     kim = next(d for d in pool.c.devices() if d["name"] == "Kims PC")

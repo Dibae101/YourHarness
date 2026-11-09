@@ -28,10 +28,12 @@ BINARIES = {"claude": "claude", "codex": "codex", "kiro": "kiro-cli"}
 # YH_PROBE lists the agent CLIs to look for (HARNESS_AGENT_CLIS can narrow it, e.g. to none in tests).
 DETECT_SCRIPT = r'''
 for __c in git curl ${YH_PROBE:-}; do
-  if command -v "$__c" >/dev/null 2>&1; then
-    __v=$("$__c" --version 2>/dev/null | head -n 1)
-    printf '::yh-tool::%s::%s\n' "$__c" "${__v:-installed}"
-  fi
+  __p=$(command -v "$__c" 2>/dev/null) || continue
+  # on a Mac without the developer tools, /usr/bin/git only opens an install dialog
+  if [ "$__p" = /usr/bin/git ] && [ "$(uname -s)" = Darwin ] && ! xcode-select -p >/dev/null 2>&1; then continue; fi
+  __v=$("$__c" --version 2>/dev/null) || continue
+  __l=$(printf '%s\n' "$__v" | head -n 1)
+  printf '::yh-tool::%s::%s\n' "$__c" "${__l:-installed}"
 done
 '''
 

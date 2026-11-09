@@ -70,7 +70,7 @@ fi
 INSTALL_PS1 = r"""# YourHarness setup for Windows. Run in PowerShell:  irm __SERVER__/install.ps1 | iex
 $ErrorActionPreference = 'Stop'
 $server = '__SERVER__'
-Write-Host 'YourHarness: setting up the Ubuntu workspace on this PC.'
+Write-Host 'YourHarness: setting up this PC to join a pool, inside Ubuntu.'
 $distros = ''
 try { $distros = (wsl.exe -l -q 2>$null) -join '' } catch { }
 $distros = $distros -replace "`0", ''
@@ -82,11 +82,21 @@ if ($distros -notmatch 'Ubuntu') {
   Write-Host 'Then run this same command again.'
   return
 }
-$code = Read-Host 'Join code (shown where the coordinator is running)'
-if ($code -notmatch '^[0-9]{4}$') { Write-Host 'The join code is 4 digits.'; return }
+$code = (Read-Host 'Join code: the 4 digits shown where the pool runs, or a friend code like ABCD-EFGH-JKLM-NPQR').Trim().ToUpper()
+if ($code -match '^[0-9]{4}$') {
+  # one of your own computers: it also hosts a terminal for the pool
+  $flags = '--workspace'
+} elseif ($code -match '^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$') {
+  Write-Host 'This is a friend code. This PC lends its processor to someone else''s pool, which cannot open a terminal here or read your files.'
+  $answer = Read-Host 'Also allow agent tasks? The pool owner could then have an AI agent or a command work on a copy of their repository here, with your Ubuntu account and any AI tools signed in there. Type yes to allow'
+  $flags = if ($answer.Trim().ToLower() -eq 'yes') { '--tasks' } else { '' }
+} else {
+  Write-Host 'That is not a join code. Type the 4 digits, or the friend code you were sent.'
+  return
+}
 Write-Host 'Installing the agent inside Ubuntu. It may ask for your Linux password once.'
 Write-Host 'Keep this window open while you want this PC in the pool.'
-wsl.exe -d Ubuntu -- bash -lc "sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv tmux curl git && curl -fsSL $server/install.sh | bash -s -- --join $code --workspace"
+wsl.exe -d Ubuntu -- bash -lc "sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv tmux curl git && curl -fsSL $server/install.sh | bash -s -- --join $code $flags"
 """
 
 

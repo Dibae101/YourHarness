@@ -229,8 +229,9 @@
         <p>Send this to <b>${esc(label)}</b>. It works once, for 24 hours.</p>
         <div class="field"><span>Friend code</span><div class="copyrow"><input id="ag-inv-code" class="code-big" readonly value="${esc(r.code)}"><button class="btn ghost small" type="button" data-copy="ag-inv-code">Copy</button></div></div>
         <div class="field"><span>Link (opens the pool in a browser and joins)</span><div class="copyrow"><input id="ag-inv-link" readonly value="${esc(r.link)}"><button class="btn ghost small" type="button" data-copy="ag-inv-link">Copy</button></div></div>
-        <div class="field"><span>On their Mac or Linux computer, to also allow agent tasks</span><div class="copyrow"><textarea id="ag-inv-cmd" rows="3" readonly>harness agent --server ${esc(addr)} --join ${esc(r.code)} --tasks</textarea><button class="btn ghost small" type="button" data-copy="ag-inv-cmd">Copy</button></div></div>
-        <p class="hint">With the YourHarness app: File → Join another pool, type the address and the friend code, and tick “Allow agent tasks” if they agree to run them.</p>`;
+        <div class="field"><span>Their Mac or Linux computer, in a terminal (needs Python 3.10 or newer, and git for agent tasks)</span><div class="copyrow"><textarea id="ag-inv-cmd" rows="3" readonly>curl -fsSL ${esc(addr)}/install.sh | bash -s -- --join ${esc(r.code)} --tasks</textarea><button class="btn ghost small" type="button" data-copy="ag-inv-cmd">Copy</button></div></div>
+        <div class="field"><span>Their Windows PC, in PowerShell (sets up Ubuntu, then asks for the code and whether to allow agent tasks)</span><div class="copyrow"><input id="ag-inv-win" readonly value="irm ${esc(addr)}/install.ps1 | iex"><button class="btn ghost small" type="button" data-copy="ag-inv-win">Copy</button></div></div>
+        <p class="hint">Leave out <code>--tasks</code> if they only want to lend compute. The YourHarness desktop app takes friend codes from its next release (File → Join another pool); the v0.7 apps don't.</p>`;
       loadInvites();
     } catch (e) { alert(e.message); }
   }
