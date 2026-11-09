@@ -61,6 +61,8 @@ class EngineAPI:
         r.add_delete("/api/engine/models/{model}", self.delete_model)
         r.add_get("/api/engine/attempts/{pid}/{n}/input", self.attempt_input)
         r.add_get("/api/engine/attempts/{pid}/{n}/model", self.attempt_model)
+        r.add_get("/api/engine/attempts/{pid}/{n}/parts/{i}", self.attempt_part)
+        r.add_get("/api/engine/attempts/{pid}/{n}/context", self.attempt_context)
         r.add_put("/api/engine/attempts/{pid}/{n}/outputs/{name}", self.attempt_output)
 
     # ------------------------------------------------------------------ helpers
@@ -255,9 +257,35 @@ class EngineAPI:
             raise _fail(401, "This partition's sign-in isn't valid anymore. The attempt may have been cancelled or finished elsewhere.")
         return got
 
+    async def _stream(self, request, sha: str, start: int, end: int):
+        resp = web.StreamResponse(headers={"Content-Type": "application/octet-stream", "Content-Length": str(max(0, end - start)),
+                                           "Cache-Control": "no-store"})
+        await resp.prepare(request)
+        async for chunk in self.m.store.stream_range(sha, start, end):
+            await resp.write(chunk)
+        await resp.write_eof()
+        return resp
+
+    async def attempt_part(self, request):
+        """One of the files a bucket partition reads (a shuffle's or a join's second stage)."""
+        p, _a = self._attempt(request)
+        try:
+            sha, size = self.m.part_input(p, int(request.match_info["i"]))
+        except (EngineError, ValueError):
+            raise _fail(404, "This partition has no such input.")
+        return await self._stream(request, sha, 0, size)
+
+    async def attempt_context(self, request):
+        """The stage's context snapshot, when it was too big to come with the task."""
+        p, _a = self._attempt(request)
+        got = self.m.stage_context(p)
+        if got is None:
+            raise _fail(404, "This partition's stage has no context.")
+        return await self._stream(request, got[0], 0, got[1])
+
     async def attempt_input(self, request):
         p, _a = self._attempt(request)
-        if p["input"]["kind"] != "range":
+        if p["input"]["kind"] not in ("range", "artifact"):
             raise _fail(400, "This partition's input came with the task.")
         try:
             from_offset = int(request.query["from"]) if "from" in request.query else None

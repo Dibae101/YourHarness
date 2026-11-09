@@ -25,9 +25,10 @@ class HaloTooSmall(Exception):
 
 
 def writes_records(wl: dict) -> bool:
-    """Whether the workload writes output records (part.jsonl) besides its state."""
-    t = wl["type"]
-    return t == "batch.transform" or (t == "python.map" and wl.get("reducer") == "concat") or (t == "ml.evaluate" and bool(wl.get("predictions")))
+    """Whether the workload's job writes output records (part.jsonl) besides its result."""
+    from .spec import writes_records as writes
+
+    return writes(wl)
 
 
 def make_op(wl: dict, ctx: dict | None, write: Callable[[dict], None] | None, *, bad: str = "fail", model: dict | None = None):

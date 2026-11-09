@@ -202,6 +202,46 @@ assert.ok(!det.querySelector('td i, th i'), 'labels are escaped');
 assert.match(det.textContent, /model clf\.zip abababababab/);
 set('#bj-kind', 'batch.aggregate');
 
+// a join of two datasets, a shuffled group-by, a context, and no duplicate runs
+const lastSpec = () => calls.filter((c) => c.method === 'POST' && c.url === '/api/engine/jobs').pop().body.job.spec;
+const submit = async () => { document.querySelector('#bj-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle(); };
+document.querySelector('[data-tab="new"]').click();
+set('#bj-kind', 'batch.join');
+assert.equal(document.querySelector('#bj-right').value, 'dataset:d1a2b3c4');
+document.querySelector('#bj-on').value = 'cust';
+document.querySelector('#bj-right-on').value = 'id';
+set('#bj-how', 'left');
+await submit();
+assert.deepEqual(lastSpec().workload, { type: 'batch.join', on: ['cust'], rightOn: ['id'], how: 'left' });
+assert.deepEqual(lastSpec().inputs.right, { ref: 'dataset:d1a2b3c4' });
+document.querySelector('[data-tab="new"]').click();
+set('#bj-kind', 'batch.groupby');
+document.querySelector('#bj-by').value = 'cust';
+document.querySelector('#bj-shuffle').checked = true;
+document.querySelector('#bj-buckets').value = '8';
+await submit();
+assert.deepEqual(lastSpec().workload.shuffle, { buckets: 8 });
+document.querySelector('[data-tab="new"]').click();
+set('#bj-kind', 'python.map');
+document.querySelector('#bj-context').value = '{"factor": 3}';
+document.querySelector('#bj-speculate').checked = false;
+await submit();
+assert.deepEqual(lastSpec().context, { values: { factor: 3 } });
+assert.equal(lastSpec().retry.speculate, false);
+document.querySelector('[data-tab="new"]').click();
+document.querySelector('#bj-context').value = '[1, 2]';
+const n = calls.length;
+await submit();
+assert.match(document.querySelector('#bj-status').textContent, /should be a JSON object/);
+assert.equal(calls.length, n);
+document.querySelector('#bj-context').value = '';
+document.querySelector('#bj-speculate').checked = true;
+set('#bj-kind', 'batch.aggregate');
+document.querySelector('[data-tab="jobs"]').click();
+msg({ type: 'eng.job', job: { id: 'j4', name: 'Groups', status: 'running', workload: 'batch.groupby', total: 7, counts: { done: 5, leased: 2 }, perDevice: [], createdAt: 5,
+  stages: [{ name: 'group', kind: 'shuffle-map', status: 'done', total: 4, done: 4 }, { name: 'combine', kind: 'shuffle-reduce', status: 'running', total: 3, done: 1 }] } });
+assert.match(document.querySelector('[data-job="j4"]').textContent, /1\. group \(sort into buckets\): done → 2\. combine \(combine each bucket\): 1 of 3/);
+
 // datasets: import from the shared folder, preview, share
 document.querySelector('[data-tab="datasets"]').click();
 await settle();

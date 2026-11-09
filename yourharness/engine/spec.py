@@ -48,9 +48,33 @@ WORKLOADS = {
     "batch.transform": {"input": "dataset", "runtimes": ("builtin",)},
     "python.map": {"input": "dataset|items", "runtimes": ("native-python", "managed-python")},
     "ml.evaluate": {"input": "dataset", "runtimes": ("native-python", "managed-python")},
+    "batch.join": {"input": "dataset", "runtimes": ("builtin",)},
 }
 CODE_WORKLOADS = ("python.map", "ml.evaluate")  # they run your own code: only on your own computers
 MAX_LABELS = 10_000
+MAX_STAGES = 8
+MAX_BUCKETS = 1024
+MAX_CONTEXT = 1024 * 1024
+STAGE_NAME = re.compile(r"[a-z][a-z0-9-]{0,39}")
+
+
+def context_version(values: dict) -> str:
+    """The digest that names a context snapshot: the same values always give the same version."""
+    import hashlib
+
+    return hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def writes_records(wl: dict) -> bool:
+    t = wl["type"]
+    return t in ("batch.transform", "batch.join") or (t == "python.map" and wl.get("reducer") == "concat") \
+        or (t == "ml.evaluate" and bool(wl.get("predictions"))) or (t == "batch.groupby" and wl.get("shuffle") is not None)
+
+
+def _buckets(v, path: str):
+    if v is None:
+        return None
+    return _num(v, path, 1, MAX_BUCKETS, None, integer=True)
 
 
 class SpecError(ValueError):
@@ -168,9 +192,23 @@ def _workload(w, path: str) -> dict:
         return {"type": t, "metrics": _metrics(w.get("metrics", [{"op": "count"}]), f"{path}.metrics"),
                 "where": _where(w.get("where"), f"{path}.where")}
     if t == "batch.groupby":
-        return {"type": t, "by": _fields(w.get("by"), f"{path}.by"),
-                "metrics": _metrics(w.get("metrics", [{"op": "count"}]), f"{path}.metrics"),
-                "where": _where(w.get("where"), f"{path}.where")}
+        out = {"type": t, "by": _fields(w.get("by"), f"{path}.by"),
+               "metrics": _metrics(w.get("metrics", [{"op": "count"}]), f"{path}.metrics"),
+               "where": _where(w.get("where"), f"{path}.where")}
+        sh = w.get("shuffle")
+        if sh is True:
+            sh = {}
+        if sh is not None and sh is not False:  # keys spread over buckets, each combined by one computer: for many groups
+            sh = _obj(sh, f"{path}.shuffle")
+            out["shuffle"] = {"buckets": _buckets(sh.get("buckets"), f"{path}.shuffle.buckets")}
+        return out
+    if t == "batch.join":
+        on = _fields(w.get("on"), f"{path}.on")
+        right_on = _fields(w["rightOn"], f"{path}.rightOn") if w.get("rightOn") is not None else on
+        if len(right_on) != len(on):
+            raise SpecError(f"{path}.rightOn", "should name as many fields as on")
+        return {"type": t, "on": on, "rightOn": right_on, "how": _choice(w.get("how"), f"{path}.how", ("inner", "left"), "inner"),
+                "buckets": _buckets(w.get("buckets"), f"{path}.buckets")}
     if t == "batch.transform":
         out = {"type": t, "where": _where(w.get("where"), f"{path}.where"), "select": None, "rename": {}, "rolling": None}
         if w.get("select") is not None:
@@ -219,11 +257,11 @@ def _workload(w, path: str) -> dict:
     raise SpecError(f"{path}.type", "isn't built yet")  # pragma: no cover
 
 
-def _inputs(v, path: str, wl: dict) -> dict:
+def _inputs(v, path: str, wl: dict, wants_model: bool = False) -> dict:
     v = _obj(v, path)
     need = WORKLOADS[wl["type"]]["input"]
     model = None
-    if wl["type"] == "ml.evaluate":
+    if wants_model or wl["type"] == "ml.evaluate":
         m = _obj(v.get("model"), f"{path}.model")
         ref = m.get("ref")
         if not isinstance(ref, str) or not re.fullmatch(r"model:m[0-9a-f]{8}", ref):
@@ -234,12 +272,21 @@ def _inputs(v, path: str, wl: dict) -> dict:
         model = {"ref": ref, "sha256": sha}
     elif "model" in v:
         raise SpecError(f"{path}.model", "only ml.evaluate takes a model")
+    right = None
+    if wl["type"] == "batch.join":
+        r = _obj(v.get("right"), f"{path}.right")
+        ref = r.get("ref")
+        if not isinstance(ref, str) or not re.fullmatch(r"dataset:d[0-9a-f]{8}", ref):
+            raise SpecError(f"{path}.right.ref", 'should be the dataset to join with, like "dataset:d1a2b3c4"')
+        right = {"ref": ref}
+    elif "right" in v:
+        raise SpecError(f"{path}.right", "only batch.join takes a second dataset")
     if "dataset" in v:
         d = _obj(v["dataset"], f"{path}.dataset")
         ref = d.get("ref")
         if not isinstance(ref, str) or not re.fullmatch(r"dataset:d[0-9a-f]{8}", ref):
             raise SpecError(f"{path}.dataset.ref", 'should be a registered dataset, like "dataset:d1a2b3c4"')
-        return {"dataset": {"ref": ref}, **({"model": model} if model else {})}
+        return {"dataset": {"ref": ref}, **({"model": model} if model else {}), **({"right": right} if right else {})}
     if "dataset" not in need:  # pragma: no cover - every workload takes a dataset today
         raise SpecError(path, "needs a dataset")
     if "items" in need and ("items" in v or "grid" in v):
@@ -281,10 +328,18 @@ def parse(doc) -> dict:
         raise SpecError("metadata.name", "should be text of at most 120 characters")
     labels = _obj(meta.get("labels"), "metadata.labels")
     s = _obj(doc.get("spec"), "spec")
-    wl = _workload(s.get("workload"), "spec.workload")
-    inputs = _inputs(s.get("inputs"), "spec.inputs", wl)
+    stages = _stages(s)
+    wl = stages[-1]["workload"]  # the last stage's workload is the job's result
+    reading = [st["workload"] for st in stages if st["from"] == "inputs"]
+    inputs = _inputs(s.get("inputs"), "spec.inputs", reading[0], any(st["workload"]["type"] == "ml.evaluate" for st in stages))
+    for i, st in enumerate(stages):
+        if st["from"] == "inputs" and "items" in inputs and "items" not in WORKLOADS[st["workload"]["type"]]["input"]:
+            raise SpecError(f"spec.stages[{i}].workload", f"{st['workload']['type']} reads a dataset, and this job's inputs are items")
+    if any(st["workload"]["type"] == "ml.evaluate" for st in stages) and "model" not in inputs:
+        raise SpecError("spec.inputs.model.ref", 'should be an uploaded model, like "model:m1a2b3c4"')
+    code = any(st["workload"]["type"] in CODE_WORKLOADS for st in stages)
     rt = _obj(s.get("runtime"), "spec.runtime")
-    allowed_rt = WORKLOADS[wl["type"]]["runtimes"]
+    allowed_rt = ("native-python", "managed-python") if code else ("builtin",)
     runtime = {"kind": _choice(rt.get("kind"), "spec.runtime.kind", allowed_rt, allowed_rt[0])}
     if runtime["kind"] == "managed-python":
         runtime["python"] = rt.get("python") or "3.12"
@@ -312,15 +367,33 @@ def parse(doc) -> dict:
     if sec.get("allowUntrustedNativeFallback"):
         raise SpecError("spec.security.allowUntrustedNativeFallback", "can't be turned on: code never falls back to running unisolated on someone else's computer")
     security = {"allowedTrust": _choice(sec.get("allowedTrust"), "spec.security.allowedTrust", TRUST, "owned-only")}
-    if security["allowedTrust"] != "owned-only" and wl["type"] in CODE_WORKLOADS:
+    if security["allowedTrust"] != "owned-only" and code:
         raise SpecError("spec.security.allowedTrust", "your own code runs only on your own computers until an isolated runtime is available there")
     retry = _obj(s.get("retry"), "spec.retry")
+    speculate = retry.get("speculate", True)
+    if not isinstance(speculate, bool):
+        raise SpecError("spec.retry.speculate", "should be true or false")
     retry = {
         "maxAttempts": _num(retry.get("maxAttempts"), "spec.retry.maxAttempts", 1, 20, 3, integer=True),
         "timeoutSeconds": _num(retry.get("timeoutSeconds"), "spec.retry.timeoutSeconds", 5, 86_400, 900, integer=True),
         "checkpointIntervalSeconds": _num(retry.get("checkpointIntervalSeconds"), "spec.retry.checkpointIntervalSeconds", 1, 3600, 10),
         "leaseSeconds": _num(retry.get("leaseSeconds"), "spec.retry.leaseSeconds", 5, 3600, 45),
+        "speculate": speculate,  # a slow partition of a side-effect-free job may also run on a free computer; the first result wins
     }
+    ctx = _obj(s.get("context"), "spec.context")
+    context = None
+    if ctx:
+        values = _obj(ctx.get("values"), "spec.context.values")
+        try:
+            size = len(json.dumps(values, allow_nan=False))
+        except (TypeError, ValueError):
+            raise SpecError("spec.context.values", "should hold only JSON values") from None
+        if size > MAX_CONTEXT:
+            raise SpecError("spec.context.values", "is over 1 MB; put large reference data in a dataset")
+        version = context_version(values)
+        if ctx.get("version") is not None and ctx["version"] != version:
+            raise SpecError("spec.context.version", "doesn't match the values: a context version names exactly one set of values")
+        context = {"values": values, "version": version}
     out = _obj(s.get("output"), "spec.output")
     output = {
         "onBadRecord": _choice(out.get("onBadRecord"), "spec.output.onBadRecord", ("fail", "skip"), "fail"),
@@ -332,8 +405,41 @@ def parse(doc) -> dict:
         "metadata": {"name": name.strip() or "Job", "labels": {str(k)[:60]: str(v)[:200] for k, v in list(labels.items())[:20]}},
         "spec": {"mode": _choice(s.get("mode"), "spec.mode", MODES, "automatic"), "workload": wl, "inputs": inputs,
                  "runtime": runtime, "partitioning": partitioning, "resources": resources, "security": security,
-                 "retry": retry, "output": output},
+                 "retry": retry, "output": output, "context": context, "stages": stages if len(stages) > 1 else None},
     }
+
+
+def _stages(s: dict) -> list[dict]:
+    """The job's stages in order. One workload is one stage; spec.stages lists several, each starting
+    after the one before it finished (a barrier), with the earlier stages' results in its context."""
+    if s.get("stages") is None:
+        return [{"name": "main", "workload": _workload(s.get("workload"), "spec.workload"), "from": "inputs"}]
+    if s.get("workload") is not None:
+        raise SpecError("spec.workload", "give either workload or stages, not both")
+    raw = s["stages"]
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_STAGES:
+        raise SpecError("spec.stages", f"should be a list of 1 to {MAX_STAGES} stages")
+    out, names = [], []
+    for i, st in enumerate(raw):
+        p = f"spec.stages[{i}]"
+        st = _obj(st, p)
+        name = st.get("name", f"stage-{i + 1}")
+        if not isinstance(name, str) or not STAGE_NAME.fullmatch(name) or name in names:
+            raise SpecError(f"{p}.name", "should be a unique name of lowercase letters, digits and dashes")
+        wl = _workload(st.get("workload"), f"{p}.workload")
+        if wl["type"] == "batch.join" or wl.get("shuffle") is not None:
+            raise SpecError(f"{p}.workload", "a join or a shuffled group-by runs as a job of its own, not as one of several stages")
+        src = st.get("from", "inputs")
+        if src != "inputs":
+            if src not in names:
+                raise SpecError(f"{p}.from", 'should be "inputs" or the name of an earlier stage')
+            if not writes_records(out[names.index(src)]["workload"]):
+                raise SpecError(f"{p}.from", f"stage {src} doesn't write records for a later stage to read")
+            if wl["type"] == "batch.transform" and wl.get("rolling"):
+                raise SpecError(f"{p}.workload.rolling", "a rolling mean reads only the job's inputs, not an earlier stage's records")
+        names.append(name)
+        out.append({"name": name, "workload": wl, "from": src})
+    return out
 
 
 def loads(text) -> dict:

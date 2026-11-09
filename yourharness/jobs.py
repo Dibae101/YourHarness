@@ -6,10 +6,18 @@
     jobs.aggregate(sales, sum="amount", mean="amount")        # {"count": ..., "sum_amount": ..., ...}
     jobs.group_by(sales, by="region", sum="amount")           # one row per region
     jobs.where("amount", ">", 100)                            # a filter, for any of these
+    jobs.join(sales, jobs.dataset("customers.csv"), on="customer_id", right_on="id")
 
     def score(p):
         return {**p, "score": train_and_evaluate(**p)}
     jobs.map_items(score, grid={"lr": [0.1, 0.01], "depth": [4, 8]}, reducer="best", best_by="score")
+
+    def scale(x, ctx):                                        # ctx: a context snapshot, the same for every call
+        return x * ctx["factor"]
+    jobs.map_items(scale, range(100), context={"factor": 3})
+
+    clf = jobs.model("model.py")                              # predict(model, batch), optionally load(folder)
+    jobs.evaluate(clf, jobs.dataset("labeled.jsonl"), label="label", features=["x", "y"])
 
 Unlike pool.map(), a batch job is saved on the coordinator: partitions that fail or
 lose their computer are retried elsewhere, a coordinator restart doesn't lose it,
@@ -24,7 +32,7 @@ import textwrap
 
 from .client import Client, PoolError, setup_text
 
-__all__ = ["dataset", "model", "aggregate", "group_by", "transform", "map_items", "map_records", "evaluate", "where", "run", "plan",
+__all__ = ["dataset", "model", "aggregate", "group_by", "join", "transform", "map_items", "map_records", "evaluate", "where", "run", "plan",
            "PoolError", "SetupNeeded"]
 API_VERSION = "yourharness.dev/v1alpha1"
 
@@ -162,10 +170,37 @@ def aggregate(ds, *, count: bool = True, sum=None, mean=None, min=None, max=None
     return run(_job(wl, _ref(ds), name, **spec))["values"]
 
 
-def group_by(ds, by, *, count: bool = True, sum=None, mean=None, min=None, max=None, where=None, name=None, **spec):  # noqa: A002
+def group_by(ds, by, *, count: bool = True, sum=None, mean=None, min=None, max=None, where=None, name=None, shuffle=None, **spec):  # noqa: A002
+    """One row per distinct value of `by`. shuffle=True (or a number of buckets) spreads the groups over your
+    computers for very many of them (over about 200,000); the rows then come bucket by bucket."""
     wl = {"type": "batch.groupby", "by": [by] if isinstance(by, str) else list(by),
           "metrics": _metrics(count, sum=sum, mean=mean, min=min, max=max), "where": _wheres(where)}
+    if shuffle:
+        wl["shuffle"] = {} if shuffle is True else {"buckets": int(shuffle)}
+        import json
+
+        raw = run(_job(wl, _ref(ds), name, **spec))
+        return [json.loads(line) for line in raw.decode("utf-8").splitlines() if line]
     return run(_job(wl, _ref(ds), name, **spec))["groups"]
+
+
+def join(left, right, on, *, right_on=None, how: str = "inner", buckets: int | None = None, name=None, **spec) -> list[dict]:
+    """Every record of `left` with each record of `right` whose key fields match (how="left" keeps unmatched left records).
+
+    Keys that read as numbers match as numbers ("7" joins 7). A right field whose name the
+    left record already has comes out as right_<name>. Both datasets are cut into
+    partitions, sorted into buckets by key, and each bucket is joined on one computer.
+    """
+    wl = {"type": "batch.join", "on": [on] if isinstance(on, str) else list(on), "how": how}
+    if right_on is not None:
+        wl["rightOn"] = [right_on] if isinstance(right_on, str) else list(right_on)
+    if buckets:
+        wl["buckets"] = int(buckets)
+    inputs = {**_ref(left), "right": _ref(right)["dataset"]}
+    raw = run(_job(wl, inputs, name or "join", **spec))
+    import json
+
+    return [json.loads(line) for line in raw.decode("utf-8").splitlines() if line]
 
 
 def transform(ds, *, where=None, select=None, rename=None, rolling=None, name=None, **spec) -> list[dict]:
@@ -224,6 +259,8 @@ def _runtime(spec: dict, python: str | None, requirements) -> dict:
 
 def _setup_args(spec: dict) -> tuple[dict, dict]:
     run_opts = {k: spec.pop(k) for k in ("approve_setup", "downloads") if k in spec}
+    if "context" in spec and isinstance(spec["context"], dict) and "values" not in spec["context"]:
+        spec["context"] = {"values": spec["context"]}  # context={...}: the values every call gets as ctx
     return spec, run_opts
 
 

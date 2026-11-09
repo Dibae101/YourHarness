@@ -263,7 +263,8 @@ class GroupByOp:
         ms = self.groups.get(key)
         if ms is None:
             if len(self.groups) >= MAX_GROUPS:
-                raise OpError(f"a partition has more than {MAX_GROUPS:,} distinct groups; use strategy \"shuffle\" for this many")
+                raise OpError(f"a partition has more than {MAX_GROUPS:,} distinct groups; for this many, add \"shuffle\": true to the "
+                              "group-by and use smaller partitions")
             ms = self.groups[key] = [new_metric(m) for m in self.metrics_spec]
         for m in ms:
             m.feed(rec)

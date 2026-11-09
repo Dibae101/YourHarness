@@ -23,23 +23,21 @@ import hmac
 import json
 import logging
 import os
-import random
 import re
 import secrets
+import statistics
 import time
 from pathlib import Path
 
 from ..coordinator.state import CAP_SUBMIT
 from . import spec as jobspec
+from . import stages
 from .db import EngineDB
-from .execute import dump_record, make_op, run_items, writes_records
 from .index import Indexer
-from .local import run_range
 from .ops import halo_records_needed
-from .partition import check_ranges, plan_items, plan_ranges
 from .planner import Planner
 from .records import iter_records
-from .reducer import final_result, merge_states
+from .spec import CODE_WORKLOADS
 from .store import ArtifactStore, StoreError
 
 log = logging.getLogger("yourharness")
@@ -54,6 +52,36 @@ CLASSIFICATIONS = ("owned-private", "shareable")
 FORMATS = ("text", "jsonl", "csv")
 FINISHED = ("done", "failed", "cancelled")
 LIVE_ATTEMPT = ("running", "lost")
+SPECULATE_AFTER_S = float(os.environ.get("HARNESS_SPECULATE_AFTER_S", 10))  # a partition is never duplicated before this
+SPECULATE_FACTOR = 3.0  # ...nor before it has taken this many times its stage's median
+
+
+LOCALITY_WAIT_S = float(os.environ.get("HARNESS_LOCALITY_WAIT_S", 3))  # how long a partition waits for the computer holding its input
+
+
+def local_bytes(inp: dict, device_id: str) -> int:
+    """How much of a partition's input a computer already has: the earlier-stage files it wrote itself."""
+    if inp["kind"] == "artifact":
+        return inp["size"] if inp.get("device") == device_id else 0
+    if inp["kind"] == "buckets":
+        return sum(x["size"] for x in inp["parts"] if x.get("device") == device_id)
+    return 0
+
+
+def data_holder(inp: dict) -> str | None:
+    """The computer that holds most of a partition's input, when one holds at least half of it."""
+    if inp["kind"] == "artifact":
+        return inp.get("device")
+    if inp["kind"] == "buckets":
+        by: dict[str, int] = {}
+        for x in inp["parts"]:
+            if x.get("device"):
+                by[x["device"]] = by.get(x["device"], 0) + x["size"]
+        if by:
+            dev, n = max(by.items(), key=lambda kv: kv[1])
+            if n * 2 >= sum(x["size"] for x in inp["parts"]):
+                return dev
+    return None
 NAME_OK = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
 
 
@@ -89,6 +117,7 @@ class EngineManager:
         self.index_cache: dict[str, list[int]] = {}
         self.refused: dict[tuple[str, str], float] = {}  # (job, device) -> until when
         self.reducing: set[str] = set()
+        self._stage_cache: dict[str, dict] = {}  # stage id -> its row; a stage's spec never changes
         self._bg: set[asyncio.Future] = set()
         self._dirty: set[str] = set()
         self._flush_at = None
@@ -112,6 +141,11 @@ class EngineManager:
             self.db.update("partitions", {"id": p["id"]}, {"lease_until": now + lease})  # time for its computer to reconnect
             self._reserve(job, p["device_id"], p["id"], p["attempt"])
         self.verifier.started(now)
+        for a in self.db.all("SELECT a.*, p.job_id AS job_id FROM attempts a JOIN partitions p ON p.id = a.partition_id "
+                             "WHERE a.purpose = 'speculative' AND a.status = 'running'"):
+            job = self.db.job(a["job_id"])
+            self.db.update("attempts", {"partition_id": a["partition_id"], "n": a["n"]}, {"lease_until": now + 75})
+            self._reserve(job, a["device_id"], a["partition_id"], a["n"])
         for j in self.db.all("SELECT id FROM jobs WHERE status = 'reducing'"):
             self._spawn(self._reduce(j["id"]))
 
@@ -202,7 +236,7 @@ class EngineManager:
         if ds is None:
             raise EngineError("There's no dataset with that id.")
         users = [j for j in self.db.all("SELECT id, spec, status FROM jobs WHERE status NOT IN ('done', 'failed', 'cancelled')")
-                 if j["spec"]["spec"]["inputs"].get("dataset", {}).get("ref") == f"dataset:{ds_id}"]
+                 if f"dataset:{ds_id}" in (j["spec"]["spec"]["inputs"].get("dataset", {}).get("ref"), j["spec"]["spec"]["inputs"].get("right", {}).get("ref"))]
         if users:
             raise EngineError("A job that's still running reads this dataset. Cancel it first.")
         self.db.conn.execute("DELETE FROM datasets WHERE id = ?", (ds_id,))
@@ -297,10 +331,14 @@ class EngineManager:
             ds = self.db.dataset(ref.split(":", 1)[1])
             if ds is None:
                 raise EngineError(f"There's no dataset {ref}.")
-            wl = job["spec"]["workload"]
-            if halo_records_needed(wl) and ds["format"] == "csv" and ds["meta"].get("quoted"):
+            reading = [s["workload"] for s in (job["spec"].get("stages") or [{"workload": job["spec"]["workload"], "from": "inputs"}])
+                       if s["from"] == "inputs"]
+            if any(halo_records_needed(wl) for wl in reading) and ds["format"] == "csv" and ds["meta"].get("quoted"):
                 raise EngineError("This CSV has quoted fields, which may span lines, so a rolling mean can't read across partitions. "
                                   "Convert it to JSON Lines, or remove the rolling mean.")
+        right = job["spec"]["inputs"].get("right")
+        if right and self.db.dataset(right["ref"].split(":", 1)[1]) is None:
+            raise EngineError(f"There's no dataset {right['ref']}.")
         m = job["spec"]["inputs"].get("model")
         if m:
             row = self.db.model(m["ref"].split(":", 1)[1])
@@ -325,40 +363,80 @@ class EngineManager:
         job, ds = self._resolve(body)
         meta = self.dataset_meta(ds) if ds else None
         plan = self.planner.estimate({"spec": job["spec"]}, meta, self.devices())
-        spec = job["spec"]
-        if "items" in spec["inputs"]:
-            n = len(spec["inputs"]["items"])
-            per = plan.get("itemsPerPartition") or spec["partitioning"]["itemsPerPartition"] or max(1, n // 8)
-            parts = [{"kind": "items", "first": i, "count": j - i} for i, j in plan_items(n, per)]
-        else:
-            target = plan.get("targetBytes") or spec["partitioning"]["targetBytes"] or 8 * 2**20
-            ranges = plan_ranges(self.splits(ds), meta["dataStart"], meta["size"], target, spec["partitioning"]["maxPartitions"])
-            need = halo_records_needed(spec["workload"])
-            avg = (meta["size"] - meta["dataStart"]) / max(1, meta.get("lines") or 1)
-            parts = [{"kind": "range", "start": s, "end": e,
-                      "halo": 0 if not need or s <= meta["dataStart"] else int(min(s - meta["dataStart"], need * avg * 3 + 4096))}
-                     for s, e in ranges]
+        plan["stages"] = stages.plan_stages(job)
         job_id = "j" + secrets.token_hex(4)
         now = time.time()
-        stage_id = f"{job_id}-s0"
-        status = "needs_approval" if plan["decision"] == "NEEDS_SETUP_APPROVAL" else "running" if parts else "reducing"
+        status = "needs_approval" if plan["decision"] == "NEEDS_SETUP_APPROVAL" else "running"
         with self.db.tx():
             self.db.insert("jobs", {"id": job_id, "name": job["metadata"]["name"], "spec": job, "status": status,
                                     "decision": plan["decision"], "plan": plan, "note": " ".join(plan.get("reasons", [])[:2]),
-                                    "created_by": by, "created_at": now, "updated_at": now, "started_at": now})
-            self.db.insert("stages", {"id": stage_id, "job_id": job_id, "seq": 0, "name": "map", "kind": "map", "status": "running",
-                                      "depends_on": [], "total": len(parts), "spec": {}})
-            for i, inp in enumerate(parts):
-                self.db.insert("partitions", {"id": f"{job_id}-p{i}", "job_id": job_id, "stage_id": stage_id, "idx": i, "input": inp,
-                                              "status": "ready", "updated_at": now,
-                                              "bytes": inp["end"] - inp["start"] if inp["kind"] == "range" else None})
-            self.db.event(job_id, "created", {"by": by, "partitions": len(parts), "decision": plan["decision"]})
-        log.info("%s started job %s (%s, %d partitions, %s)", by, job["metadata"]["name"], spec["workload"]["type"], len(parts), plan["decision"])
-        if not parts and status == "reducing":
-            self._spawn(self._reduce(job_id))
+                                    "created_by": by, "created_at": now, "updated_at": now, "started_at": now,
+                                    "validation": {"level": "structural", "checks": [], "stages": 0, "spotChecked": 0}})
+            n = self._start_stage(job_id, 0)
+            self.db.event(job_id, "created", {"by": by, "partitions": n, "decision": plan["decision"], "stages": len(plan["stages"])})
+        log.info("%s started job %s (%s, %d partitions, %s)", by, job["metadata"]["name"], job["spec"]["workload"]["type"], n, plan["decision"])
         self._changed(job_id)
         self.dispatch()
         return self.job_view(self.db.job(job_id))
+
+    # ------------------------------------------------------------------ stages
+    def stage_row(self, stage_id: str) -> dict:
+        got = self._stage_cache.get(stage_id)
+        if got is None:
+            got = self._stage_cache[stage_id] = self.db.stage(stage_id)
+        return got
+
+    def current_stage(self, job_id: str) -> dict | None:
+        return self.db.one("SELECT * FROM stages WHERE job_id = ? AND status != 'done' ORDER BY seq LIMIT 1", (job_id,))
+
+    def _start_stage(self, job_id: str, seq: int) -> int:
+        """Create stage seq's partitions (inside the caller's transaction). Returns how many."""
+        job = self.db.job(job_id)
+        plan = job["plan"]
+        st = dict(plan["stages"][seq])
+        doc = job["spec"]
+        if st["from"] == "inputs":
+            parts = stages.first_parts(self, doc, st, plan)
+        else:
+            up = self.db.one("SELECT * FROM stages WHERE job_id = ? AND seq = ?", (job_id, seq - 1))
+            parts = stages.later_parts(self, job_id, st, up)
+        if st["kind"] in ("shuffle-map", "join-map"):
+            st["buckets"] = stages.default_buckets(self, doc, st, len(parts))
+        values = dict((doc["spec"].get("context") or {}).get("values") or {})
+        if doc["spec"].get("stages"):  # a later stage sees every earlier stage's result, published at its barrier
+            done = self.db.all("SELECT name, result FROM stages WHERE job_id = ? AND seq < ? ORDER BY seq", (job_id, seq))
+            if done:
+                values["stages"] = {r["name"]: self._stored_value(r["result"]) for r in done}
+        if values:
+            text = _canon(values)
+            st["context"], st["contextSize"] = self.store.put_bytes(text.encode("utf-8"), "context"), len(text)
+        else:
+            st["context"], st["contextSize"] = None, 0
+        stage_id = f"{job_id}-s{seq}"
+        now = time.time()
+        first = 0 if seq == 0 else (self.db.one("SELECT MAX(idx) AS m FROM partitions WHERE job_id = ?", (job_id,))["m"] or 0) + 1
+        self.db.insert("stages", {"id": stage_id, "job_id": job_id, "seq": seq, "name": st["name"], "kind": st["kind"], "status": "running",
+                                  "depends_on": [f"{job_id}-s{seq - 1}"] if seq else [], "total": len(parts), "spec": st, "started_at": now})
+        for i, inp in enumerate(parts):
+            self.db.insert("partitions", {"id": f"{job_id}-p{first + i}", "job_id": job_id, "stage_id": stage_id, "idx": first + i, "input": inp,
+                                          "status": "ready", "updated_at": now, "bytes": stages.part_bytes(inp)})
+        if seq:
+            self.db.event(job_id, "stage", {"stage": st["name"], "seq": seq, "partitions": len(parts), "context": st["context"]})
+        if not parts and job["status"] != "needs_approval":
+            self._spawn(self._reduce(job_id))
+        return len(parts)
+
+    def _stored_value(self, stored: dict | None):
+        stored = stored or {}
+        if "artifact" in stored:
+            return self.store.read_json(stored["artifact"])
+        return stored.get("value")
+
+    def _store_value(self, value, wl: dict) -> dict:
+        text = _canon(value)
+        if len(text) > INLINE_RESULT:
+            return {"artifact": self.store.put_bytes(text.encode("utf-8"), "result"), "size": len(text), "preview": _preview(wl, value)}
+        return {"value": value}
 
     def cancel_job(self, job_id: str, by: str) -> dict:
         job = self.db.job(job_id)
@@ -378,8 +456,13 @@ class EngineManager:
         with self.db.tx():
             self.db.conn.execute("UPDATE partitions SET status = 'ready', tries = 0, moves = 0, error = NULL, device_id = NULL "
                                  "WHERE job_id = ? AND status IN ('failed', 'cancelled', 'ready', 'leased')", (job_id,))
+            self.db.conn.execute("UPDATE stages SET status = 'running', finished_at = NULL WHERE job_id = ? AND status IN ('failed', 'cancelled')",
+                                 (job_id,))
+            val = {k: v for k, v in (job["validation"] or {}).items() if k != "verify"}
+            if val.get("level") == "failed":
+                val["level"] = "structural"
             self.db.update("jobs", {"id": job_id}, {"status": "running", "error": None, "finished_at": None, "updated_at": time.time(),
-                                                    "note": "Retrying the partitions that didn't finish."})
+                                                    "note": "Retrying the partitions that didn't finish.", "validation": val})
             self.db.event(job_id, "retried")
         if not self.db.counts(job_id).get("ready"):
             self._spawn(self._reduce(job_id))
@@ -403,7 +486,11 @@ class EngineManager:
         for p in self.db.all("SELECT * FROM partitions WHERE job_id = ? AND status = 'leased'", (job_id,)):
             self._cancel_attempt(p, p["attempt"], "cancelled")
         self.verifier.cancel_job(job_id)
+        for a in self.db.all("SELECT a.partition_id, a.n FROM attempts a JOIN partitions p ON p.id = a.partition_id "
+                             "WHERE p.job_id = ? AND a.purpose = 'speculative' AND a.status IN ('running', 'lost')", (job_id,)):
+            self._cancel_attempt(self.db.partition(a["partition_id"]), a["n"], "cancelled")
         with self.db.tx():
+            self.db.conn.execute("UPDATE stages SET status = ? WHERE job_id = ? AND status = 'running'", (status if status != "done" else "running", job_id))
             self.db.conn.execute("UPDATE partitions SET status = 'cancelled' WHERE job_id = ? AND status IN ('ready', 'leased')", (job_id,))
             self.db.update("jobs", {"id": job_id}, {"status": status, "error": error, "finished_at": time.time(), "updated_at": time.time()})
             self.db.event(job_id, "status", {"status": status, "error": error})
@@ -424,6 +511,7 @@ class EngineManager:
         if not any(v > 0 for v in free.values()):
             return
         now = time.time()
+        online = {d.id for d in devices}
         jobs: dict[str, tuple] = {}
         rows = self.db.all("SELECT p.* FROM partitions p JOIN jobs j ON j.id = p.job_id WHERE p.status = 'ready' AND j.status = 'running' "
                            "ORDER BY j.created_at, p.idx LIMIT 5000")
@@ -451,14 +539,95 @@ class EngineManager:
                     continue
                 if not self.s.resources.fits(d, "engine", cpu=spec["resources"]["cpuSlots"], mem_gb=spec["resources"]["minFreeMemoryGiB"]):
                     continue
-                score = (0 if d.coordinator else 1, inflight.get(d.id, 0), (d.load or {}).get("cpu") or 0.0, d.name)
+                # the computer that already holds the input (it wrote it) first, then the coordinator's own, then the least busy
+                score = (-local_bytes(p["input"], d.id), 0 if d.coordinator else 1, inflight.get(d.id, 0), (d.load or {}).get("cpu") or 0.0, d.name)
                 if best_score is None or score < best_score:
                     best, best_score = d, score
             if best is not None:
+                holder = data_holder(p["input"])
+                if holder and holder != best.id and holder in online and now - (p["updated_at"] or now) < LOCALITY_WAIT_S:
+                    continue  # its input is on another computer that's busy right now: wait a moment for it rather than copy the data
                 self._assign(job, meta, p, best)
                 free[best.id] -= 1
                 inflight[best.id] = inflight.get(best.id, 0) + 1
         self.verifier.dispatch(devices, free)
+        if any(v > 0 for v in free.values()):
+            self._speculate(devices, free, now)
+
+    # ------------------------------------------------------------------ stragglers
+    def _speculate(self, devices: list, free: dict, now: float) -> None:
+        """A partition that runs far longer than its stage's others may also run on a free computer; the first result wins.
+
+        Only for work without side effects (the engine's operators, ml.evaluate, python.map
+        with sideEffects "none"), at most a tenth of a stage's partitions at once, and only
+        once most of the stage is done, so a duplicate doesn't take a computer that has
+        first-time work to do.
+        """
+        for job in self.db.all("SELECT * FROM jobs WHERE status = 'running'"):
+            spec = job["spec"]["spec"]
+            if not spec["retry"].get("speculate", True):
+                continue
+            stage = self.current_stage(job["id"])
+            if stage is None:
+                continue
+            wl = stage["spec"]["workload"]
+            if wl["type"] == "python.map" and wl.get("sideEffects") != "none":
+                continue
+            if self.db.one("SELECT id FROM partitions WHERE stage_id = ? AND status = 'ready' LIMIT 1", (stage["id"],)):
+                continue  # first-time work is still waiting
+            took = [r["t"] for r in self.db.all("SELECT a.ended_at - a.started_at AS t FROM attempts a JOIN partitions p ON p.id = a.partition_id "
+                                                "WHERE p.stage_id = ? AND p.status = 'done' AND a.n = p.accepted_attempt", (stage["id"],)) if r["t"] is not None]
+            total = stage["total"] or 0
+            if len(took) < max(3, total // 2):
+                continue
+            limit = max(SPECULATE_AFTER_S, SPECULATE_FACTOR * statistics.median(took))
+            live = self.db.one("SELECT COUNT(*) AS n FROM attempts a JOIN partitions p ON p.id = a.partition_id WHERE p.stage_id = ? "
+                               "AND a.purpose = 'speculative' AND a.status = 'running'", (stage["id"],))["n"]
+            cap = max(1, total // 10)
+            meta = None
+            ref = spec["inputs"].get("dataset", {}).get("ref")
+            if ref:
+                ds = self.db.dataset(ref.split(":", 1)[1])
+                meta = self.dataset_meta(ds) if ds else None
+            for p in self.db.all("SELECT * FROM partitions WHERE stage_id = ? AND status = 'leased' ORDER BY started_at", (stage["id"],)):
+                if live >= cap:
+                    break
+                a = self.db.attempt(p["id"], p["attempt"])
+                if a is None or a["status"] != "running" or now - (a["started_at"] or now) < limit:
+                    continue
+                if self.db.one("SELECT n FROM attempts WHERE partition_id = ? AND purpose = 'speculative' AND status IN ('running', 'lost')", (p["id"],)):
+                    continue
+                best = None
+                for d in devices:
+                    if d.id == a["device_id"] or free.get(d.id, 0) <= 0 or self.refused.get((job["id"], d.id), 0) > now:
+                        continue
+                    if self.planner.eligible(job["spec"] | {"plan": {}}, meta, d):
+                        continue
+                    if not self.s.resources.fits(d, "engine", cpu=spec["resources"]["cpuSlots"], mem_gb=spec["resources"]["minFreeMemoryGiB"]):
+                        continue
+                    if best is None or (0 if d.coordinator else 1, d.name) < (0 if best.coordinator else 1, best.name):
+                        best = d
+                if best is None:
+                    continue
+                self._assign_speculative(job, meta, p, best, now - (a["started_at"] or now), limit)
+                free[best.id] -= 1
+                live += 1
+
+    def _assign_speculative(self, job: dict, meta: dict | None, p: dict, d, ran: float, limit: float) -> None:
+        spec = job["spec"]["spec"]
+        n = self.next_attempt(p["id"])
+        secret = secrets.token_urlsafe(24)
+        now = time.time()
+        with self.db.tx():
+            self.db.insert("attempts", {"partition_id": p["id"], "n": n, "device_id": d.id, "device_name": d.name, "purpose": "speculative",
+                                        "token_hash": _hash(secret), "status": "running", "started_at": now, "outputs": {},
+                                        "lease_until": now + spec["retry"]["leaseSeconds"]})
+            self.db.event(job["id"], "speculative", {"attempt": n, "device": d.name, "slowDevice": p["device_name"], "ranSeconds": round(ran, 1),
+                                                     "limitSeconds": round(limit, 1)}, p["id"], d.id)
+        self._reserve(job, d.id, p["id"], n)
+        d.send({"type": "eng.start", "job": job["id"], "partition": p["id"], "attempt": n, "token": f"{p['id']}.{n}.{secret}",
+                "timeout": spec["retry"]["timeoutSeconds"], "task": self.task_for(job, meta, p, d)})
+        self._changed(job["id"])
 
     def _reserve(self, job, device_id, pid, n) -> None:
         if job is None or not device_id:
@@ -466,9 +635,13 @@ class EngineManager:
         res = job["spec"]["spec"]["resources"]
         self.s.resources.reserve(device_id, f"eng:{pid}:{n}", "engine", cpu=res["cpuSlots"], mem_gb=res["minFreeMemoryGiB"])
 
+    def next_attempt(self, pid: str) -> int:
+        row = self.db.one("SELECT MAX(n) AS n FROM attempts WHERE partition_id = ?", (pid,))
+        return int((row or {}).get("n") or 0) + 1
+
     def _assign(self, job: dict, meta: dict | None, p: dict, d) -> None:
         spec = job["spec"]["spec"]
-        n = (p["attempt"] or 0) + 1
+        n = self.next_attempt(p["id"])
         secret = secrets.token_urlsafe(24)
         now = time.time()
         with self.db.tx():
@@ -486,20 +659,47 @@ class EngineManager:
     def task_for(self, job: dict, meta: dict | None, p: dict, d, resume: bool = True) -> dict:
         """What a computer needs to run partition p: everything but its input bytes, which it streams."""
         spec = job["spec"]["spec"]
+        st = self.stage_row(p["stage_id"])["spec"]
+        wl = st["workload"]
+        runtime = stages.runtime_for(spec, wl)
         inp = dict(p["input"])
         if inp["kind"] == "items":
             inp["items"] = spec["inputs"]["items"][inp["first"]:inp["first"] + inp["count"]]
-        task = {"workload": spec["workload"], "input": inp, "onBadRecord": spec["output"]["onBadRecord"],
+        task = {"workload": wl, "stage": st["kind"], "input": inp, "onBadRecord": spec["output"]["onBadRecord"],
                 "checkpoint": p["checkpoint"] if resume else None, "checkpointEvery": spec["retry"]["checkpointIntervalSeconds"],
-                "ctx": {}, "runtime": spec["runtime"], "maxOutputBytes": MAX_OUTPUT}
-        if meta is not None:
+                "ctx": {}, "runtime": runtime, "maxOutputBytes": MAX_OUTPUT}
+        if inp["kind"] == "artifact":
+            task.update(format="jsonl", header=None, dataStart=0)
+        elif inp["kind"] == "range":
+            if inp.get("ds"):
+                meta = self.dataset_meta(self.db.dataset(inp["ds"]))
             task.update(format=meta["format"], header=meta.get("header"), dataStart=meta["dataStart"])
-        if spec["runtime"]["kind"] == "managed-python" and self.runtimes is not None:
+        if st.get("buckets"):
+            task["buckets"] = st["buckets"]
+        if inp.get("side"):
+            task["side"] = inp["side"]
+        if st.get("context") and wl["type"] in CODE_WORKLOADS:  # the stage's snapshot; the engine's operators don't read it
+            if st["contextSize"] <= INLINE_RESULT:
+                task["ctx"] = self.store.read_json(st["context"])
+            else:
+                task["ctxRef"] = {"sha": st["context"], "size": st["contextSize"]}
+        if runtime["kind"] == "managed-python" and self.runtimes is not None:
             task["env"] = self.runtimes.env_for(job, d)
-        model = self.job_model(job)
+        model = self.job_model(job) if wl["type"] == "ml.evaluate" else None
         if model is not None:
             task["model"] = {"sha": model["sha"], "size": model["size"], "adapter": model["adapter"], "format": model["format"]}
         return task
+
+    def stage_context(self, p: dict) -> tuple[str, int] | None:
+        st = self.stage_row(p["stage_id"])["spec"]
+        return (st["context"], st["contextSize"]) if st.get("context") else None
+
+    def part_input(self, p: dict, i: int) -> tuple[str, int]:
+        """The i-th file a bucket partition reads."""
+        parts = p["input"].get("parts") or []
+        if not 0 <= i < len(parts):
+            raise EngineError("This partition has no such input.")
+        return parts[i]["sha"], parts[i]["size"]
 
     @staticmethod
     def hash_secret(secret: str) -> str:
@@ -523,6 +723,11 @@ class EngineManager:
         for p in self.db.all("SELECT * FROM partitions WHERE status = 'leased' AND device_id = ?", (d.id,)):
             if (p["id"], p["attempt"]) not in reported:
                 self._lose(p, f"{d.name} came back without it (it may have restarted).")
+        for a in self.db.all("SELECT * FROM attempts WHERE purpose = 'speculative' AND status = 'running' AND device_id = ?", (d.id,)):
+            if (a["partition_id"], a["n"]) not in reported:
+                self.db.update("attempts", {"partition_id": a["partition_id"], "n": a["n"]},
+                               {"status": "lost", "error": f"{d.name} came back without it.", "ended_at": time.time()})
+                self.s.resources.release(f"eng:{a['partition_id']}:{a['n']}")
         for pid, n in reported:
             p = self.db.partition(pid)
             a = self.db.attempt(pid, n) if p else None
@@ -543,6 +748,14 @@ class EngineManager:
         if a is not None and a["status"] == "running":
             self.db.update("attempts", {"partition_id": p["id"], "n": p["attempt"]}, {"status": "lost", "error": why, "ended_at": time.time()})
         self.s.resources.release(f"eng:{p['id']}:{p['attempt']}")
+        dup = self.db.one("SELECT * FROM attempts WHERE partition_id = ? AND purpose = 'speculative' AND status = 'running'", (p["id"],))
+        if dup is not None:  # the duplicate already running elsewhere carries on as the partition's attempt
+            self.db.update("attempts", {"partition_id": p["id"], "n": dup["n"]}, {"purpose": "run"})
+            self.db.update("partitions", {"id": p["id"]}, {"attempt": dup["n"], "device_id": dup["device_id"], "device_name": dup["device_name"],
+                                                          "lease_until": dup["lease_until"] or time.time() + 45, "updated_at": time.time()})
+            self.db.event(p["job_id"], "lost", {"attempt": p["attempt"], "why": why, "continuedBy": dup["device_name"]}, p["id"], p["device_id"])
+            self._changed(p["job_id"])
+            return
         moves = (p["moves"] or 0) + 1
         self.db.update("partitions", {"id": p["id"]}, {"status": "ready", "moves": moves, "lease_until": None, "updated_at": time.time()})
         self.db.event(p["job_id"], "lost", {"attempt": p["attempt"], "why": why}, p["id"], p["device_id"])
@@ -557,9 +770,13 @@ class EngineManager:
         self._last_sweep = now
         for p in self.db.all("SELECT * FROM partitions WHERE status = 'leased' AND lease_until < ?", (now,)):
             self._lose(p, f"{p['device_name']} stopped reporting progress.")
-        for row in self.db.all("SELECT a.*, j.spec AS jspec, p.job_id AS job_id FROM attempts a JOIN partitions p ON p.id = a.partition_id "
+        for a in self.db.all("SELECT * FROM attempts WHERE purpose = 'speculative' AND status = 'running' AND lease_until < ?", (now,)):
+            self.db.update("attempts", {"partition_id": a["partition_id"], "n": a["n"]},
+                           {"status": "lost", "error": f"{a['device_name']} stopped reporting progress.", "ended_at": now})
+            self.s.resources.release(f"eng:{a['partition_id']}:{a['n']}")
+        for row in self.db.all("SELECT a.*, j.spec AS spec, p.job_id AS job_id FROM attempts a JOIN partitions p ON p.id = a.partition_id "
                                "JOIN jobs j ON j.id = p.job_id WHERE a.status = 'running' AND p.status = 'leased' AND p.attempt = a.n"):
-            limit = row["jspec"]["spec"]["retry"]["timeoutSeconds"]
+            limit = row["spec"]["spec"]["retry"]["timeoutSeconds"]  # "spec" is a JSON column, so it arrives decoded
             if now - (row["started_at"] or now) > limit:
                 p = self.db.partition(row["partition_id"])
                 self._cancel_attempt(p, row["n"], "failed")
@@ -588,6 +805,9 @@ class EngineManager:
         if a.get("purpose") == "verify":
             self.verifier.handle(p, a, d, msg)
             return
+        if a.get("purpose") == "speculative" and kind != "eng.done":
+            self._speculative_message(p, a, d, msg)
+            return
         current = p["status"] == "leased" and p["attempt"] == n
         if kind == "eng.progress":
             if not current:
@@ -615,6 +835,20 @@ class EngineManager:
                 self.dispatch()
         elif kind == "eng.done":
             self._on_done(p, a, d, msg)
+
+    def _speculative_message(self, p: dict, a: dict, d, msg: dict) -> None:
+        kind = msg.get("type")
+        if p["status"] == "done" or a["status"] != "running":
+            if kind == "eng.progress":
+                d.send({"type": "eng.cancel", "partition": p["id"], "attempt": a["n"]})
+            return
+        if kind == "eng.progress":
+            job = self.db.job(p["job_id"])
+            self.db.update("attempts", {"partition_id": p["id"], "n": a["n"]},
+                           {"lease_until": time.time() + job["spec"]["spec"]["retry"]["leaseSeconds"]})
+        elif kind == "eng.refuse":
+            self.refused[(p["job_id"], d.id)] = time.time() + 60
+            self._cancel_attempt(p, a["n"], "failed")
 
     def _on_done(self, p: dict, a: dict, d, msg: dict) -> None:
         if p["status"] == "done" or a["status"] not in LIVE_ATTEMPT:
@@ -660,8 +894,17 @@ class EngineManager:
                 return "its state was never uploaded"
         elif not isinstance(state, dict):
             return "it has no result state"
-        if writes_records(job["spec"]["spec"]["workload"]) and "part.jsonl" not in outputs:
+        st = self.stage_row(p["stage_id"])["spec"]
+        if stages.stage_writes(st) and "part.jsonl" not in outputs:
             return "the records it wrote are missing"
+        if st["kind"] == "shuffle-map" and isinstance(state, dict):
+            files = [n for n in outputs if n.startswith("g")]
+            if len(files) != int(state.get("files", -1)) or any(not re.fullmatch(r"g\d{1,4}\.json", n) for n in files):
+                return "its bucket files don't match what it reported"
+            if any(int(n[1:-5]) >= st["buckets"] for n in files):
+                return "it wrote a bucket that doesn't exist"
+        if st["kind"] == "join-map" and any(not re.fullmatch(r"b\d{1,4}\.jsonl", n) or int(n[1:-6]) >= st["buckets"] for n in outputs if n != "state.json"):
+            return "it wrote a bucket that doesn't exist"
         return None
 
     def check_result(self, job: dict, p: dict, a: dict, msg: dict) -> str | None:
@@ -693,11 +936,11 @@ class EngineManager:
                     metrics[k] = extra[k]
             self.db.update("attempts", {"partition_id": p["id"], "n": a["n"]}, {"status": "done", "ended_at": now, "metrics": metrics})
             self.db.conn.execute("UPDATE stages SET done = done + 1 WHERE id = ?", (p["stage_id"],))
-            wl_type = job["spec"]["spec"]["workload"]["type"]
-            units = p["input"]["count"] if p["input"]["kind"] == "items" else p["input"]["end"] - p["input"]["start"]
+            st = self.stage_row(p["stage_id"])["spec"]
+            units = p["input"]["count"] if p["input"]["kind"] == "items" else stages.part_bytes(p["input"])
             secs = msg.get("seconds")
-            if isinstance(secs, (int, float)) and secs > 0:
-                self.db.insert("perf", {"device_id": d.id, "workload": wl_type + (":items" if p["input"]["kind"] == "items" else ""),
+            if isinstance(secs, (int, float)) and secs > 0 and st["kind"] == "map" and st["from"] == "inputs":  # what the planner estimates from
+                self.db.insert("perf", {"device_id": d.id, "workload": st["workload"]["type"] + (":items" if p["input"]["kind"] == "items" else ""),
                                         "units": units, "seconds": float(secs), "ts": now})
             self.db.event(job["id"], "done", {"attempt": a["n"], "device": d.name, "records": out["records"], "seconds": secs}, p["id"], d.id)
         self.s.resources.release(f"eng:{p['id']}:{a['n']}")
@@ -733,110 +976,99 @@ class EngineManager:
             job = self.db.job(job_id)
             if job is None or job["status"] in FINISHED:
                 return
-            self.db.update("jobs", {"id": job_id}, {"status": "reducing", "note": "Combining the results…", "updated_at": time.time()})
+            stage = self.current_stage(job_id)
+            if stage is None:
+                return
+            total = len(job["plan"]["stages"])
+            note = "Combining the results…" if stage["seq"] == total - 1 else f"Finishing stage {stage['seq'] + 1} of {total} ({stage['name']})…"
+            self.db.update("jobs", {"id": job_id}, {"status": "reducing", "note": note, "updated_at": time.time()})
             self._changed(job_id)
-            parts = self.db.all("SELECT * FROM partitions WHERE job_id = ? ORDER BY idx", (job_id,))
-            spec = job["spec"]["spec"]
-            wl = spec["workload"]
+            parts = self.db.all("SELECT * FROM partitions WHERE stage_id = ? ORDER BY idx", (stage["id"],))
+            first = None
+            if stage["seq"] > 0 and stage["kind"] in ("shuffle-reduce", "join-reduce"):
+                first = self._stored_value(self.db.one("SELECT result FROM stages WHERE job_id = ? AND seq = 0", (job_id,))["result"])
             loop = asyncio.get_running_loop()
             try:
-                result, outputs, validation = await loop.run_in_executor(None, self._combine, job, parts)
+                result, outputs, validation = await loop.run_in_executor(None, stages.combine, self, job, stage, parts, first)
             except Exception as e:  # a bug or a corrupted state: the job fails with the reason
                 log.exception("combining job %s failed", job_id)
                 self._stop_job(job_id, "failed", f"The results couldn't be combined: {e}")
                 return
             if validation.get("failed"):
                 self._stop_job(job_id, "failed", validation["failed"])
-                self.db.update("jobs", {"id": job_id}, {"validation": validation})
+                self.db.update("jobs", {"id": job_id}, {"validation": {**(job["validation"] or {}), "level": "failed",
+                                                                      "checks": (job["validation"] or {}).get("checks", []) + validation["checks"]}})
                 return
-            stored = {"value": result}
-            text = _canon(result)
-            if len(text) > INLINE_RESULT:
-                stored = {"artifact": self.store.put_bytes(text.encode("utf-8"), "result"), "size": len(text),
-                          "preview": _preview(wl, result)}
-            now = time.time()
             sample = validation.pop("verifySample", None)
-            if sample:  # your own code: checked by running partitions again on other computers before it's published
-                self.db.update("jobs", {"id": job_id}, {"result": stored, "outputs": outputs, "updated_at": now})
+            pending = {"result": self._store_value(result, stage["spec"]["workload"]), "outputs": outputs, "validation": validation}
+            self.db.update("stages", {"id": stage["id"]}, {"result": pending})
+            if sample:  # your own code: checked by running partitions again on other computers before it's used
                 self.verifier.begin(job_id, sample, validation)
                 return
-            self.db.update("jobs", {"id": job_id}, {"status": "done", "result": stored, "outputs": outputs, "validation": validation,
-                                                    "finished_at": now, "updated_at": now, "note": "", "error": None})
-            self.db.event(job_id, "status", {"status": "done"})
-            log.info("Job %s done in %.1f s", job["name"], now - (job["started_at"] or now))
-            self._changed(job_id)
+            self._stage_complete(job_id)
         finally:
             self.reducing.discard(job_id)
 
-    def _combine(self, job: dict, parts: list[dict]) -> tuple[dict, dict | None, dict]:
-        """Runs in a thread: merge the states, check them, and say how much was checked."""
-        spec = job["spec"]["spec"]
-        wl = spec["workload"]
-        checks = []
-        if parts and parts[0]["input"]["kind"] == "range":
-            ds = self.db.dataset(spec["inputs"]["dataset"]["ref"].split(":", 1)[1])
-            meta = self.dataset_meta(ds)
-            check_ranges([(p["input"]["start"], p["input"]["end"]) for p in parts], meta["dataStart"], meta["size"])
-            checks.append(f"Every byte of the input belongs to exactly one of the {len(parts)} partitions, and each was accepted once.")
-        else:
-            ds, meta = None, None
-            covered = sum(p["input"]["count"] for p in parts)
-            if "items" in spec["inputs"] and covered != len(spec["inputs"]["items"]):
-                raise ValueError("the partitions don't cover every item")
-            checks.append(f"Every item belongs to exactly one of the {len(parts)} partitions, and each was accepted once.")
-        states = [self._state_of(p) for p in parts]
-        merged = merge_states(wl, states)
-        result = final_result(wl, merged)
-        skipped = sum(int(p["output"].get("skipped") or 0) for p in parts)
-        if skipped:
-            result["badRecordsSkipped"] = skipped
-        if wl["type"] == "ml.evaluate":
-            result["provenance"] = self.provenance(job)
-            result["latency"] = self._latency(parts)
-        outputs = None
-        if writes_records(wl):
-            pieces = [{"idx": p["idx"], **p["output"]["outputs"]["part.jsonl"]} for p in parts]
-            for piece in pieces:
-                if not self.store.has(piece["sha"]):
-                    raise ValueError(f"the records of partition {piece['idx'] + 1} are missing from storage")
-            outputs = {"parts": pieces, "bytes": sum(x["size"] for x in pieces), "records": sum(int(x.get("records") or 0) for x in pieces)}
-            checks.append("Every partition's records were stored under the digest its computer reported.")
-        validation = {"level": "structural", "checks": checks}
-        n = min(spec["output"]["spotCheck"], len(parts))
-        if n:
-            rng = random.Random(job["id"])
-            sample = sorted(rng.sample(range(len(parts)), n))
-            if spec["runtime"]["kind"] != "builtin":  # your own code never runs in the coordinator: verify.py re-runs it elsewhere
-                return result, outputs, {**validation, "verifySample": [parts[i]["id"] for i in sample]}
-            for i in sample:
-                p = parts[i]
-                ref_state, ref_out = self._recompute(job, meta, p)
-                if _canon(ref_state) != _canon(states[i]):
-                    return result, outputs, {**validation, "failed": f"Spot check failed: partition {i + 1}, computed on {p['device_name']}, "
-                                                                     "doesn't match the coordinator's own result. Nothing was published."}
-                if outputs is not None:
-                    digest = hashlib.sha256("".join(dump_record(r) for r in ref_out).encode("utf-8")).hexdigest()
-                    if digest != outputs["parts"][i]["sha"]:
-                        return result, outputs, {**validation, "failed": f"Spot check failed: the records of partition {i + 1}, written on "
-                                                                         f"{p['device_name']}, differ from the coordinator's. Nothing was published."}
-            validation = {"level": "spot-checked", "checks": checks + [f"{n} of {len(parts)} partitions were computed again on the coordinator and matched exactly."]}
-        return result, outputs, validation
+    def verified(self, job_id: str, line: str) -> None:
+        """The verifier re-ran the stage's sampled partitions elsewhere and they matched."""
+        self._stage_complete(job_id, line)
+
+    def _stage_complete(self, job_id: str, verified: str | None = None) -> None:
+        """The current stage's result is checked: start the next stage, or publish the job's result."""
+        job = self.db.job(job_id)
+        stage = self.current_stage(job_id)
+        if job is None or stage is None or job["status"] in FINISHED:
+            return
+        pending = stage["result"] or {}
+        val = pending.get("validation") or {"level": "structural", "checks": []}
+        if verified:
+            val = {"level": "spot-checked", "checks": val["checks"] + [verified]}
+        jv = {k: v for k, v in (job["validation"] or {}).items() if k != "verify"}
+        total = len(job["plan"]["stages"])
+        prefix = f"Stage {stage['seq'] + 1} ({stage['name']}): " if total > 1 else ""
+        done_stages = int(jv.get("stages", 0)) + 1
+        spot = int(jv.get("spotChecked", 0)) + (val["level"] == "spot-checked")
+        new_val = {"level": "spot-checked" if spot == done_stages else "structural", "checks": jv.get("checks", []) + [prefix + c for c in val["checks"]],
+                   "stages": done_stages, "spotChecked": spot}
+        now = time.time()
+        with self.db.tx():
+            self.db.update("stages", {"id": stage["id"]}, {"status": "done", "finished_at": now, "result": pending.get("result")})
+            if stage["seq"] + 1 < total:
+                nxt = job["plan"]["stages"][stage["seq"] + 1]
+                self.db.update("jobs", {"id": job_id}, {"status": "running", "validation": new_val, "updated_at": now,
+                                                        "note": f"Stage {stage['seq'] + 2} of {total}: {nxt['name']}."})
+                self._start_stage(job_id, stage["seq"] + 1)
+            else:
+                self.db.update("jobs", {"id": job_id}, {"status": "done", "result": pending.get("result"), "outputs": pending.get("outputs"),
+                                                        "validation": new_val, "finished_at": now, "updated_at": now, "note": "", "error": None})
+                self.db.event(job_id, "status", {"status": "done"})
+        self._stage_cache.pop(stage["id"], None)
+        if stage["seq"] + 1 >= total:
+            log.info("Job %s done in %.1f s", job["name"], now - (job["started_at"] or now))
+        self._changed(job_id)
+        self.dispatch()
 
     def provenance(self, job: dict) -> dict:
         """Exactly what a result came from: the job, its data, its model and code, and the Python it ran in."""
         spec = job["spec"]["spec"]
         out: dict = {"job": hashlib.sha256(_canon(job["spec"]).encode("utf-8")).hexdigest()}
-        ref = spec["inputs"].get("dataset", {}).get("ref")
-        if ref:
-            ds = self.db.dataset(ref.split(":", 1)[1])
-            out["dataset"] = {"ref": ref, "name": ds["name"] if ds else None, "sha256": ds["sha"] if ds else None, "size": ds["size"] if ds else None}
+        for key, name in (("dataset", "dataset"), ("right", "right")):
+            ref = spec["inputs"].get(key, {}).get("ref")
+            if ref:
+                ds = self.db.dataset(ref.split(":", 1)[1])
+                out[name] = {"ref": ref, "name": ds["name"] if ds else None, "sha256": ds["sha"] if ds else None, "size": ds["size"] if ds else None}
         m = spec["inputs"].get("model")
         if m:
             row = self.db.model(m["ref"].split(":", 1)[1])
             out["model"] = {"ref": m["ref"], "name": row["name"] if row else None, "sha256": m["sha256"], "adapter": row["adapter"] if row else None}
-        code = spec["workload"].get("code")
-        if code:
-            out["code"] = {"sha256": hashlib.sha256(code.encode("utf-8")).hexdigest()}
+        codes = [st["workload"]["code"] for st in (spec.get("stages") or [{"workload": spec["workload"]}]) if st["workload"].get("code")]
+        if codes:
+            out["code"] = {"sha256": hashlib.sha256("\n".join(codes).encode("utf-8")).hexdigest()}
+        if spec.get("context"):
+            out["context"] = {"version": spec["context"]["version"]}
+        ctx = [r["spec"].get("context") for r in self.db.stages(job["id"]) if (r["spec"] or {}).get("context")]
+        if ctx:
+            out["stageContexts"] = ctx  # the snapshot each stage read, by SHA-256
         rt = spec["runtime"]
         if rt["kind"] == "managed-python":
             out["environment"] = {"kind": rt["kind"], "id": self.runtimes.fp(job["spec"]), "python": rt["python"], "requirements": rt["requirements"]}
@@ -844,7 +1076,7 @@ class EngineManager:
             out["environment"] = {"kind": rt["kind"]}
         return out
 
-    def _latency(self, parts: list[dict]) -> dict:
+    def latency(self, parts: list[dict]) -> dict:
         secs, calls, samples = 0.0, 0, 0
         for p in parts:
             a = self.db.attempt(p["id"], p["accepted_attempt"]) if p["accepted_attempt"] else None
@@ -854,15 +1086,6 @@ class EngineManager:
             samples += int(p["records"] or 0)
         return {"predictSeconds": round(secs, 3), "batches": calls, "msPerRecord": round(secs * 1000 / samples, 4) if samples else None,
                 "note": "Measured on each computer while it predicted; timing isn't part of the checked result."}
-
-    def _recompute(self, job: dict, meta: dict | None, p: dict) -> tuple[dict, list]:
-        inp = p["input"]
-        if inp["kind"] == "items":
-            out: list = []
-            op = make_op(job["spec"]["spec"]["workload"], {}, out.append)
-            run_items(op, job["spec"]["spec"]["inputs"]["items"][inp["first"]:inp["first"] + inp["count"]], inp["first"])
-            return op.state(), out
-        return run_range(job["spec"], meta, self.store.path(meta["sha"]), inp["start"], inp["end"], halo_bytes=inp.get("halo") or None)
 
     # ------------------------------------------------------------------ files for a computer working on a partition
     def attempt_for_token(self, token: str | None, pid: str, n: int, writing: bool = False) -> tuple[dict, dict] | None:
@@ -887,9 +1110,12 @@ class EngineManager:
         return model["sha"], model["size"]
 
     def input_range(self, p: dict, halo: bool, from_offset: int | None) -> tuple[str, int, int]:
-        job = self.db.job(p["job_id"])
-        ds = self.db.dataset(job["spec"]["spec"]["inputs"]["dataset"]["ref"].split(":", 1)[1])
         inp = p["input"]
+        if inp["kind"] == "artifact":  # an earlier stage's records
+            start = 0 if from_offset is None else min(max(0, from_offset), inp["size"])
+            return inp["sha"], start, inp["size"]
+        job = self.db.job(p["job_id"])
+        ds = self.db.dataset(inp.get("ds") or job["spec"]["spec"]["inputs"]["dataset"]["ref"].split(":", 1)[1])
         if halo:
             return ds["sha"], max(ds["meta"]["dataStart"], inp["start"] - inp["halo"]), inp["start"]
         start = inp["start"] if from_offset is None else min(max(inp["start"], from_offset), inp["end"])
@@ -936,6 +1162,13 @@ class EngineManager:
             keep.add(ds["meta"].get("indexSha"))
         for m in self.db.all("SELECT sha FROM models"):
             keep.add(m["sha"])
+        for st in self.db.all("SELECT spec, result FROM stages"):
+            if (st["spec"] or {}).get("context"):
+                keep.add(st["spec"]["context"])
+            r = st["result"] or {}
+            for stored in (r, r.get("result") or {}):
+                if isinstance(stored, dict) and stored.get("artifact"):
+                    keep.add(stored["artifact"])
         for j in self.db.all("SELECT result, outputs FROM jobs"):
             if j["result"] and j["result"].get("artifact"):
                 keep.add(j["result"]["artifact"])
@@ -979,6 +1212,12 @@ class EngineManager:
             "runtime": spec["runtime"], "setup": self.runtimes.view(job),
             "setupPlan": (job["plan"] or {}).get("setup") if job["status"] == "needs_approval" else None,
         }
+        plan_stages = (job["plan"] or {}).get("stages") or []
+        if len(plan_stages) > 1:
+            rows = {r["seq"]: r for r in self.db.stages(job["id"])}
+            view["stages"] = [{"name": s["name"], "kind": s["kind"], "status": rows[i]["status"] if i in rows else "waiting",
+                               "total": rows[i]["total"] if i in rows else None, "done": rows[i]["done"] if i in rows else 0}
+                              for i, s in enumerate(plan_stages)]
         if full:
             view["spec"] = job["spec"]
             view["provenance"] = self.provenance(job)

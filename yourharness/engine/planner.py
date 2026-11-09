@@ -19,7 +19,8 @@ import os
 from .partition import target_bytes
 
 # Bytes per second one worker slot gets through, before any history exists.
-DEFAULT_RATE = {"batch.aggregate": 25e6, "batch.groupby": 15e6, "batch.transform": 12e6, "python.map": 4e6, "ml.evaluate": 2e6}
+DEFAULT_RATE = {"batch.aggregate": 25e6, "batch.groupby": 15e6, "batch.transform": 12e6, "python.map": 4e6, "ml.evaluate": 2e6,
+                "batch.join": 8e6}
 DEFAULT_ITEMS_PER_S = 20.0  # python.map over items: calls per second per slot
 NETWORK_BPS = float(os.environ.get("HARNESS_NETWORK_BPS", 25e6))  # what the coordinator can send to other computers
 PART_OVERHEAD_S = 0.4  # starting a worker process and fetching its input
@@ -52,8 +53,9 @@ class Planner:
             return "runs a YourHarness without the job engine" if d.kind == "agent" else "is a browser tab, which doesn't run batch jobs yet"
         if not d.sharing or not info.get("slots"):
             return "isn't sharing its processor"
-        if wl["type"] not in info.get("ops", []):
-            return f"can't run {wl['type']}"
+        for t in dict.fromkeys(s["workload"]["type"] for s in (spec.get("stages") or [{"workload": wl}])):
+            if t not in info.get("ops", []):
+                return f"can't run {t} (it runs an older YourHarness)"
         if ds is not None and ds["format"] not in info.get("formats", []):
             return f"can't read {ds['format']} files"
         if not d.owned:
@@ -61,6 +63,11 @@ class Planner:
                 return "is a friend's computer, and this job runs on your own computers only"
             if ds is not None and ds.get("classification") != "shareable":
                 return "is a friend's computer, and the dataset isn't marked shareable"
+            right = spec["inputs"].get("right")
+            if right:
+                r = self.m.db.dataset(right["ref"].split(":", 1)[1])
+                if r is None or r["classification"] != "shareable":
+                    return "is a friend's computer, and the dataset to join with isn't marked shareable"
             if runtime["kind"] != "builtin":
                 return "is a friend's computer, and your own code runs only on your own computers"
         if runtime["kind"] not in info.get("runtimes", []):
@@ -89,6 +96,10 @@ class Planner:
         wl = spec["workload"]
         items = "items" in spec["inputs"]
         units = len(spec["inputs"]["items"]) if items else max(0, ds["size"] - ds["dataStart"])
+        right = spec["inputs"].get("right")
+        if right:  # a join reads both datasets
+            r = self.m.db.dataset(right["ref"].split(":", 1)[1])
+            units += max(0, (r["size"] - r["meta"]["dataStart"]) if r else 0)
         rows, ok = [], []
         for d in devices:
             why = self.eligible({**job, "plan": {}}, ds, d)

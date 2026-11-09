@@ -17,6 +17,7 @@
     'batch.transform': 'Filter and reshape records',
     'python.map': 'Your own Python function',
     'ml.evaluate': 'Evaluate a model on labeled records',
+    'batch.join': 'Join two datasets on a key',
   };
   const CODE_KINDS = ['python.map', 'ml.evaluate'];
   const STATUS = { running: 'Running', reducing: 'Combining', verifying: 'Checking', done: 'Done', failed: 'Failed', cancelled: 'Cancelled', needs_approval: 'Needs your approval' };
@@ -78,6 +79,20 @@
             <label class="field" data-for="batch.groupby"><span>Group by (field names, separated by commas)</span><input id="bj-by" placeholder="region"></label>
             <div id="bj-metrics" class="stack"></div>
             <button class="btn ghost small" type="button" data-act="add-metric">Add a total</button>
+            <div class="ag-grid" data-for="batch.groupby">
+              <label class="bj-check"><input type="checkbox" id="bj-shuffle"> Many groups (over about 200,000): spread the groups over the computers, then download them</label>
+              <label class="field"><span>Buckets for the groups (empty: automatic)</span><input id="bj-buckets" type="number" min="1" max="1024"></label>
+            </div>
+          </section>
+          <section class="panel" data-for="batch.join"><h2>Join</h2>
+            <p class="hint">Every record of the input (left) is matched with the records of the other dataset (right) that have the same key. Keys that read as numbers match as numbers, so CSV text “7” joins 7. A right field whose name the left already uses comes out as right_<i>name</i>.</p>
+            <div class="ag-grid">
+              <label class="field"><span>Join with (right)</span><select id="bj-right"></select></label>
+              <label class="field"><span>Key fields on the left (commas)</span><input id="bj-on" placeholder="customer_id"></label>
+              <label class="field"><span>Key fields on the right (empty: the same names)</span><input id="bj-right-on" placeholder="id"></label>
+              <label class="field"><span>Records without a match</span><select id="bj-how"><option value="inner">Leave them out (inner join)</option><option value="left">Keep the left ones (left join)</option></select></label>
+              <label class="field"><span>Buckets (empty: automatic; more for a big right side)</span><input id="bj-join-buckets" type="number" min="1" max="1024"></label>
+            </div>
           </section>
           <section class="panel" data-for="batch.transform"><h2>Reshape records</h2>
             <div class="ag-grid">
@@ -101,6 +116,7 @@
               <label class="field" data-reducer="best"><span>Best is</span><select id="bj-best-order"><option value="max">the highest</option><option value="min">the lowest</option></select></label>
               <label class="field"><span>Records per call</span><input id="bj-batch" type="number" min="1" value="1"></label>
             </div>
+            <label class="field"><span>Context: a JSON object every call gets as its second argument, ctx (optional; fixed for the whole job)</span><textarea id="bj-context" rows="2" spellcheck="false" placeholder='{"threshold": 100}'></textarea></label>
           </section>
           <section class="panel" data-for="ml.evaluate"><h2>The model and the labels</h2>
             <div class="ag-grid">
@@ -141,7 +157,8 @@
               <label class="field"><span>Items per partition (empty: automatic)</span><input id="bj-per" type="number" min="1"></label>
               <label class="field"><span>Tries per partition</span><input id="bj-tries" type="number" min="1" max="20" value="3"></label>
               <label class="field"><span>Time limit per partition (seconds)</span><input id="bj-timeout" type="number" min="5" value="900"></label>
-            </div></details>
+            </div>
+            <label class="bj-check"><input type="checkbox" id="bj-speculate" checked> When one partition runs far longer than the rest, also run it on a free computer and keep the first result (only for work without side effects)</label></details>
           </section>
           <section id="bj-plan" class="panel" hidden></section>
           <div class="ag-actions">
@@ -212,10 +229,23 @@
         + `${r.unlabeled ? ` · ${nf.format(r.unlabeled)} without a label left out` : ''}${j.outputs ? ` · ${nf.format(j.outputs.records)} predictions written` : ''}`;
     }
     if (r.values) return Object.entries(r.values).map(([k, v]) => `<b>${esc(k)}</b> ${esc(typeof v === 'number' ? nf.format(v) : JSON.stringify(v))}`).join(' · ');
+    if (j.workload === 'batch.join') return `${nf.format(r.records || 0)} joined records · ${nf.format(r.matchedLeft || 0)} of ${nf.format(r.leftRecords || 0)} left records matched`;
     if (r.groups) return `${nf.format(r.groupsTotal || r.groups.length)} groups`;
     if (j.outputs) return `${nf.format(j.outputs.records)} records written (${bytes(j.outputs.bytes)})`;
     if ('value' in r) { const s = JSON.stringify(r.value); return esc(s.length > 200 ? `${s.slice(0, 200)}…` : s); }
     return '';
+  }
+
+  // A job of several stages: which one runs, and how far each got. A stage starts once the one before it finished.
+  const STAGE_KIND = { map: '', 'shuffle-map': 'sort into buckets', 'shuffle-reduce': 'combine each bucket', 'join-map': 'sort both sides into buckets', 'join-reduce': 'join each bucket' };
+  function stageLine(j) {
+    if (!(j.stages || []).length) return '';
+    const cur = j.stages.findIndex((s) => s.status !== 'done');
+    return `<p class="hint">${j.stages.map((s, i) => {
+      const what = `${i + 1}. ${esc(s.name)}${STAGE_KIND[s.kind] ? ` (${esc(STAGE_KIND[s.kind])})` : ''}`;
+      const n = s.total == null ? 'waiting' : s.status === 'done' ? 'done' : `${nf.format(s.done)} of ${nf.format(s.total)}`;
+      return i === cur && !['done', 'failed', 'cancelled'].includes(j.status) ? `<b>${what}: ${n}</b>` : `${what}: ${n}`;
+    }).join(' → ')}</p>`;
   }
 
   // A job with its own Python environment waits until you approve preparing it; this
@@ -251,6 +281,7 @@
       <p class="hint">${esc(KINDS[j.workload] || j.workload)} · ${input} · ${esc(DECISION[j.decision] || j.decision || '')} · ${esc(when(j.createdAt))} by ${esc(j.createdBy || '?')}${j.finishedAt ? ` · took ${dur(j.startedAt, j.finishedAt)}` : ''}</p>
       <div class="bj-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
       <p class="hint">${nf.format(done)} of ${nf.format(j.total)} partitions${who ? ` · ${who}` : ''}</p>
+      ${stageLine(j)}
       ${j.note ? `<p>${esc(j.note)}</p>` : ''}${j.error ? `<p class="error">${esc(j.error)}</p>` : ''}
       ${setupCard(j)}${j.verify ? `<p class="hint">Checking: ${nf.format(j.verify.matched)} of ${nf.format(j.verify.sample)} partitions run again and matched${j.verify.running.length ? ` · running on ${esc(j.verify.running.join(', '))}` : ''}. The result is shown once every check matched.</p>` : ''}
       ${resultText(j) ? `<p>${resultText(j)}</p>` : ''}${validation}</section>`;
@@ -381,7 +412,16 @@
         if (as) m.as = as;
         return m;
       });
-      if (kind === 'batch.groupby') wl.by = list($('#bj-by').value);
+      if (kind === 'batch.groupby') {
+        wl.by = list($('#bj-by').value);
+        if ($('#bj-shuffle').checked) wl.shuffle = Number($('#bj-buckets').value) > 0 ? { buckets: Number($('#bj-buckets').value) } : {};
+      }
+    } else if (kind === 'batch.join') {
+      wl.on = list($('#bj-on').value);
+      if (!wl.on.length) throw new Error('Name the key fields to join on.');
+      if (list($('#bj-right-on').value).length) wl.rightOn = list($('#bj-right-on').value);
+      wl.how = $('#bj-how').value;
+      if (Number($('#bj-join-buckets').value) > 0) wl.buckets = Number($('#bj-join-buckets').value);
     } else if (kind === 'batch.transform') {
       if (list($('#bj-select').value).length) wl.select = list($('#bj-select').value);
       const ren = {};
@@ -416,7 +456,7 @@
       if (!['exists', 'missing'].includes(w.op)) w.value = ['contains', 'regex'].includes(w.op) ? $('[data-w="value"]', r).value : value($('[data-w="value"]', r).value);
       return w;
     }).filter((w) => w.field);
-    if (where.length && !CODE_KINDS.includes(kind)) wl.where = where;
+    if (where.length && !CODE_KINDS.includes(kind) && kind !== 'batch.join') wl.where = where;
     if (kind !== 'python.map' && $('#bj-input').value === '__items__') throw new Error('Items work with your own Python function. Pick a dataset for this kind of job.');
     const input = $('#bj-input').value;
     let inputs;
@@ -432,15 +472,24 @@
       if (!$('#bj-model').value) throw new Error('Add a model first (Datasets tab, “Add a model”).');
       inputs.model = { ref: $('#bj-model').value };
     }
+    if (kind === 'batch.join') {
+      if (!$('#bj-right').value) throw new Error('Pick the dataset to join with.');
+      inputs.right = { ref: $('#bj-right').value };
+    }
+    let context;
+    if (kind === 'python.map' && $('#bj-context').value.trim()) {
+      try { context = JSON.parse($('#bj-context').value); } catch (e) { throw new Error(`The context isn't valid JSON: ${e.message}`); }
+      if (!context || typeof context !== 'object' || Array.isArray(context)) throw new Error('The context should be a JSON object, like {"threshold": 100}.');
+    }
     const partitioning = {};
     if (Number($('#bj-target').value) > 0) partitioning.targetBytes = Math.max(1024, Math.round(Number($('#bj-target').value) * 2 ** 20));
     if (Number($('#bj-per').value) > 0) partitioning.itemsPerPartition = Number($('#bj-per').value);
     return {
       apiVersion: API_VERSION, kind: 'Job', metadata: { name: $('#bj-name').value.trim() || KINDS[kind] },
       spec: {
-        mode: $('#bj-mode').value, workload: wl, inputs, partitioning, ...(runtime ? { runtime } : {}),
+        mode: $('#bj-mode').value, workload: wl, inputs, partitioning, ...(runtime ? { runtime } : {}), ...(context ? { context: { values: context } } : {}),
         security: { allowedTrust: CODE_KINDS.includes(kind) ? 'owned-only' : $('#bj-trust').value },
-        retry: { maxAttempts: Number($('#bj-tries').value) || 3, timeoutSeconds: Number($('#bj-timeout').value) || 900 },
+        retry: { maxAttempts: Number($('#bj-tries').value) || 3, timeoutSeconds: Number($('#bj-timeout').value) || 900, speculate: $('#bj-speculate').checked },
         output: { onBadRecord: $('#bj-bad').value, spotCheck: Math.max(0, Number($('#bj-spot').value) || 0) },
       },
     };
@@ -505,6 +554,12 @@
     opts.push(['__items__', 'A list of items or parameters (your own function only)']);
     sel.innerHTML = opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
     if (opts.some(([v]) => v === keep)) sel.value = keep;
+    const rs = $('#bj-right');
+    if (rs) {
+      const had = rs.value;
+      rs.innerHTML = B.datasets.map((d) => `<option value="${esc(d.ref)}">${esc(`${d.name} (${d.format}, ${bytes(d.size)})`)}</option>`).join('') || '<option value="">Add a second dataset first</option>';
+      if (B.datasets.some((d) => d.ref === had)) rs.value = had;
+    }
     const ms = $('#bj-model');
     if (ms) {
       const had = ms.value;

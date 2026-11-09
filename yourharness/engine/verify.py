@@ -36,9 +36,11 @@ class Verifier:
 
     # ------------------------------------------------------------------ starting
     def begin(self, job_id: str, pids: list[str], validation: dict) -> None:
-        """Every partition is accepted and combined: check these partitions before publishing."""
+        """Every partition of the stage is accepted and combined: check these partitions before using the result."""
         verify = {"sample": pids, "matched": {}, "tries": {}, "sameDevice": []}
-        self.db.update("jobs", {"id": job_id}, {"status": "verifying", "validation": {**validation, "verify": verify}, "updated_at": time.time(),
+        job = self.db.job(job_id)
+        current = {k: v for k, v in (job["validation"] or {}).items() if k != "verify"}
+        self.db.update("jobs", {"id": job_id}, {"status": "verifying", "validation": {**current, "verify": verify}, "updated_at": time.time(),
                                                  "note": f"Checking {len(pids)} partition{'s' if len(pids) != 1 else ''} by running "
                                                          f"{'them' if len(pids) != 1 else 'it'} again on another computer…"})
         self.db.event(job_id, "verifying", {"partitions": len(pids)})
@@ -169,19 +171,16 @@ class Verifier:
         self.m.dispatch()
 
     def _publish(self, job: dict) -> None:
-        val = dict(job["validation"])
-        v = val.pop("verify")
+        v = job["validation"]["verify"]
         names = sorted(set(v["matched"].values()))
         k = len(v["sample"])
-        total = sum(self.db.counts(job["id"]).values())
+        stage = self.m.current_stage(job["id"])
+        total = stage["total"] if stage else sum(self.db.counts(job["id"]).values())
         line = f"{k} of {total} partitions were run again on {', '.join(names)} and matched exactly"
         if v["sameDevice"]:
             line += f" ({len(v['sameDevice'])} on the computer that first ran {'them' if len(v['sameDevice']) != 1 else 'it'}, the only one that could)"
-        val = {"level": "spot-checked", "checks": val.get("checks", []) + [line + "."]}
-        now = time.time()
-        self.db.update("jobs", {"id": job["id"]}, {"status": "done", "validation": val, "finished_at": now, "updated_at": now, "note": "", "error": None})
-        self.db.event(job["id"], "status", {"status": "done"})
-        self.m._changed(job["id"])
+        self.db.event(job["id"], "verified-all", {"partitions": k})
+        self.m.verified(job["id"], line + ".")
 
     # ------------------------------------------------------------------ leases, restarts, cancelling
     def sweep(self, now: float) -> None:
