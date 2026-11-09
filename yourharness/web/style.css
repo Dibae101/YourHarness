@@ -573,4 +573,9 @@ button.fm-name:hover { text-decoration: underline; }
 .bj-bar span { display: block; height: 100%; background: var(--focus); transition: width 0.3s; }
 .bj-row { align-items: center; }
 .bj-row select, .bj-row input { flex: 1; min-width: 0; }
+.bj-setup { margin: 10px 0; }
+.bj-setup p { margin: 0 0 8px; }
+.bj-check { display: flex; gap: 8px; align-items: baseline; margin: 6px 0; cursor: pointer; }
+.bj-steps { margin: 4px 0 10px; padding-left: 22px; }
+.bj-steps code { font-size: 0.8125rem; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { .bj-bar span { transition: none; } }

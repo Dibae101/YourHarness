@@ -351,6 +351,8 @@ def _print_engine_result(job: dict) -> None:
 
 
 def cmd_job(a) -> int:
+    from .client import setup_text
+
     c = _client()
     if a.action in (None, "ls"):
         for j in c.engine_jobs():
@@ -371,10 +373,18 @@ def cmd_job(a) -> int:
                 print(f"  {'yes' if d['eligible'] else 'no ':<3}  {d['name']}" + ("" if d["eligible"] else f": {d['why']}"))
             return 0
         started = c.start_job(job)
+        if started["status"] == "needs_approval":
+            if not a.approve_setup:
+                print(setup_text(started) + f"\nOr start it with: harness job run {a.args[0]} --approve-setup", file=sys.stderr)
+                return 2
+            started = c.approve_setup(started["id"], downloads=a.downloads)
         if a.no_wait:
             print(started["id"])
             return 0
         done = c.wait_engine_job(started["id"])
+        if done["status"] == "needs_approval":
+            print(setup_text(done), file=sys.stderr)
+            return 2
         if done["status"] != "done":
             print(f"{done['id']} {done['status']}: {done.get('error') or ''}", file=sys.stderr)
             return 1
@@ -389,7 +399,22 @@ def cmd_job(a) -> int:
         print(json.dumps({k: j[k] for k in ("id", "name", "status", "decision", "counts", "perDevice", "result", "validation", "error")}, indent=2))
     elif a.action == "wait":
         j = c.wait_engine_job(job_id)
+        if j["status"] == "needs_approval":
+            print(setup_text(j), file=sys.stderr)
+            return 2
         _print_engine_result(j) if j["status"] == "done" else print(j["status"], j.get("error") or "")
+    elif a.action == "approve":
+        j = c.engine_job(job_id)
+        if j["status"] != "needs_approval":
+            print(f"Job {job_id} isn't waiting for a setup approval (it is {j['status']}).", file=sys.stderr)
+            return 1
+        print(setup_text(j).rsplit("\nApprove it with", 1)[0], file=sys.stderr)
+        ids = None
+        if a.device:
+            by_name = {s["name"].lower(): s["id"] for s in j.get("setupPlan") or []}
+            ids = [by_name.get(x.lower(), x) for x in a.device]
+        j = c.approve_setup(job_id, ids, downloads=a.downloads)
+        print(f"Approved. {j.get('note') or ''}".strip())
     elif a.action == "result":
         got = c.engine_result(job_id, a.output)
         if a.output:
@@ -485,11 +510,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--shareable", action="store_true", help="friends' computers may process it, for jobs that allow them")
     s.set_defaults(fn=cmd_dataset)
 
-    s = sub.add_parser("job", help="batch jobs: run JOB.json, plan JOB.json, ls, show ID, wait ID, result ID [-o FILE], cancel ID, retry ID")
-    s.add_argument("action", nargs="?", choices=["run", "plan", "ls", "show", "wait", "result", "cancel", "retry"])
+    s = sub.add_parser("job", help="batch jobs: run JOB.json, plan JOB.json, ls, show ID, wait ID, result ID [-o FILE], "
+                                   "approve ID, cancel ID, retry ID")
+    s.add_argument("action", nargs="?", choices=["run", "plan", "ls", "show", "wait", "result", "approve", "cancel", "retry"])
     s.add_argument("args", nargs="*")
     s.add_argument("--no-wait", action="store_true", help="print the job id and return at once")
     s.add_argument("-o", "--output", help="save the result to this file")
+    s.add_argument("--approve-setup", action="store_true",
+                   help="run: if the job needs its Python environment prepared, approve that (it installs software on your computers)")
+    s.add_argument("--downloads", action="store_true", help="run/approve: the computers may download uv, the Python and the packages")
+    s.add_argument("--device", action="append", metavar="NAME_OR_ID", help="approve: only on this computer (repeat for more)")
     s.set_defaults(fn=cmd_job)
     return p
 

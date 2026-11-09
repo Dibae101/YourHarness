@@ -14,13 +14,19 @@ window.confirm = () => true;
 window.HTMLElement.prototype.scrollIntoView = () => {};
 const calls = [];
 const ds = { id: 'd1a2b3c4', ref: 'dataset:d1a2b3c4', name: 'sales.jsonl', format: 'jsonl', size: 123456, lines: 900, header: null, classification: 'owned-private', createdAt: 1, createdBy: 'Mac' };
+const steps = (py) => [`uv venv --python ${py} <YourHarness folder>/envs/env-0123456789abcdef0123`, 'uv pip install scikit-learn==1.5.2', 'a check that the packages import and the job’s worker starts'];
+const waiting = { id: 'j2', name: 'Fit', status: 'needs_approval', workload: 'python.map', total: 4, counts: { ready: 4 }, perDevice: [], createdAt: 3,
+  runtime: { kind: 'managed-python', python: '3.11', requirements: ['scikit-learn==1.5.2'] }, setup: [],
+  setupPlan: [{ id: 'a', name: 'Mac', steps: steps('3.11'), downloads: 'If missing: uv 0.13.7 from GitHub (checksum checked), Python 3.11, and the packages from PyPI.' },
+    { id: 'c', name: '<i>PC</i>', steps: steps('3.11'), downloads: 'If missing: uv 0.13.7 from GitHub (checksum checked), Python 3.11, and the packages from PyPI.' }] };
 window.fetch = async (url, opts = {}) => {
   const method = opts.method || 'GET';
   const body = opts.body && typeof opts.body === 'string' ? JSON.parse(opts.body) : undefined;
   calls.push({ method, url, body });
   const json = (o, status = 200) => ({ ok: status < 400, status, headers: { get: () => 'application/json' }, json: async () => o, text: async () => JSON.stringify(o) });
   if (url === '/api/engine') return json({ jobs: [], datasets: [ds], storage: { artifacts: 3, bytes: 200000 }, devices: [
-    { id: 'a', name: 'Mac', kind: 'agent', owned: true, engine: { slots: 3, ops: ['batch.aggregate', 'python.map'], formats: ['jsonl', 'csv', 'text'], runtimes: ['builtin', 'native-python'], busy: 0 } },
+    { id: 'a', name: 'Mac', kind: 'agent', owned: true, engine: { slots: 3, ops: ['batch.aggregate', 'python.map'], formats: ['jsonl', 'csv', 'text'], runtimes: ['builtin', 'native-python', 'managed-python'], busy: 0,
+      envs: 2, accelerators: [{ kind: 'metal', name: 'Apple silicon GPU', memoryGB: null, driver: 'Metal' }] } },
     { id: 'b', name: 'iPhone', kind: 'browser', owned: true, engine: null }] });
   if (url === '/api/engine/plan') return json({ plan: { decision: 'RUN_DISTRIBUTED', reasons: ['About 3 s spread over 2 computers.'], unit: 'bytes',
     devices: [{ name: 'Mac', owned: true, eligible: true, rate: 25e6, measured: false }, { name: '<b>PC</b>', owned: false, eligible: false, why: 'is a friend’s computer' }] } });
@@ -31,6 +37,8 @@ window.fetch = async (url, opts = {}) => {
   if (url === '/api/engine/datasets/d1a2b3c4/preview') return json({ records: [{ amount: 1 }, { amount: 2 }] });
   if (url === '/api/engine/datasets/d1a2b3c4' && method === 'POST') return json({ dataset: { ...ds, classification: body.classification } });
   if (url === '/api/engine/jobs/j1') return json({ job: { id: 'j1', name: 'Totals', plan: { reasons: ['Spread.'] }, result: {}, partitions: [{ idx: 0, status: 'done', device: 'Mac', bytes: 1000, records: 10, seconds: 0.2, attempt: 1, moves: 0 }], events: [], spec: {} } });
+  if (url === '/api/engine/jobs/j2/approve-setup') return json({ job: { ...waiting, status: 'running', setupPlan: null, note: 'Preparing its Python environment on Mac.',
+    setup: [{ device: 'Mac', phase: 'packages', note: 'Installing 1 package', error: null }] } });
   throw new Error(`unexpected ${method} ${url}`);
 };
 window.eval(src);
@@ -105,6 +113,49 @@ assert.deepEqual(py.inputs, { grid: { lr: [0.1, 0.01], depth: [2, 4] } });
 assert.equal(py.workload.reducer, 'best');
 assert.deepEqual(py.workload.bestBy, { key: 'score', order: 'max' });
 assert.equal(py.security.allowedTrust, 'owned-only');
+assert.equal(py.runtime, undefined, 'the default is the Python YourHarness runs on');
+
+// an environment of its own: a Python version and pinned packages
+document.querySelector('[data-tab="new"]').click();
+assert.equal(document.querySelector('#bj-reqs').closest('[data-runtime]').hidden, true);
+set('#bj-runtime', 'managed-python');
+assert.equal(document.querySelector('#bj-reqs').closest('[data-runtime]').hidden, false);
+document.querySelector('#bj-pyver').value = '3.11';
+document.querySelector('#bj-reqs').value = 'scikit-learn==1.5.2\n# a comment\n\n numpy \n';
+document.querySelector('#bj-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await settle();
+const mp = calls.filter((c) => c.method === 'POST' && c.url === '/api/engine/jobs').pop().body.job.spec;
+assert.deepEqual(mp.runtime, { kind: 'managed-python', python: '3.11', requirements: ['scikit-learn==1.5.2', 'numpy'] });
+const before = calls.length;
+document.querySelector('[data-tab="new"]').click();
+document.querySelector('#bj-reqs').value = '--index-url https://example.invalid/simple';
+document.querySelector('#bj-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await settle();
+assert.match(document.querySelector('#bj-status').textContent, /isn't a package requirement/);
+assert.equal(calls.length, before, 'a pip option is refused before anything is sent');
+document.querySelector('#bj-reqs').value = 'scikit-learn==1.5.2';
+set('#bj-runtime', 'native-python');
+
+// the job waits for your approval; the card says what each computer would run
+document.querySelector('[data-tab="jobs"]').click();
+msg({ type: 'eng.job', job: waiting });
+let setup = document.querySelector('[data-setup="j2"]');
+assert.ok(setup, 'a waiting job shows its setup');
+assert.match(document.querySelector('[data-job="j2"]').textContent, /Needs your approval/);
+assert.match(setup.textContent, /uv pip install scikit-learn==1\.5\.2/);
+assert.match(setup.textContent, /Python 3\.11/);
+assert.ok(!setup.querySelector('i'), 'computer names are escaped');
+setup.querySelector('[data-setup-device="c"]').checked = false;
+setup.querySelector('[data-setup-downloads]').checked = true;
+msg({ type: 'eng.job', job: { ...waiting } });  // a live update keeps what you ticked
+setup = document.querySelector('[data-setup="j2"]');
+assert.equal(setup.querySelector('[data-setup-device="c"]').checked, false);
+assert.equal(setup.querySelector('[data-setup-downloads]').checked, true);
+setup.querySelector('[data-act="approve-setup"]').click();
+await settle();
+assert.deepEqual(calls.find((c) => c.url === '/api/engine/jobs/j2/approve-setup').body, { devices: ['a'], downloads: true });
+assert.ok(!document.querySelector('[data-setup="j2"]'), 'the approval card goes away');
+assert.match(document.querySelector('[data-job="j2"]').textContent, /Python environment: Mac Installing packages/);
 
 // datasets: import from the shared folder, preview, share
 document.querySelector('[data-tab="datasets"]').click();
@@ -126,4 +177,5 @@ assert.equal(calls.find((c) => c.url === '/api/engine/datasets/d1a2b3c4' && c.me
 document.querySelector('[data-tab="computers"]').click();
 const comp = document.querySelector('#bj-comp').textContent;
 assert.match(comp, /Mac/); assert.match(comp, /Browser tabs don’t run batch jobs yet/);
+assert.match(comp, /GPU: Apple silicon GPU/); assert.match(comp, /2 prepared environments/);
 console.log('batch.js smoke test passed:', calls.length, 'requests');

@@ -54,6 +54,7 @@ class EngineAPI:
         r.add_get("/api/engine/jobs/{job}", self.get_job)
         r.add_post("/api/engine/jobs/{job}/cancel", self.cancel_job)
         r.add_post("/api/engine/jobs/{job}/retry", self.retry_job)
+        r.add_post("/api/engine/jobs/{job}/approve-setup", self.approve_setup)
         r.add_delete("/api/engine/jobs/{job}", self.delete_job)
         r.add_get("/api/engine/jobs/{job}/result", self.result)
         r.add_get("/api/engine/attempts/{pid}/{n}/input", self.attempt_input)
@@ -189,6 +190,19 @@ class EngineAPI:
         self._who(request, write=True)
         self._run(self.m.delete_job, self._id(request, "job"))
         return web.json_response({"ok": True})
+
+    async def approve_setup(self, request):
+        """You approve preparing the job's Python environment, on all the computers that need it or some of them."""
+        rec = self._who(request, write=True)
+        body = await self._json(request)
+        devices = body.get("devices")
+        if devices is not None and (not isinstance(devices, list) or not all(isinstance(x, str) for x in devices)):
+            raise _fail(400, "devices should be a list of computer ids.")
+        try:
+            job = self.m.runtimes.approve(self._id(request, "job"), devices, bool(body.get("downloads")), self._name(rec))
+        except ValueError as e:
+            raise _fail(400, str(e))
+        return web.json_response({"job": job})
 
     async def result(self, request):
         self._who(request)

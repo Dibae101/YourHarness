@@ -36,6 +36,8 @@ PY_REDUCERS = ("concat", "sum", "count", "merge_counts", "collect", "best")
 MAX_CODE = 200_000
 MAX_ITEMS = 100_000
 MAX_SPEC = 2 * 1024 * 1024
+# A requirement starts with a package name, so a line can't be a pip option (--index-url, -r, -e).
+REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-\[\],<>=!~ ;:'\"*+/@]{0,199}")
 FIELD_RE = re.compile(r"[^\x00-\x1f]{1,200}")
 NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
 
@@ -260,8 +262,9 @@ def parse(doc) -> dict:
         if not isinstance(runtime["python"], str) or not re.fullmatch(r"3\.\d{1,2}", runtime["python"]):
             raise SpecError("spec.runtime.python", 'should be a Python version like "3.12"')
         reqs = rt.get("requirements") or []
-        if not isinstance(reqs, list) or len(reqs) > 200 or any(not isinstance(r, str) or not re.fullmatch(r"[A-Za-z0-9_.\-\[\],<>=!~ ;:'\"*+/@]{1,200}", r) for r in reqs):
-            raise SpecError("spec.runtime.requirements", "should be a list of package requirements, like \"numpy==2.1.3\"")
+        if not isinstance(reqs, list) or len(reqs) > 200 or any(not isinstance(r, str) or not REQUIREMENT.fullmatch(r.strip()) for r in reqs):
+            raise SpecError("spec.runtime.requirements", "should be a list of package requirements, like \"numpy==2.1.3\" "
+                            "(a package name first: no pip options such as --index-url)")
         runtime["requirements"] = sorted(r.strip() for r in reqs)
     part = _obj(s.get("partitioning"), "spec.partitioning")
     partitioning = {

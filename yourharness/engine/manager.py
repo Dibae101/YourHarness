@@ -91,7 +91,9 @@ class EngineManager:
         self._flush_at = None
         self._last_sweep = 0.0
         self._last_gc = 0.0
-        self.runtimes = None  # set by the runtime manager (managed Python), when there is one
+        from .runtime import RuntimeManager
+
+        self.runtimes = RuntimeManager(self)  # managed Python environments
 
     # ------------------------------------------------------------------ start-up
     def start(self) -> None:
@@ -246,7 +248,7 @@ class EngineManager:
         job_id = "j" + secrets.token_hex(4)
         now = time.time()
         stage_id = f"{job_id}-s0"
-        status = "running" if parts else "reducing"
+        status = "needs_approval" if plan["decision"] == "NEEDS_SETUP_APPROVAL" else "running" if parts else "reducing"
         with self.db.tx():
             self.db.insert("jobs", {"id": job_id, "name": job["metadata"]["name"], "spec": job, "status": status,
                                     "decision": plan["decision"], "plan": plan, "note": " ".join(plan.get("reasons", [])[:2]),
@@ -259,7 +261,7 @@ class EngineManager:
                                               "bytes": inp["end"] - inp["start"] if inp["kind"] == "range" else None})
             self.db.event(job_id, "created", {"by": by, "partitions": len(parts), "decision": plan["decision"]})
         log.info("%s started job %s (%s, %d partitions, %s)", by, job["metadata"]["name"], spec["workload"]["type"], len(parts), plan["decision"])
-        if not parts:
+        if not parts and status == "reducing":
             self._spawn(self._reduce(job_id))
         self._changed(job_id)
         self.dispatch()
@@ -416,6 +418,7 @@ class EngineManager:
             a = self.db.attempt(pid, n) if p else None
             if p is None or a is None or a["device_id"] != d.id or p["status"] == "done" or a["status"] not in LIVE_ATTEMPT:
                 d.send({"type": "eng.cancel", "partition": pid, "attempt": n})
+        self.runtimes.device_connected(d)
         self.dispatch()
 
     def device_gone(self, d) -> None:
@@ -787,6 +790,8 @@ class EngineManager:
             "result": result.get("value") if "value" in result else result.get("preview"), "resultTruncated": "artifact" in result,
             "outputs": {"records": job["outputs"]["records"], "bytes": job["outputs"]["bytes"]} if job["outputs"] else None,
             "validation": job["validation"], "plan": {k: (job["plan"] or {}).get(k) for k in ("decision", "reasons", "localSeconds", "distributedSeconds", "localDevice")},
+            "runtime": spec["runtime"], "setup": self.runtimes.view(job),
+            "setupPlan": (job["plan"] or {}).get("setup") if job["status"] == "needs_approval" else None,
         }
         if full:
             view["spec"] = job["spec"]
@@ -804,7 +809,8 @@ class EngineManager:
         if not info:
             return None
         return {"slots": info.get("slots", 0), "ops": info.get("ops", []), "formats": info.get("formats", []), "runtimes": info.get("runtimes", []),
-                "busy": len(self.s.resources.held(d.id, "engine")), "python": info.get("python")}
+                "busy": len(self.s.resources.held(d.id, "engine")), "python": info.get("python"),
+                "envs": len(info.get("envs", [])), "accelerators": info.get("accelerators", [])}
 
     def overview(self) -> dict:
         jobs = [self.job_view(j) for j in self.db.all("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 50")]

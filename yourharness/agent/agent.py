@@ -107,7 +107,10 @@ class Agent:
         self.runner = None
         self.cpu = sysinfo.CpuMeter()
         self.taskhost = TaskHost(cfg.server, cfg.home, self.send, cfg.tasks, cfg.task_slots, cfg.allow_commands)
-        self.enginehost = EngineHost(cfg.server, cfg.home, self.send, cfg.threads if cfg.sharing else 0)
+        from ..runtime.envs import EnvManager
+
+        self.envs = EnvManager(cfg.home, self.send)
+        self.enginehost = EngineHost(cfg.server, cfg.home, self.send, cfg.threads if cfg.sharing else 0, runtimes=self.envs)
         if cfg.workspace:  # a computer that hosts a terminal also lets the pool browse its home folder
             from .files import HomeFiles
 
@@ -151,6 +154,9 @@ class Agent:
         await self.pool.resize(self.cfg.threads if self.cfg.sharing else 0)
         if self.cfg.tasks is not False:
             await self.taskhost.detect()
+        from ..runtime.inventory import accelerators
+
+        self.enginehost.accelerators = await asyncio.get_running_loop().run_in_executor(None, accelerators)
         delay = 1.0
         try:
             while True:
@@ -267,6 +273,11 @@ class Agent:
             self.taskhost.handle(m)
         elif isinstance(kind, str) and kind.startswith("eng."):
             self.enginehost.handle(m)
+        elif kind == "env.prepare":
+            if self.enginehost.owned:  # installing software for the pool's code only happens on the owner's own computers
+                self.envs.prepare(m)
+            else:
+                self.send({"type": "env.failed", "env": m.get("env"), "error": "This is a friend's computer: it doesn't prepare environments for the pool's code."})
         elif kind == "denied":
             print(m.get("reason") or "The coordinator refused this agent.", file=sys.stderr)
         elif kind == "chunk":

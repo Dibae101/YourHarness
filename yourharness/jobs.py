@@ -22,9 +22,9 @@ from __future__ import annotations
 import inspect
 import textwrap
 
-from .client import Client, PoolError
+from .client import Client, PoolError, setup_text
 
-__all__ = ["dataset", "aggregate", "group_by", "transform", "map_items", "map_records", "where", "run", "plan", "PoolError"]
+__all__ = ["dataset", "aggregate", "group_by", "transform", "map_items", "map_records", "where", "run", "plan", "PoolError", "SetupNeeded"]
 API_VERSION = "yourharness.dev/v1alpha1"
 
 _client: Client | None = None
@@ -69,13 +69,33 @@ def _ref(ds) -> dict:
     return {"dataset": {"ref": ds if str(ds).startswith("dataset:") else f"dataset:{ds}"}}
 
 
-def run(job: dict, wait: bool = True, quiet: bool = False):
-    """Start a JobSpec and return its result (or, with wait=False, the started job)."""
+class SetupNeeded(PoolError):
+    """The job needs a Python environment prepared first; .job lists what each computer would run."""
+
+    def __init__(self, job: dict):
+        super().__init__(setup_text(job) + "\nOr pass approve_setup=True (and downloads=True) to run().")
+        self.job = job
+
+
+def run(job: dict, wait: bool = True, quiet: bool = False, approve_setup: bool = False, downloads: bool = False):
+    """Start a JobSpec and return its result (or, with wait=False, the started job).
+
+    A job with its own Python environment (runtime "managed-python") that no computer
+    has yet stops for your approval: approve_setup=True gives it here, downloads=True
+    also lets the computers download uv, that Python and the packages. Otherwise this
+    raises SetupNeeded, which says exactly what would be installed where.
+    """
     c = client()
     started = c.start_job(job)
+    if started["status"] == "needs_approval":
+        if not approve_setup:
+            raise SetupNeeded(started)
+        started = c.approve_setup(started["id"], downloads=downloads)
     if not wait:
         return started
     done = c.wait_engine_job(started["id"], quiet=quiet)
+    if done["status"] == "needs_approval":
+        raise SetupNeeded(done)
     if done["status"] != "done":
         raise PoolError(done.get("error") or f"The job was {done['status']}.")
     if done.get("resultTruncated") or done.get("outputs"):
@@ -141,18 +161,41 @@ def _python(fn, reducer: str, best_by: str | None, best: str, batch: int) -> dic
     return wl
 
 
+def _runtime(spec: dict, python: str | None, requirements) -> dict:
+    """python="3.12" and/or requirements=[...] run the function in an environment of its own (prepared with uv)."""
+    if python is None and requirements is None:
+        return spec
+    if "runtime" in spec:
+        raise PoolError("Pass python/requirements or runtime, not both.")
+    import platform
+
+    return {**spec, "runtime": {"kind": "managed-python", "python": python or ".".join(platform.python_version_tuple()[:2]),
+                                "requirements": list(requirements or [])}}
+
+
+def _setup_args(spec: dict) -> tuple[dict, dict]:
+    run_opts = {k: spec.pop(k) for k in ("approve_setup", "downloads") if k in spec}
+    return spec, run_opts
+
+
 def map_items(fn, items=None, *, grid: dict | None = None, reducer: str = "collect", best_by: str | None = None, best: str = "max",
-              batch: int = 1, name: str | None = None, **spec):
-    """Call fn on every item (or every combination in grid) across your computers."""
+              batch: int = 1, name: str | None = None, python: str | None = None, requirements=None, **spec):
+    """Call fn on every item (or every combination in grid) across your computers.
+
+    python="3.12", requirements=["scikit-learn==1.5.2"] run it in an environment of its
+    own on each computer; approve_setup=True (and downloads=True) approve preparing it.
+    """
     if (items is None) == (grid is None):
         raise PoolError("Pass items or grid, not both.")
     inputs = {"grid": grid} if grid is not None else {"items": list(items)}
-    out = run(_job(_python(fn, reducer, best_by, best, batch), inputs, name or fn.__name__, **spec))
+    spec, run_opts = _setup_args(_runtime(spec, python, requirements))
+    out = run(_job(_python(fn, reducer, best_by, best, batch), inputs, name or fn.__name__, **spec), **run_opts)
     return out.get("value", out) if isinstance(out, dict) else out
 
 
 def map_records(fn, ds, *, reducer: str = "collect", best_by: str | None = None, best: str = "max", batch: int = 1,
-                name: str | None = None, **spec):
-    """Call fn on every record of a dataset across your computers."""
-    out = run(_job(_python(fn, reducer, best_by, best, batch), _ref(ds), name or fn.__name__, **spec))
+                name: str | None = None, python: str | None = None, requirements=None, **spec):
+    """Call fn on every record of a dataset across your computers (python/requirements as in map_items)."""
+    spec, run_opts = _setup_args(_runtime(spec, python, requirements))
+    out = run(_job(_python(fn, reducer, best_by, best, batch), _ref(ds), name or fn.__name__, **spec), **run_opts)
     return out.get("value", out) if isinstance(out, dict) else out

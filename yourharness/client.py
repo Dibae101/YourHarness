@@ -18,6 +18,18 @@ from pathlib import Path
 FINISHED = ("done", "failed", "cancelled")
 
 
+def setup_text(job: dict) -> str:
+    """What a job that waits for a setup approval would prepare, and how to approve it."""
+    lines = [f"Job {job['id']} needs its Python environment prepared before it can start:"]
+    for s in job.get("setupPlan") or []:
+        lines.append(f"  {s['name']}:")
+        lines += [f"    {step}" for step in s["steps"]]
+    if job.get("setupPlan"):
+        lines.append(f"  {job['setupPlan'][0]['downloads']}")
+    lines.append(f"Approve it with: harness job approve {job['id']}  (add --downloads to let the computers download what's missing)")
+    return "\n".join(lines)
+
+
 class PoolError(Exception):
     pass
 
@@ -228,14 +240,22 @@ class Client:
     def retry_engine_job(self, job_id: str) -> dict:
         return self.request("POST", f"/api/engine/jobs/{urllib.parse.quote(job_id)}/retry", {})["job"]
 
+    def approve_setup(self, job_id: str, devices: list[str] | None = None, downloads: bool = False) -> dict:
+        """Let the computers prepare the job's Python environment (all that need it, or the ones named by id)."""
+        body: dict = {"downloads": bool(downloads)}
+        if devices is not None:
+            body["devices"] = list(devices)
+        return self.request("POST", f"/api/engine/jobs/{urllib.parse.quote(job_id)}/approve-setup", body)["job"]
+
     def wait_engine_job(self, job_id: str, quiet: bool = False, poll: float = 0.5) -> dict:
+        """Wait until the job finishes, or stops to wait for a setup approval (status "needs_approval")."""
         import time
 
         show = not quiet and sys.stderr.isatty()
         try:
             while True:
                 job = self.engine_job(job_id)
-                if job["status"] in FINISHED:
+                if job["status"] in FINISHED or job["status"] == "needs_approval":
                     break
                 if show:
                     c = job["counts"]

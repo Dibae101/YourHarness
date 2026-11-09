@@ -36,6 +36,7 @@ class EngineHost:
         self.slots = max(0, int(slots))
         self.runtimes = runtimes  # the managed-Python environments on this computer, if any
         self.owned: bool | None = None
+        self.accelerators: list[dict] = []  # GPUs found at start (runtime/inventory.py)
         self.running: dict[tuple[str, int], asyncio.subprocess.Process | None] = {}
         self.cancelled: set[tuple[str, int]] = set()
         self.unacked: dict[tuple[str, int], dict] = {}
@@ -48,9 +49,9 @@ class EngineHost:
         running = [{"partition": p, "attempt": n} for (p, n) in self.running]
         running += [{"partition": p, "attempt": n} for (p, n) in self.unacked if (p, n) not in self.running]
         out = {"slots": self.slots, "ops": OPS, "formats": FORMATS, "runtimes": runtimes, "python": platform.python_version(),
-               "running": running}
+               "running": running, "accelerators": self.accelerators}
         if self.runtimes is not None:
-            out["envs"] = self.runtimes.ready_list()
+            out.update(self.runtimes.describe())
         return out
 
     def connected(self) -> None:
@@ -103,7 +104,7 @@ class EngineHost:
         env["PYTHONPATH"] = PACKAGE_PARENT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         env["PYTHONUNBUFFERED"] = "1"
         if (task.get("runtime") or {}).get("kind") == "managed-python" and self.runtimes is not None:
-            return [self.runtimes.python(task["env"]), "-m", "yourharness.engine.worker"], self.runtimes.environ(env)
+            return [self.runtimes.python(task["env"]), "-m", "yourharness.engine.worker"], self.runtimes.environ(env, task["env"])
         if getattr(sys, "frozen", False):
             return [sys.executable, "__engine__"], env
         return [sys.executable, "-m", "yourharness.engine.worker"], env

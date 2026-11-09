@@ -120,8 +120,20 @@ def sanitize_engine(e) -> dict | None:
         "runtimes": [r for r in e.get("runtimes") or [] if r in ENGINE_RUNTIMES],
         "python": clean_text(e.get("python"), 20, ""),
         "envs": [clean_text(x, 80, "") for x in (e.get("envs") or [])[:500] if isinstance(x, str)],
+        "building": [clean_text(x, 80, "") for x in (e.get("building") or [])[:50] if isinstance(x, str)],
+        "envErrors": {clean_text(k, 80, ""): clean_text(v, 600, "") for k, v in list((e.get("envErrors") or {}).items())[:50]
+                      if isinstance(k, str) and isinstance(v, str)} if isinstance(e.get("envErrors"), dict) else {},
+        "accelerators": [sanitize_accelerator(a) for a in (e.get("accelerators") or [])[:16] if isinstance(a, dict)],
         "running": running,
     }
+
+
+def sanitize_accelerator(a: dict) -> dict:
+    """A GPU a computer reports: what kind, its name, its memory and driver, as text the page can show."""
+    mem = a.get("memoryGB")
+    return {"kind": a.get("kind") if a.get("kind") in ("cuda", "metal", "rocm") else "other", "name": clean_text(a.get("name"), 80, "GPU"),
+            "memoryGB": _num_or_none(mem, 0, 4096) if isinstance(mem, (int, float)) and not isinstance(mem, bool) else None,
+            "driver": clean_text(a.get("driver"), 40, "")}
 
 
 def sanitize_workspace(ws) -> dict | None:
@@ -502,6 +514,9 @@ class Scheduler:
         elif isinstance(kind, str) and kind.startswith("eng."):
             if d.engine_info is not None:
                 self.engine.handle(d, msg)
+        elif isinstance(kind, str) and kind.startswith("env."):
+            if d.kind == "agent" and d.engine_info is not None:
+                self.engine.runtimes.handle(d, msg)
         elif isinstance(kind, str) and kind.startswith("os."):
             if d.kind != "agent":
                 if not d.can(CAP_SHELL):

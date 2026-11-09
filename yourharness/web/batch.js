@@ -17,7 +17,8 @@
     'batch.transform': 'Filter and reshape records',
     'python.map': 'Your own Python function',
   };
-  const STATUS = { running: 'Running', reducing: 'Combining', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };
+  const STATUS = { running: 'Running', reducing: 'Combining', done: 'Done', failed: 'Failed', cancelled: 'Cancelled', needs_approval: 'Needs your approval' };
+  const SETUP_PHASE = { queued: 'Asked', uv: 'Finding uv', python: 'Making the environment', packages: 'Installing packages', preflight: 'Checking it', ready: 'Ready', warning: 'Ready, with a warning', failed: 'Failed' };
   const DECISION = {
     RUN_LOCAL: 'Kept on one computer', RUN_DISTRIBUTED: 'Spread over computers', WAIT_FOR_ELIGIBLE_WORKER: 'Waiting for a computer that can run it',
     NEEDS_SETUP_APPROVAL: 'Needs your approval to set up', UNSUPPORTED: 'Not supported', POLICY_DENIED: 'Not allowed',
@@ -96,7 +97,14 @@
               <label class="field" data-reducer="best"><span>Best is</span><select id="bj-best-order"><option value="max">the highest</option><option value="min">the lowest</option></select></label>
               <label class="field"><span>Records per call</span><input id="bj-batch" type="number" min="1" value="1"></label>
             </div>
-            <p class="hint">Your code runs only on your own computers, with this computer's Python and packages (NumPy is there).</p>
+            <div class="ag-grid">
+              <label class="field"><span>Python to run it with</span><select id="bj-runtime">
+                <option value="native-python">The Python YourHarness runs on, with its packages</option>
+                <option value="managed-python">An environment of its own: a Python version and packages</option></select></label>
+              <label class="field" data-runtime="managed-python"><span>Python version</span><input id="bj-pyver" value="3.12" maxlength="5" placeholder="3.12"></label>
+            </div>
+            <label class="field" data-runtime="managed-python"><span>Packages, one per line (pin versions so every computer gets the same)</span><textarea id="bj-reqs" rows="3" spellcheck="false" placeholder="scikit-learn==1.5.2"></textarea></label>
+            <p class="hint" id="bj-rt-hint">Your code runs only on your own computers, with the Python YourHarness runs on and its packages (NumPy is there).</p>
           </section>
           <section class="panel" data-for="batch.aggregate batch.groupby batch.transform"><h2>Only records where</h2>
             <div id="bj-where" class="stack"></div>
@@ -165,7 +173,7 @@
 
   // ---------------------------------------------------------------- jobs
   function badge(status) {
-    const cls = { done: 'ok', failed: 'bad', running: 'live', reducing: 'live' }[status] || '';
+    const cls = { done: 'ok', failed: 'bad', running: 'live', reducing: 'live', needs_approval: 'warn' }[status] || '';
     return `<span class="ag-badge ${cls}">${esc(STATUS[status] || status)}</span>`;
   }
 
@@ -179,11 +187,28 @@
     return '';
   }
 
+  // A job with its own Python environment waits until you approve preparing it; this
+  // shows exactly what each computer would run before you do.
+  function setupCard(j) {
+    if (j.status === 'needs_approval' && (j.setupPlan || []).length) {
+      const rt = j.runtime || {};
+      return `<div class="ag-warn bj-setup" data-setup="${esc(j.id)}">
+        <p><b>Approve the setup to start.</b> It runs in Python ${esc(rt.python || '')}${(rt.requirements || []).length ? ` with ${esc(rt.requirements.join(', '))}` : ' with no extra packages'}, which no computer has prepared yet. Approving runs, on each computer you tick:</p>
+        ${j.setupPlan.map((s) => `<label class="bj-check"><input type="checkbox" data-setup-device="${esc(s.id)}" checked> <b>${esc(s.name)}</b></label>
+          <ol class="bj-steps">${s.steps.map((x) => `<li><code>${esc(x)}</code></li>`).join('')}</ol>`).join('')}
+        <label class="bj-check"><input type="checkbox" data-setup-downloads> Let them download what's missing. ${esc(j.setupPlan[0].downloads)}</label>
+        <p class="hint">Without downloads, only a uv and a Python ${esc(rt.python || '')} already on the computer are used, and packages come from uv's cache. Nothing is installed into the computer's own Python.</p>
+        <div class="ag-actions"><button class="btn primary small" type="button" data-act="approve-setup" data-id="${esc(j.id)}">Approve the setup</button></div></div>`;
+    }
+    if (!(j.setup || []).length || ['done', 'cancelled'].includes(j.status)) return '';
+    return `<p class="hint">Python environment: ${j.setup.map((s) => `${esc(s.device)} ${esc(SETUP_PHASE[s.phase] || s.phase)}${s.phase === 'ready' || !s.note ? '' : ` (${esc(s.note)})`}${s.error ? `: <span class="error">${esc(s.error)}</span>` : ''}`).join(' · ')}</p>`;
+  }
+
   function jobCard(j) {
     const done = (j.counts && j.counts.done) || 0;
     const pct = j.total ? Math.round((done / j.total) * 100) : 100;
     const acts = [`<button class="btn ghost small" type="button" data-act="detail" data-id="${esc(j.id)}">Details</button>`];
-    if (['running', 'reducing'].includes(j.status)) acts.push(`<button class="btn ghost small danger" type="button" data-act="cancel" data-id="${esc(j.id)}">Cancel</button>`);
+    if (['running', 'reducing', 'needs_approval'].includes(j.status)) acts.push(`<button class="btn ghost small danger" type="button" data-act="cancel" data-id="${esc(j.id)}">Cancel</button>`);
     if (['failed', 'cancelled'].includes(j.status)) acts.push(`<button class="btn ghost small" type="button" data-act="retry" data-id="${esc(j.id)}">Retry</button>`);
     if (j.status === 'done') acts.push(`<a class="btn ghost small" href="/api/engine/jobs/${encodeURIComponent(j.id)}/result" download>Download the result</a>`);
     if (['done', 'failed', 'cancelled'].includes(j.status)) acts.push(`<button class="btn ghost small" type="button" data-act="delete" data-id="${esc(j.id)}">Delete</button>`);
@@ -196,7 +221,7 @@
       <div class="bj-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
       <p class="hint">${nf.format(done)} of ${nf.format(j.total)} partitions${who ? ` · ${who}` : ''}</p>
       ${j.note ? `<p>${esc(j.note)}</p>` : ''}${j.error ? `<p class="error">${esc(j.error)}</p>` : ''}
-      ${resultText(j) ? `<p>${resultText(j)}</p>` : ''}${validation}</section>`;
+      ${setupCard(j)}${resultText(j) ? `<p>${resultText(j)}</p>` : ''}${validation}</section>`;
   }
 
   function renderJobs() {
@@ -211,9 +236,23 @@
     const j = B.jobs.get(id);
     const old = document.querySelector(`#bj-jobs [data-job="${CSS.escape(id)}"]`);
     if (!j || !old) { renderJobs(); return; }
+    const ticks = new Map([...old.querySelectorAll('.bj-setup input[type="checkbox"]')].map((c) => [c.dataset.setupDevice || 'downloads', c.checked]));
     const tmp = document.createElement('div');
     tmp.innerHTML = jobCard(j);
-    old.replaceWith(tmp.firstElementChild);
+    const card = tmp.firstElementChild;
+    card.querySelectorAll('.bj-setup input[type="checkbox"]').forEach((c) => { const k = c.dataset.setupDevice || 'downloads'; if (ticks.has(k)) c.checked = ticks.get(k); });
+    old.replaceWith(card);
+  }
+
+  async function approveSetup(id) {
+    const box = document.querySelector(`[data-setup="${CSS.escape(id)}"]`);
+    if (!box) return;
+    const devices = [...box.querySelectorAll('[data-setup-device]')].filter((c) => c.checked).map((c) => c.dataset.setupDevice);
+    if (!devices.length) { alert('Tick at least one computer.'); return; }
+    const downloads = !!(box.querySelector('[data-setup-downloads]') || {}).checked;
+    const { job } = await api('POST', `/api/engine/jobs/${encodeURIComponent(id)}/approve-setup`, { devices, downloads });
+    B.jobs.set(job.id, job);
+    renderJob(job.id);
   }
 
   async function showDetail(id) {
@@ -298,6 +337,15 @@
       wl.batch = Number($('#bj-batch').value) || 1;
       if (wl.reducer === 'best') wl.bestBy = { key: $('#bj-best-key').value.trim(), order: $('#bj-best-order').value };
     }
+    let runtime;
+    if (kind === 'python.map' && $('#bj-runtime').value === 'managed-python') {
+      const python = $('#bj-pyver').value.trim() || '3.12';
+      if (!/^3\.\d{1,2}$/.test(python)) throw new Error('The Python version should look like 3.12.');
+      const requirements = $('#bj-reqs').value.split('\n').map((x) => x.trim()).filter((x) => x && !x.startsWith('#'));
+      const bad = requirements.find((r) => !/^[A-Za-z0-9]/.test(r));
+      if (bad) throw new Error(`“${bad}” isn't a package requirement. Write one package per line, like numpy==2.1.3.`);
+      runtime = { kind: 'managed-python', python, requirements };
+    }
     const where = [...document.querySelectorAll('#bj-where .bj-row')].map((r) => {
       const w = { field: $('[data-w="field"]', r).value.trim(), op: $('[data-w="op"]', r).value };
       if (!['exists', 'missing'].includes(w.op)) w.value = ['contains', 'regex'].includes(w.op) ? $('[data-w="value"]', r).value : value($('[data-w="value"]', r).value);
@@ -321,7 +369,7 @@
     return {
       apiVersion: API_VERSION, kind: 'Job', metadata: { name: $('#bj-name').value.trim() || KINDS[kind] },
       spec: {
-        mode: $('#bj-mode').value, workload: wl, inputs, partitioning,
+        mode: $('#bj-mode').value, workload: wl, inputs, partitioning, ...(runtime ? { runtime } : {}),
         security: { allowedTrust: kind === 'python.map' ? 'owned-only' : $('#bj-trust').value },
         retry: { maxAttempts: Number($('#bj-tries').value) || 3, timeoutSeconds: Number($('#bj-timeout').value) || 900 },
         output: { onBadRecord: $('#bj-bad').value, spotCheck: Math.max(0, Number($('#bj-spot').value) || 0) },
@@ -342,7 +390,10 @@
       box.innerHTML = `<h2>${esc(DECISION[p.decision] || p.decision)}</h2><p>${esc((p.reasons || []).join(' '))}</p>
         <div class="scroll-x"><table class="res-table ag-table"><thead><tr><th>Computer</th><th>Can run it</th><th>Speed</th></tr></thead><tbody>
         ${(p.devices || []).map((d) => `<tr><td>${esc(d.name)}${d.owned ? '' : ' <span class="hint">(friend)</span>'}</td><td>${d.eligible ? '<span class="ag-badge ok">Yes</span>' : `<span class="ag-badge">No</span> <span class="hint">${esc(d.why || '')}</span>`}</td>
-          <td>${d.eligible ? `${p.unit === 'items' ? `${d.rate.toFixed(1)} items/s` : `${bytes(d.rate)}/s`}${d.measured ? '' : ' (estimate)'}` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+          <td>${d.eligible ? `${p.unit === 'items' ? `${d.rate.toFixed(1)} items/s` : `${bytes(d.rate)}/s`}${d.measured ? '' : ' (estimate)'}` : ''}</td></tr>`).join('')}</tbody></table></div>
+        ${(p.setup || []).length ? `<p class="hint">Once you start it, the job waits for you to approve the setup. Each of these computers would run:</p>
+          ${p.setup.map((s) => `<p><b>${esc(s.name)}</b></p><ol class="bj-steps">${s.steps.map((x) => `<li><code>${esc(x)}</code></li>`).join('')}</ol>`).join('')}
+          <p class="hint">${esc(p.setup[0].downloads)}</p>` : ''}`;
       flash('#bj-status', '');
     } catch (e) { flash('#bj-status', e.message, true); }
   }
@@ -370,6 +421,11 @@
     $('#bj-trust').disabled = kind === 'python.map';
     const best = $('#bj-reducer').value === 'best';
     document.querySelectorAll('#bj-form [data-reducer="best"]').forEach((el) => { el.hidden = !best; });
+    const rt = $('#bj-runtime').value;
+    document.querySelectorAll('#bj-form [data-runtime]').forEach((el) => { el.hidden = el.dataset.runtime !== rt; });
+    $('#bj-rt-hint').textContent = rt === 'managed-python'
+      ? 'Your code runs only on your own computers. Each one prepares this environment with uv the first time, after you approve it, and reuses it for later jobs that ask for the same Python and packages.'
+      : 'Your code runs only on your own computers, with the Python YourHarness runs on and its packages (NumPy is there).';
   }
 
   function renderInputs() {
@@ -439,8 +495,10 @@
     if (!body) return;
     body.innerHTML = B.devices.map((d) => {
       const e = d.engine;
+      const gpus = e && (e.accelerators || []).length ? `<br><span class="hint">GPU: ${esc(e.accelerators.map((a) => `${a.name}${a.memoryGB ? ` ${a.memoryGB} GB` : ''}`).join(', '))}</span>` : '';
+      const envs = e && e.envs ? ` · ${nf.format(e.envs)} prepared environment${e.envs === 1 ? '' : 's'}` : '';
       return `<tr><td><b>${esc(d.name)}</b><br><span class="hint">${esc(d.kind)}</span></td><td>${d.owned ? 'Yours' : 'A friend’s'}</td>
-        <td>${e ? e.slots : ''}</td><td>${e ? esc(e.ops.map((o) => (KINDS[o] || o).split(':')[0]).join(', ')) + `<br><span class="hint">${esc(e.formats.join(', '))} · ${esc(e.runtimes.join(', '))}</span>`
+        <td>${e ? e.slots : ''}</td><td>${e ? esc(e.ops.map((o) => (KINDS[o] || o).split(':')[0]).join(', ')) + `<br><span class="hint">${esc(e.formats.join(', '))} · ${esc(e.runtimes.join(', '))}${envs}</span>${gpus}`
           : `<span class="hint">${d.kind === 'agent' ? 'Runs a YourHarness without batch jobs: update it.' : 'Browser tabs don’t run batch jobs yet.'}</span>`}</td>
         <td>${e ? `${e.busy} of ${e.slots}` : ''}</td></tr>`;
     }).join('') || '<tr><td colspan="5" class="hint">No devices are connected.</td></tr>';
@@ -470,6 +528,7 @@
       case 'close-detail': B.detail = null; $('#bj-detail').hidden = true; break;
       case 'cancel': if (confirm('Cancel this job?')) act(() => api('POST', `/api/engine/jobs/${encodeURIComponent(id)}/cancel`, {})); break;
       case 'retry': act(() => api('POST', `/api/engine/jobs/${encodeURIComponent(id)}/retry`, {})); break;
+      case 'approve-setup': act(() => approveSetup(id)); break;
       case 'delete': if (confirm('Delete this job and its results?')) act(async () => { await api('DELETE', `/api/engine/jobs/${encodeURIComponent(id)}`); B.jobs.delete(id); renderJobs(); }); break;
       case 'add-dataset': addDataset(); break;
       case 'preview': act(async () => {
@@ -492,7 +551,7 @@
   }
 
   function onChange(e) {
-    if (['bj-kind', 'bj-input', 'bj-reducer'].includes(e.target.id)) showKind();
+    if (['bj-kind', 'bj-input', 'bj-reducer', 'bj-runtime'].includes(e.target.id)) showKind();
   }
 
   function renderAll() { renderJobs(); renderDatasets(); renderInputs(); renderComputers(); }

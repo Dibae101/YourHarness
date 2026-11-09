@@ -101,6 +101,17 @@ class Planner:
                 ok.append((d, row))
         plan: dict = {"units": units, "unit": "items" if items else "bytes", "devices": rows, "pin": None}
         if not ok:
+            from .runtime import SETUP_NEEDED
+
+            need_setup = [d for d, r in zip(devices, rows) if r["why"] == SETUP_NEEDED]
+            if need_setup:
+                plan.update(decision="NEEDS_SETUP_APPROVAL", targetBytes=None, itemsPerPartition=None,
+                            setup=self.m.runtimes.setup_plan(job, need_setup),
+                            reasons=[f"{', '.join(d.name for d in need_setup)} can run it once its Python environment is prepared. "
+                                     "Approve the setup to start."])
+                plan["itemsPerPartition"] = self._items_per(spec, units, sum(r["slots"] for r in rows if r["why"] == SETUP_NEEDED)) if items else None
+                plan["targetBytes"] = None if items else self._target(spec, ds, max(1, len(need_setup) * 2), DEFAULT_RATE.get(wl["type"], 5e6))
+                return plan
             plan.update(decision="WAIT_FOR_ELIGIBLE_WORKER", targetBytes=None,
                         reasons=["No computer can run this job right now."] + [f"{r['name']} {r['why']}." for r in rows])
             return plan
