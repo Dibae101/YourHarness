@@ -48,9 +48,18 @@ MIGRATIONS = [
         "CREATE TABLE perf (device_id TEXT, workload TEXT, units INTEGER, seconds REAL, ts REAL)",
         "CREATE INDEX perf_by_device ON perf (device_id, workload, ts)",
     ],
+    # 1 -> 2: models for ml.evaluate; attempts that re-run an accepted partition to check it
+    [
+        """CREATE TABLE models (
+            id TEXT PRIMARY KEY, name TEXT, adapter TEXT, format TEXT, sha TEXT, size INTEGER, meta TEXT,
+            created_by TEXT, created_at REAL)""",
+        "ALTER TABLE attempts ADD COLUMN purpose TEXT NOT NULL DEFAULT 'run'",
+        "ALTER TABLE attempts ADD COLUMN lease_until REAL",
+        "CREATE INDEX attempts_by_purpose ON attempts (purpose, status)",
+    ],
 ]
 JSON_COLUMNS = {"meta", "spec", "plan", "result", "outputs", "validation", "depends_on", "input", "output", "checkpoint", "metrics", "data"}
-TABLES = ("artifacts", "datasets", "jobs", "stages", "partitions", "attempts", "events", "perf")
+TABLES = ("artifacts", "datasets", "models", "jobs", "stages", "partitions", "attempts", "events", "perf")
 
 
 class EngineDB:
@@ -134,6 +143,9 @@ class EngineDB:
 
     def dataset(self, ds_id: str) -> dict | None:
         return self.one("SELECT * FROM datasets WHERE id = ?", (ds_id,))
+
+    def model(self, model_id: str) -> dict | None:
+        return self.one("SELECT * FROM models WHERE id = ?", (model_id,))
 
     def stage(self, stage_id: str) -> dict | None:
         return self.one("SELECT * FROM stages WHERE id = ?", (stage_id,))

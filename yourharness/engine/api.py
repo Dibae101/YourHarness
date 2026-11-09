@@ -57,7 +57,10 @@ class EngineAPI:
         r.add_post("/api/engine/jobs/{job}/approve-setup", self.approve_setup)
         r.add_delete("/api/engine/jobs/{job}", self.delete_job)
         r.add_get("/api/engine/jobs/{job}/result", self.result)
+        r.add_put("/api/engine/models", self.upload_model)
+        r.add_delete("/api/engine/models/{model}", self.delete_model)
         r.add_get("/api/engine/attempts/{pid}/{n}/input", self.attempt_input)
+        r.add_get("/api/engine/attempts/{pid}/{n}/model", self.attempt_model)
         r.add_put("/api/engine/attempts/{pid}/{n}/outputs/{name}", self.attempt_output)
 
     # ------------------------------------------------------------------ helpers
@@ -161,6 +164,22 @@ class EngineAPI:
         self._run(self.m.delete_dataset, self._id(request, "ds"))
         return web.json_response({"ok": True})
 
+    # ------------------------------------------------------------------ models
+    async def upload_model(self, request):
+        """PUT the model file as the body: ?name=model.py (or .zip, .pt)&adapter=python|torchscript."""
+        rec = self._who(request, write=True)
+        try:
+            model = await self.m.add_model(request.query.get("name", ""), request.query.get("adapter") or None, _body_chunks(request),
+                                           self._name(rec))
+        except (EngineError, StoreError) as e:
+            raise _fail(400, str(e))
+        return web.json_response({"model": model}, status=201)
+
+    async def delete_model(self, request):
+        self._who(request, write=True)
+        self._run(self.m.delete_model, self._id(request, "model"))
+        return web.json_response({"ok": True})
+
     # ------------------------------------------------------------------ jobs
     async def plan(self, request):
         self._who(request)
@@ -249,6 +268,20 @@ class EngineAPI:
                                            "Cache-Control": "no-store"})
         await resp.prepare(request)
         async for chunk in self.m.store.stream_range(sha, start, end):
+            await resp.write(chunk)
+        await resp.write_eof()
+        return resp
+
+    async def attempt_model(self, request):
+        """The model of the attempt's job, for ml.evaluate. The worker checks its SHA-256 itself."""
+        p, _a = self._attempt(request)
+        try:
+            sha, size = self.m.attempt_model(p)
+        except EngineError as e:
+            raise _fail(400, str(e))
+        resp = web.StreamResponse(headers={"Content-Type": "application/octet-stream", "Content-Length": str(size), "Cache-Control": "no-store"})
+        await resp.prepare(request)
+        async for chunk in self.m.store.stream_range(sha, 0, size):
             await resp.write(chunk)
         await resp.write_eof()
         return resp

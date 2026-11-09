@@ -30,21 +30,23 @@ def file_chunks(path: Path, start: int, end: int, size: int = CHUNK):
 
 
 def run_range(job: dict, dataset: dict, path: Path, start: int, end: int, ctx: dict | None = None,
-              halo_bytes: int | None = None) -> tuple[dict, list]:
+              halo_bytes: int | None = None, model: dict | None = None) -> tuple[dict, list]:
     """One byte-range partition: (its state, the records it wrote).
 
     halo_bytes limits how much of the data before the partition is read for operators
-    that need earlier records; by default all of it, which is always enough.
+    that need earlier records; by default all of it, which is always enough. model is
+    {"adapter", "path"} for ml.evaluate.
     """
     wl = job["spec"]["workload"]
+    bad = job["spec"]["output"]["onBadRecord"]
     out: list = []
-    op = make_op(wl, ctx, out.append)
+    op = make_op(wl, ctx, out.append, bad=bad, model=model)
     if halo_records_needed(wl) and start > dataset["dataStart"]:
         h0 = dataset["dataStart"] if halo_bytes is None else max(dataset["dataStart"], start - halo_bytes)
         try:
             feed_halo(op, wl, dataset["format"], dataset.get("header"), file_chunks(path, h0, start), h0, dataset["dataStart"])
         except HaloTooSmall:
-            op = make_op(wl, ctx, out.append)
+            op = make_op(wl, ctx, out.append, bad=bad, model=model)
             feed_halo(op, wl, dataset["format"], dataset.get("header"), file_chunks(path, dataset["dataStart"], start),
                       dataset["dataStart"], dataset["dataStart"])
     run_partition(op, dataset["format"], dataset.get("header"), file_chunks(path, start, end), start,
@@ -53,14 +55,14 @@ def run_range(job: dict, dataset: dict, path: Path, start: int, end: int, ctx: d
 
 
 def reference(job: dict, dataset: dict, path: Path, ranges: list[tuple[int, int]] | None = None,
-              merge_order: list[int] | None = None, ctx: dict | None = None) -> dict:
+              merge_order: list[int] | None = None, ctx: dict | None = None, model: dict | None = None) -> dict:
     """The job's result computed here. ranges defaults to one partition over all the data."""
     wl = job["spec"]["workload"]
     if ranges is None:
         ranges = [(dataset["dataStart"], dataset["size"])] if dataset["size"] > dataset["dataStart"] else []
     states, records = [], []
     for start, end in ranges:
-        st, out = run_range(job, dataset, path, start, end, ctx)
+        st, out = run_range(job, dataset, path, start, end, ctx, model=model)
         states.append(st)
         records.extend(out)
     if merge_order is not None:  # combine in another order, to show the order doesn't matter

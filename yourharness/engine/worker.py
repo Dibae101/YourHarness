@@ -95,16 +95,21 @@ class RecordFile:
 
 
 def run(job: dict, report) -> None:
-    from .execute import feed_halo, make_op, run_items, run_partition
+    from .execute import feed_halo, make_op, run_items, run_partition, writes_records
 
     task = job["task"]
     wl = task["workload"]
     http = Http(job["server"], job["token"], job["partition"], job["attempt"])
     out_dir = Path(job["outDir"])
     out_dir.mkdir(parents=True, exist_ok=True)
-    writes = wl["type"] == "batch.transform" or (wl["type"] == "python.map" and wl.get("reducer") == "concat")
-    sink = RecordFile(out_dir / "part.jsonl", int(task.get("maxOutputBytes") or 4 * 2**30)) if writes else None
-    op = make_op(wl, task.get("ctx") or {}, sink)
+    sink = RecordFile(out_dir / "part.jsonl", int(task.get("maxOutputBytes") or 4 * 2**30)) if writes_records(wl) else None
+    model = None
+    if task.get("model"):
+        from .models import fetch
+
+        folder = fetch(lambda: http.chunks("/model"), Path(job.get("cache") or out_dir.parent / "cache"), task["model"])
+        model = {"adapter": task["model"]["adapter"], "path": str(folder)}
+    op = make_op(wl, task.get("ctx") or {}, sink, bad=task.get("onBadRecord", "fail"), model=model)
     inp = task["input"]
     t0 = time.monotonic()
     read = [0]
@@ -136,6 +141,8 @@ def run(job: dict, report) -> None:
     outputs = {}
     done = {"type": "done", "records": stats["records"], "skipped": stats["skipped"], "bad": stats["bad"], "seconds": round(seconds, 3),
             "bytes": read[0]}
+    if callable(getattr(op, "timings", None)):
+        done["metrics"] = op.timings()
     if sink is not None:
         info = sink.close()
         got = http.upload("part.jsonl", sink.path)
@@ -157,6 +164,8 @@ def run(job: dict, report) -> None:
 
 def classify(e: BaseException) -> str:
     from .execute import HaloTooSmall
+    from .ml import ModelCodeError
+    from .models import ModelIntegrityError
     from .ops import OpError
     from .pyop import UserCodeError
     from .records import RecordError
@@ -165,8 +174,10 @@ def classify(e: BaseException) -> str:
         return "halo"
     if isinstance(e, (RecordError, OpError)):
         return "data"
-    if isinstance(e, UserCodeError):
+    if isinstance(e, (UserCodeError, ModelCodeError)):
         return "code"
+    if isinstance(e, ModelIntegrityError):
+        return "integrity"
     return "infra"
 
 

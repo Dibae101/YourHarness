@@ -327,6 +327,28 @@ def cmd_dataset(a) -> int:
     return 0
 
 
+def cmd_model(a) -> int:
+    c = _client()
+    if a.action in (None, "ls"):
+        rows = c.models()
+        if not rows:
+            print("No models yet. Add one with: harness model add model.py")
+        for m in rows:
+            print(f"{m['ref']}  {m['adapter']:<11}  {_size(m['size']):>9}  sha256 {m['sha'][:12]}…  {m['name']}")
+    elif a.action == "add":
+        if not a.args:
+            print("Name the file: harness model add model.py|model.zip|model.pt [--adapter python|torchscript]", file=sys.stderr)
+            return 1
+        for p in a.args:
+            m = c.add_model(p, name=a.name, adapter=a.adapter)
+            print(f"Added {m['ref']}: {m['name']} ({m['adapter']}, {_size(m['size'])}, sha256 {m['sha']}).")
+    elif a.action == "rm":
+        for ref in a.args:
+            c.delete_model(ref.split(":", 1)[-1])
+            print(f"Deleted {ref}.")
+    return 0
+
+
 def _load_job(path: str) -> dict:
     from .engine.spec import loads
 
@@ -336,7 +358,22 @@ def _load_job(path: str) -> dict:
 
 def _print_engine_result(job: dict) -> None:
     r = job.get("result") or {}
-    if job.get("outputs"):
+    if job.get("workload") == "ml.evaluate" and "classes" in r:
+        acc = "n/a" if r["accuracy"] is None else f"{r['accuracy']:.4f}"
+        print(f"accuracy {acc} ({r['correct']:,} of {r['samples']:,} correct)  macro F1 {r['macro']['f1']:.4f}  weighted F1 {r['weighted']['f1']:.4f}")
+        width = max((len(c["label"]) for c in r["classes"][:50]), default=5)
+        for c in r["classes"][:50]:
+            print(f"  {c['label']:<{width}}  precision {c['precision']:.3f}  recall {c['recall']:.3f}  f1 {c['f1']:.3f}  support {c['support']:,}")
+        if len(r["classes"]) > 50:
+            print(f"  … {len(r['classes']) - 50} more labels: harness job result {job['id']}")
+        if r.get("unlabeled"):
+            print(f"  {r['unlabeled']:,} records had no label and were left out")
+        model = (r.get("provenance") or {}).get("model") or {}
+        if model:
+            print(f"  model {model.get('name')} sha256 {model.get('sha256')}", file=sys.stderr)
+        if job.get("outputs"):
+            print(f"  {job['outputs']['records']:,} predictions written. Save them with: harness job result {job['id']} -o predictions.jsonl")
+    elif job.get("outputs"):
         print(f"{job['outputs']['records']:,} records written ({_size(job['outputs']['bytes'])}). "
               f"Save them with: harness job result {job['id']} -o FILE.jsonl")
     elif "values" in r:
@@ -509,6 +546,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--format", choices=["jsonl", "csv", "text"], help="default: from the file name")
     s.add_argument("--shareable", action="store_true", help="friends' computers may process it, for jobs that allow them")
     s.set_defaults(fn=cmd_dataset)
+
+    s = sub.add_parser("model", help="models for ml.evaluate jobs: ls, add FILE..., rm REF...")
+    s.add_argument("action", nargs="?", choices=["ls", "add", "rm"])
+    s.add_argument("args", nargs="*")
+    s.add_argument("--name", help="what to call the model (default: the file name)")
+    s.add_argument("--adapter", choices=["python", "torchscript"], help="default: python for .py/.zip, torchscript for .pt")
+    s.set_defaults(fn=cmd_model)
 
     s = sub.add_parser("job", help="batch jobs: run JOB.json, plan JOB.json, ls, show ID, wait ID, result ID [-o FILE], "
                                    "approve ID, cancel ID, retry ID")

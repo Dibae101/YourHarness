@@ -47,7 +47,10 @@ WORKLOADS = {
     "batch.groupby": {"input": "dataset", "runtimes": ("builtin",)},
     "batch.transform": {"input": "dataset", "runtimes": ("builtin",)},
     "python.map": {"input": "dataset|items", "runtimes": ("native-python", "managed-python")},
+    "ml.evaluate": {"input": "dataset", "runtimes": ("native-python", "managed-python")},
 }
+CODE_WORKLOADS = ("python.map", "ml.evaluate")  # they run your own code: only on your own computers
+MAX_LABELS = 10_000
 
 
 class SpecError(ValueError):
@@ -199,18 +202,44 @@ def _workload(w, path: str) -> dict:
             out["bestBy"] = {"key": _field(b.get("key"), f"{path}.bestBy.key"),
                              "order": _choice(b.get("order"), f"{path}.bestBy.order", ("max", "min"), "max")}
         return out
+    if t == "ml.evaluate":
+        predictions = w.get("predictions", False)
+        if not isinstance(predictions, bool):
+            raise SpecError(f"{path}.predictions", "should be true or false")
+        labels = w.get("labels")
+        if labels is not None and (not isinstance(labels, list) or not labels or len(labels) > MAX_LABELS
+                                   or any(isinstance(x, (dict, list)) or x is None for x in labels)):
+            raise SpecError(f"{path}.labels", f"should be a list of 1 to {MAX_LABELS:,} labels (text or numbers), in the model's output order")
+        return {"type": t, "label": _field(w.get("label", "label"), f"{path}.label"),
+                "features": _fields(w["features"], f"{path}.features") if w.get("features") is not None else None,
+                "id": _field(w["id"], f"{path}.id") if w.get("id") is not None else None,
+                "batch": _num(w.get("batch"), f"{path}.batch", 1, 100_000, 64, integer=True),
+                "predictions": predictions, "labels": labels,
+                "device": _choice(w.get("device"), f"{path}.device", ("cpu", "auto"), "cpu")}
     raise SpecError(f"{path}.type", "isn't built yet")  # pragma: no cover
 
 
 def _inputs(v, path: str, wl: dict) -> dict:
     v = _obj(v, path)
     need = WORKLOADS[wl["type"]]["input"]
+    model = None
+    if wl["type"] == "ml.evaluate":
+        m = _obj(v.get("model"), f"{path}.model")
+        ref = m.get("ref")
+        if not isinstance(ref, str) or not re.fullmatch(r"model:m[0-9a-f]{8}", ref):
+            raise SpecError(f"{path}.model.ref", 'should be an uploaded model, like "model:m1a2b3c4"')
+        sha = m.get("sha256")
+        if sha is not None and (not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha)):
+            raise SpecError(f"{path}.model.sha256", "should be the model file's SHA-256, 64 hex digits")
+        model = {"ref": ref, "sha256": sha}
+    elif "model" in v:
+        raise SpecError(f"{path}.model", "only ml.evaluate takes a model")
     if "dataset" in v:
         d = _obj(v["dataset"], f"{path}.dataset")
         ref = d.get("ref")
         if not isinstance(ref, str) or not re.fullmatch(r"dataset:d[0-9a-f]{8}", ref):
             raise SpecError(f"{path}.dataset.ref", 'should be a registered dataset, like "dataset:d1a2b3c4"')
-        return {"dataset": {"ref": ref}}
+        return {"dataset": {"ref": ref}, **({"model": model} if model else {})}
     if "dataset" not in need:  # pragma: no cover - every workload takes a dataset today
         raise SpecError(path, "needs a dataset")
     if "items" in need and ("items" in v or "grid" in v):
@@ -283,7 +312,7 @@ def parse(doc) -> dict:
     if sec.get("allowUntrustedNativeFallback"):
         raise SpecError("spec.security.allowUntrustedNativeFallback", "can't be turned on: code never falls back to running unisolated on someone else's computer")
     security = {"allowedTrust": _choice(sec.get("allowedTrust"), "spec.security.allowedTrust", TRUST, "owned-only")}
-    if security["allowedTrust"] != "owned-only" and wl["type"] == "python.map":
+    if security["allowedTrust"] != "owned-only" and wl["type"] in CODE_WORKLOADS:
         raise SpecError("spec.security.allowedTrust", "your own code runs only on your own computers until an isolated runtime is available there")
     retry = _obj(s.get("retry"), "spec.retry")
     retry = {

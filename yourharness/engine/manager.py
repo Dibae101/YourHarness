@@ -10,8 +10,9 @@ Exactly one result per partition is accepted: the first valid one. A late result
 from an attempt that was given up on still counts if no other attempt finished
 first, because a partition computes the same answer wherever it runs. Once every
 partition is accepted, the states are combined by the job's reducer, an optional
-spot check recomputes some partitions on the coordinator and compares them, and
-the job is done. All of this is saved, so a restart picks up where it left off.
+spot check re-runs some partitions and compares them (on the coordinator for
+built-in operators, on another of your computers for your own code: verify.py),
+and the job is done. All of this is saved, so a restart picks up where it left off.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from pathlib import Path
 from ..coordinator.state import CAP_SUBMIT
 from . import spec as jobspec
 from .db import EngineDB
-from .execute import dump_record, make_op, run_items
+from .execute import dump_record, make_op, run_items, writes_records
 from .index import Indexer
 from .local import run_range
 from .ops import halo_records_needed
@@ -44,6 +45,8 @@ from .store import ArtifactStore, StoreError
 log = logging.getLogger("yourharness")
 
 MAX_DATASET = int(float(os.environ.get("HARNESS_MAX_DATASET_GB", 64)) * 2**30)
+MAX_MODEL = int(float(os.environ.get("HARNESS_MAX_MODEL_GB", 8)) * 2**30)
+MODEL_ADAPTERS = ("python", "torchscript")
 MAX_OUTPUT = 4 * 2**30
 INLINE_RESULT = 256 * 1024
 MAX_MOVES = 12
@@ -92,8 +95,10 @@ class EngineManager:
         self._last_sweep = 0.0
         self._last_gc = 0.0
         from .runtime import RuntimeManager
+        from .verify import Verifier
 
         self.runtimes = RuntimeManager(self)  # managed Python environments
+        self.verifier = Verifier(self)  # spot checks of your own code, re-run on another computer
 
     # ------------------------------------------------------------------ start-up
     def start(self) -> None:
@@ -106,6 +111,7 @@ class EngineManager:
             lease = (job["spec"]["spec"]["retry"]["leaseSeconds"] if job else 45) + 30
             self.db.update("partitions", {"id": p["id"]}, {"lease_until": now + lease})  # time for its computer to reconnect
             self._reserve(job, p["device_id"], p["id"], p["attempt"])
+        self.verifier.started(now)
         for j in self.db.all("SELECT id FROM jobs WHERE status = 'reducing'"):
             self._spawn(self._reduce(j["id"]))
 
@@ -203,6 +209,82 @@ class EngineManager:
         self.index_cache.pop(ds_id, None)
         self.s.broadcast({"type": "eng.datasets"}, need=CAP_SUBMIT)
 
+    # ------------------------------------------------------------------ models (ml.evaluate)
+    async def add_model(self, name: str, adapter: str | None, chunks, by: str) -> dict:
+        """Store a model file: model.py, a .zip with model.py at its top, or a TorchScript .pt."""
+        from .models import detect_format
+
+        name = (name or "model").strip()[:200] or "model"
+        head = bytearray()
+
+        async def watched():
+            async for part in chunks:
+                if len(head) < 8:
+                    head.extend(part[: 8 - len(head)])
+                yield part
+
+        try:
+            sha, size = await self.store.put_stream(watched(), "model", MAX_MODEL)
+        except StoreError as e:
+            raise EngineError(str(e)) from None
+        fmt = detect_format(name, bytes(head))
+        adapter = adapter or ("torchscript" if fmt == "pt" else "python")
+        if adapter not in MODEL_ADAPTERS:
+            raise EngineError(f"The adapter should be one of {', '.join(MODEL_ADAPTERS)}.")
+        if fmt is None or (adapter == "python") != (fmt in ("py", "zip")):
+            raise EngineError("A python model is model.py, or a .zip with model.py at its top; a torchscript model is a .pt file "
+                              "saved with torch.jit.save.")
+        meta = {"filename": name}
+        if fmt == "py":
+            try:
+                compile(self.store.path(sha).read_bytes().decode("utf-8"), "model.py", "exec")  # checked, never run here
+            except (SyntaxError, UnicodeDecodeError) as e:
+                raise EngineError(f"model.py doesn't compile: {e}") from None
+        elif fmt == "zip":
+            import zipfile
+
+            try:
+                with zipfile.ZipFile(self.store.path(sha)) as z:
+                    names = z.namelist()
+            except zipfile.BadZipFile:
+                raise EngineError("That .zip can't be read.") from None
+            if "model.py" not in names:
+                raise EngineError("The .zip needs model.py at its top level (not inside a folder).")
+            meta["files"] = names[:200]
+        model_id = "m" + secrets.token_hex(4)
+        self.db.insert("models", {"id": model_id, "name": name, "adapter": adapter, "format": fmt, "sha": sha, "size": size, "meta": meta,
+                                  "created_by": by, "created_at": time.time()})
+        self.db.event(None, "model", {"id": model_id, "name": name, "sha": sha, "by": by})
+        self.s.broadcast({"type": "eng.datasets"}, need=CAP_SUBMIT)
+        return self.model_view(self.db.model(model_id))
+
+    def model_view(self, m: dict) -> dict:
+        return {"id": m["id"], "ref": f"model:{m['id']}", "name": m["name"], "adapter": m["adapter"], "format": m["format"], "sha": m["sha"],
+                "size": m["size"], "files": (m["meta"] or {}).get("files"), "createdBy": m["created_by"], "createdAt": m["created_at"]}
+
+    def models(self) -> list[dict]:
+        return [self.model_view(m) for m in self.db.all("SELECT * FROM models ORDER BY created_at DESC")]
+
+    def delete_model(self, model_id: str) -> None:
+        if self.db.model(model_id) is None:
+            raise EngineError("There's no model with that id.")
+        users = [j for j in self.db.all("SELECT id, spec FROM jobs WHERE status NOT IN ('done', 'failed', 'cancelled')")
+                 if j["spec"]["spec"]["inputs"].get("model", {}).get("ref") == f"model:{model_id}"]
+        if users:
+            raise EngineError("A job that's still running uses this model. Cancel it first.")
+        self.db.conn.execute("DELETE FROM models WHERE id = ?", (model_id,))
+        self.s.broadcast({"type": "eng.datasets"}, need=CAP_SUBMIT)
+
+    def job_model(self, job: dict) -> dict | None:
+        """The model a job was started with, by the SHA-256 pinned in its spec."""
+        m = job["spec"]["spec"]["inputs"].get("model")
+        if not m:
+            return None
+        row = self.db.model(m["ref"].split(":", 1)[1])
+        if row is None or row["sha"] != m["sha256"]:
+            return None
+        return row
+
     # ------------------------------------------------------------------ jobs
     def _resolve(self, body) -> tuple[dict, dict | None]:
         try:
@@ -219,6 +301,17 @@ class EngineManager:
             if halo_records_needed(wl) and ds["format"] == "csv" and ds["meta"].get("quoted"):
                 raise EngineError("This CSV has quoted fields, which may span lines, so a rolling mean can't read across partitions. "
                                   "Convert it to JSON Lines, or remove the rolling mean.")
+        m = job["spec"]["inputs"].get("model")
+        if m:
+            row = self.db.model(m["ref"].split(":", 1)[1])
+            if row is None:
+                raise EngineError(f"There's no model {m['ref']}.")
+            if m["sha256"] and m["sha256"] != row["sha"]:
+                raise EngineError(f"{m['ref']} isn't the version this job asks for: its SHA-256 is {row['sha'][:12]}…, "
+                                  f"the job names {m['sha256'][:12]}….")
+            m["sha256"] = row["sha"]  # the job is pinned to exactly this model, even if another is uploaded under its name
+            if row["adapter"] == "torchscript" and not job["spec"]["workload"]["features"]:
+                raise EngineError("A TorchScript model needs features: the numeric fields it reads, in order.")
         return job, ds
 
     def devices(self) -> list:
@@ -303,9 +396,13 @@ class EngineManager:
         self.db.conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         self.s.broadcast({"type": "eng.job", "job": {"id": job_id, "deleted": True}}, need=CAP_SUBMIT)
 
+    def stop_job(self, job_id: str, status: str, error: str | None) -> None:
+        self._stop_job(job_id, status, error)
+
     def _stop_job(self, job_id: str, status: str, error: str | None) -> None:
         for p in self.db.all("SELECT * FROM partitions WHERE job_id = ? AND status = 'leased'", (job_id,)):
             self._cancel_attempt(p, p["attempt"], "cancelled")
+        self.verifier.cancel_job(job_id)
         with self.db.tx():
             self.db.conn.execute("UPDATE partitions SET status = 'cancelled' WHERE job_id = ? AND status IN ('ready', 'leased')", (job_id,))
             self.db.update("jobs", {"id": job_id}, {"status": status, "error": error, "finished_at": time.time(), "updated_at": time.time()})
@@ -361,6 +458,7 @@ class EngineManager:
                 self._assign(job, meta, p, best)
                 free[best.id] -= 1
                 inflight[best.id] = inflight.get(best.id, 0) + 1
+        self.verifier.dispatch(devices, free)
 
     def _reserve(self, job, device_id, pid, n) -> None:
         if job is None or not device_id:
@@ -381,19 +479,31 @@ class EngineManager:
                                                           "updated_at": now})
             self.db.event(job["id"], "assigned", {"attempt": n, "device": d.name}, p["id"], d.id)
         self._reserve(job, d.id, p["id"], n)
+        d.send({"type": "eng.start", "job": job["id"], "partition": p["id"], "attempt": n, "token": f"{p['id']}.{n}.{secret}",
+                "timeout": spec["retry"]["timeoutSeconds"], "task": self.task_for(job, meta, p, d)})
+        self._changed(job["id"])
+
+    def task_for(self, job: dict, meta: dict | None, p: dict, d, resume: bool = True) -> dict:
+        """What a computer needs to run partition p: everything but its input bytes, which it streams."""
+        spec = job["spec"]["spec"]
         inp = dict(p["input"])
         if inp["kind"] == "items":
             inp["items"] = spec["inputs"]["items"][inp["first"]:inp["first"] + inp["count"]]
         task = {"workload": spec["workload"], "input": inp, "onBadRecord": spec["output"]["onBadRecord"],
-                "checkpoint": p["checkpoint"], "checkpointEvery": spec["retry"]["checkpointIntervalSeconds"],
+                "checkpoint": p["checkpoint"] if resume else None, "checkpointEvery": spec["retry"]["checkpointIntervalSeconds"],
                 "ctx": {}, "runtime": spec["runtime"], "maxOutputBytes": MAX_OUTPUT}
         if meta is not None:
             task.update(format=meta["format"], header=meta.get("header"), dataStart=meta["dataStart"])
         if spec["runtime"]["kind"] == "managed-python" and self.runtimes is not None:
             task["env"] = self.runtimes.env_for(job, d)
-        d.send({"type": "eng.start", "job": job["id"], "partition": p["id"], "attempt": n, "token": f"{p['id']}.{n}.{secret}",
-                "timeout": spec["retry"]["timeoutSeconds"], "task": task})
-        self._changed(job["id"])
+        model = self.job_model(job)
+        if model is not None:
+            task["model"] = {"sha": model["sha"], "size": model["size"], "adapter": model["adapter"], "format": model["format"]}
+        return task
+
+    @staticmethod
+    def hash_secret(secret: str) -> str:
+        return _hash(secret)
 
     def _cancel_attempt(self, p: dict, n: int, status: str) -> None:
         a = self.db.attempt(p["id"], n)
@@ -416,8 +526,11 @@ class EngineManager:
         for pid, n in reported:
             p = self.db.partition(pid)
             a = self.db.attempt(pid, n) if p else None
+            if self.verifier.keeps(a, d):
+                continue
             if p is None or a is None or a["device_id"] != d.id or p["status"] == "done" or a["status"] not in LIVE_ATTEMPT:
                 d.send({"type": "eng.cancel", "partition": pid, "attempt": n})
+        self.verifier.device_connected(d, reported)
         self.runtimes.device_connected(d)
         self.dispatch()
 
@@ -451,6 +564,7 @@ class EngineManager:
                 p = self.db.partition(row["partition_id"])
                 self._cancel_attempt(p, row["n"], "failed")
                 self._failed(p, f"It ran past the {limit} s time limit on {row['device_name']}.", retryable=True)
+        self.verifier.sweep(now)
         for key in [k for k, until in self.refused.items() if until < now]:
             self.refused.pop(key, None)
         if now - self._last_gc > 3600:
@@ -470,6 +584,9 @@ class EngineManager:
         if p is None or a is None or a["device_id"] != d.id:
             if kind == "eng.progress":
                 d.send({"type": "eng.cancel", "partition": pid, "attempt": n})
+            return
+        if a.get("purpose") == "verify":
+            self.verifier.handle(p, a, d, msg)
             return
         current = p["status"] == "leased" and p["attempt"] == n
         if kind == "eng.progress":
@@ -543,10 +660,15 @@ class EngineManager:
                 return "its state was never uploaded"
         elif not isinstance(state, dict):
             return "it has no result state"
-        wl = job["spec"]["spec"]["workload"]
-        if (wl["type"] == "batch.transform" or (wl["type"] == "python.map" and wl["reducer"] == "concat")) and "part.jsonl" not in outputs:
+        if writes_records(job["spec"]["spec"]["workload"]) and "part.jsonl" not in outputs:
             return "the records it wrote are missing"
         return None
+
+    def check_result(self, job: dict, p: dict, a: dict, msg: dict) -> str | None:
+        return self._check_result(job, p, a, msg)
+
+    def state_of(self, p: dict) -> dict:
+        return self._state_of(p)
 
     def _commit(self, job: dict, p: dict, a: dict, d, msg: dict) -> None:
         now = time.time()
@@ -564,8 +686,12 @@ class EngineManager:
                                         out["records"], p["id"]))
             if cur.rowcount != 1:
                 return  # accepted by someone else a moment ago
-            self.db.update("attempts", {"partition_id": p["id"], "n": a["n"]}, {"status": "done", "ended_at": now,
-                                                                              "metrics": {"seconds": msg.get("seconds"), "bytes": msg.get("bytes")}})
+            metrics = {"seconds": msg.get("seconds"), "bytes": msg.get("bytes")}
+            extra = msg.get("metrics") if isinstance(msg.get("metrics"), dict) else {}
+            for k in ("predictSeconds", "predictCalls"):
+                if isinstance(extra.get(k), (int, float)) and not isinstance(extra.get(k), bool):
+                    metrics[k] = extra[k]
+            self.db.update("attempts", {"partition_id": p["id"], "n": a["n"]}, {"status": "done", "ended_at": now, "metrics": metrics})
             self.db.conn.execute("UPDATE stages SET done = done + 1 WHERE id = ?", (p["stage_id"],))
             wl_type = job["spec"]["spec"]["workload"]["type"]
             units = p["input"]["count"] if p["input"]["kind"] == "items" else p["input"]["end"] - p["input"]["start"]
@@ -629,6 +755,11 @@ class EngineManager:
                 stored = {"artifact": self.store.put_bytes(text.encode("utf-8"), "result"), "size": len(text),
                           "preview": _preview(wl, result)}
             now = time.time()
+            sample = validation.pop("verifySample", None)
+            if sample:  # your own code: checked by running partitions again on other computers before it's published
+                self.db.update("jobs", {"id": job_id}, {"result": stored, "outputs": outputs, "updated_at": now})
+                self.verifier.begin(job_id, sample, validation)
+                return
             self.db.update("jobs", {"id": job_id}, {"status": "done", "result": stored, "outputs": outputs, "validation": validation,
                                                     "finished_at": now, "updated_at": now, "note": "", "error": None})
             self.db.event(job_id, "status", {"status": "done"})
@@ -659,8 +790,11 @@ class EngineManager:
         skipped = sum(int(p["output"].get("skipped") or 0) for p in parts)
         if skipped:
             result["badRecordsSkipped"] = skipped
+        if wl["type"] == "ml.evaluate":
+            result["provenance"] = self.provenance(job)
+            result["latency"] = self._latency(parts)
         outputs = None
-        if wl["type"] == "batch.transform" or (wl["type"] == "python.map" and wl["reducer"] == "concat"):
+        if writes_records(wl):
             pieces = [{"idx": p["idx"], **p["output"]["outputs"]["part.jsonl"]} for p in parts]
             for piece in pieces:
                 if not self.store.has(piece["sha"]):
@@ -672,6 +806,8 @@ class EngineManager:
         if n:
             rng = random.Random(job["id"])
             sample = sorted(rng.sample(range(len(parts)), n))
+            if spec["runtime"]["kind"] != "builtin":  # your own code never runs in the coordinator: verify.py re-runs it elsewhere
+                return result, outputs, {**validation, "verifySample": [parts[i]["id"] for i in sample]}
             for i in sample:
                 p = parts[i]
                 ref_state, ref_out = self._recompute(job, meta, p)
@@ -685,6 +821,39 @@ class EngineManager:
                                                                          f"{p['device_name']}, differ from the coordinator's. Nothing was published."}
             validation = {"level": "spot-checked", "checks": checks + [f"{n} of {len(parts)} partitions were computed again on the coordinator and matched exactly."]}
         return result, outputs, validation
+
+    def provenance(self, job: dict) -> dict:
+        """Exactly what a result came from: the job, its data, its model and code, and the Python it ran in."""
+        spec = job["spec"]["spec"]
+        out: dict = {"job": hashlib.sha256(_canon(job["spec"]).encode("utf-8")).hexdigest()}
+        ref = spec["inputs"].get("dataset", {}).get("ref")
+        if ref:
+            ds = self.db.dataset(ref.split(":", 1)[1])
+            out["dataset"] = {"ref": ref, "name": ds["name"] if ds else None, "sha256": ds["sha"] if ds else None, "size": ds["size"] if ds else None}
+        m = spec["inputs"].get("model")
+        if m:
+            row = self.db.model(m["ref"].split(":", 1)[1])
+            out["model"] = {"ref": m["ref"], "name": row["name"] if row else None, "sha256": m["sha256"], "adapter": row["adapter"] if row else None}
+        code = spec["workload"].get("code")
+        if code:
+            out["code"] = {"sha256": hashlib.sha256(code.encode("utf-8")).hexdigest()}
+        rt = spec["runtime"]
+        if rt["kind"] == "managed-python":
+            out["environment"] = {"kind": rt["kind"], "id": self.runtimes.fp(job["spec"]), "python": rt["python"], "requirements": rt["requirements"]}
+        else:
+            out["environment"] = {"kind": rt["kind"]}
+        return out
+
+    def _latency(self, parts: list[dict]) -> dict:
+        secs, calls, samples = 0.0, 0, 0
+        for p in parts:
+            a = self.db.attempt(p["id"], p["accepted_attempt"]) if p["accepted_attempt"] else None
+            m = (a or {}).get("metrics") or {}
+            secs += float(m.get("predictSeconds") or 0)
+            calls += int(m.get("predictCalls") or 0)
+            samples += int(p["records"] or 0)
+        return {"predictSeconds": round(secs, 3), "batches": calls, "msPerRecord": round(secs * 1000 / samples, 4) if samples else None,
+                "note": "Measured on each computer while it predicted; timing isn't part of the checked result."}
 
     def _recompute(self, job: dict, meta: dict | None, p: dict) -> tuple[dict, list]:
         inp = p["input"]
@@ -704,9 +873,18 @@ class EngineManager:
         a = self.db.attempt(pid, n) if p else None
         if a is None or a["status"] not in LIVE_ATTEMPT or not hmac.compare_digest(a["token_hash"], _hash(parts[2])):
             return None
+        if a.get("purpose") == "verify":
+            return (p, a) if a["status"] == "running" else None  # re-running an accepted partition to check it
         if p["status"] == "done":
             return None
         return p, a
+
+    def attempt_model(self, p: dict) -> tuple[str, int]:
+        job = self.db.job(p["job_id"])
+        model = self.job_model(job) if job else None
+        if model is None:
+            raise EngineError("This partition's job has no model.")
+        return model["sha"], model["size"]
 
     def input_range(self, p: dict, halo: bool, from_offset: int | None) -> tuple[str, int, int]:
         job = self.db.job(p["job_id"])
@@ -756,6 +934,8 @@ class EngineManager:
         for ds in self.db.all("SELECT sha, meta FROM datasets"):
             keep.add(ds["sha"])
             keep.add(ds["meta"].get("indexSha"))
+        for m in self.db.all("SELECT sha FROM models"):
+            keep.add(m["sha"])
         for j in self.db.all("SELECT result, outputs FROM jobs"):
             if j["result"] and j["result"].get("artifact"):
                 keep.add(j["result"]["artifact"])
@@ -780,21 +960,28 @@ class EngineManager:
         per_device = self.db.all("SELECT device_name AS name, COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS bytes, COALESCE(SUM(records), 0) AS records "
                                  "FROM partitions WHERE job_id = ? AND status = 'done' GROUP BY device_name ORDER BY n DESC", (job["id"],))
         result = job["result"] or {}
+        done = job["status"] == "done"  # a result being checked isn't shown until it passed
+        model = spec["inputs"].get("model")
         view = {
             "id": job["id"], "name": job["name"], "status": job["status"], "note": job["note"] or "", "error": job["error"] or "",
             "decision": job["decision"], "workload": spec["workload"]["type"], "mode": spec["mode"],
             "dataset": {"id": ds["id"], "name": ds["name"], "size": ds["size"]} if ds else None,
+            "model": {"ref": model["ref"], "sha": model["sha256"]} if model else None,
             "items": len(spec["inputs"]["items"]) if "items" in spec["inputs"] else None,
             "createdBy": job["created_by"], "createdAt": job["created_at"], "startedAt": job["started_at"], "finishedAt": job["finished_at"],
             "total": sum(counts.values()), "counts": counts, "perDevice": per_device,
-            "result": result.get("value") if "value" in result else result.get("preview"), "resultTruncated": "artifact" in result,
-            "outputs": {"records": job["outputs"]["records"], "bytes": job["outputs"]["bytes"]} if job["outputs"] else None,
-            "validation": job["validation"], "plan": {k: (job["plan"] or {}).get(k) for k in ("decision", "reasons", "localSeconds", "distributedSeconds", "localDevice")},
+            "result": (result.get("value") if "value" in result else result.get("preview")) if done else None,
+            "resultTruncated": done and "artifact" in result,
+            "outputs": {"records": job["outputs"]["records"], "bytes": job["outputs"]["bytes"]} if job["outputs"] and done else None,
+            "validation": {k: v for k, v in (job["validation"] or {}).items() if k != "verify"} or None,
+            "verify": self.verifier.view(job),
+            "plan": {k: (job["plan"] or {}).get(k) for k in ("decision", "reasons", "localSeconds", "distributedSeconds", "localDevice")},
             "runtime": spec["runtime"], "setup": self.runtimes.view(job),
             "setupPlan": (job["plan"] or {}).get("setup") if job["status"] == "needs_approval" else None,
         }
         if full:
             view["spec"] = job["spec"]
+            view["provenance"] = self.provenance(job)
             view["partitions"] = [{"idx": p["idx"], "status": p["status"], "device": p["device_name"], "attempt": p["attempt"], "tries": p["tries"],
                                    "moves": p["moves"], "bytes": p["bytes"], "records": p["records"], "error": p["error"],
                                    "seconds": round((p["finished_at"] or time.time()) - p["started_at"], 1) if p["started_at"] else None,
@@ -814,7 +1001,7 @@ class EngineManager:
 
     def overview(self) -> dict:
         jobs = [self.job_view(j) for j in self.db.all("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 50")]
-        return {"jobs": jobs, "datasets": self.datasets(), "storage": self.store.usage()}
+        return {"jobs": jobs, "datasets": self.datasets(), "models": self.models(), "storage": self.store.usage()}
 
     def _changed(self, job_id: str) -> None:
         self._dirty.add(job_id)

@@ -203,18 +203,35 @@ class Client:
             q["format"] = fmt
         if classification:
             q["classification"] = classification
+        return self._put_file("/api/engine/datasets", q, path)["dataset"]
+
+    def _put_file(self, route: str, query: dict, path: Path) -> dict:
         hdrs = {"Authorization": f"Bearer {self.token}", "Content-Length": str(path.stat().st_size), "Content-Type": "application/octet-stream"}
         with open(path, "rb") as f:
-            req = urllib.request.Request(f"{self.server}/api/engine/datasets?{urllib.parse.urlencode(q)}", data=f, headers=hdrs, method="PUT")
+            req = urllib.request.Request(f"{self.server}{route}?{urllib.parse.urlencode(query)}", data=f, headers=hdrs, method="PUT")
             try:
                 with urllib.request.urlopen(req, timeout=3600) as res:
-                    return json.loads(res.read())["dataset"]
+                    return json.loads(res.read())
             except urllib.error.HTTPError as e:
                 try:
                     message = json.loads(e.read()).get("error")
                 except ValueError:
                     message = None
                 raise PoolError(message or f"The coordinator answered {e.code}.") from None
+
+    def models(self) -> list[dict]:
+        return self.request("GET", "/api/engine")["models"]
+
+    def add_model(self, path: str | Path, name: str | None = None, adapter: str | None = None) -> dict:
+        """Upload a model for ml.evaluate: model.py, a .zip with model.py at its top, or a TorchScript .pt."""
+        path = Path(path)
+        q = {"name": name or path.name}
+        if adapter:
+            q["adapter"] = adapter
+        return self._put_file("/api/engine/models", q, path)["model"]
+
+    def delete_model(self, model_id: str) -> None:
+        self.request("DELETE", f"/api/engine/models/{urllib.parse.quote(model_id)}")
 
     def import_dataset(self, source: str, path: str, **opts) -> dict:
         return self.request("POST", "/api/engine/datasets/import", {"source": source, "path": path, **opts}, timeout=3600)["dataset"]

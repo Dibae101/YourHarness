@@ -578,4 +578,5 @@ button.fm-name:hover { text-decoration: underline; }
 .bj-check { display: flex; gap: 8px; align-items: baseline; margin: 6px 0; cursor: pointer; }
 .bj-steps { margin: 4px 0 10px; padding-left: 22px; }
 .bj-steps code { font-size: 0.8125rem; overflow-wrap: anywhere; }
+.ag-table td.bj-diag { font-weight: 600; color: var(--ok); }
 @media (prefers-reduced-motion: reduce) { .bj-bar span { transition: none; } }

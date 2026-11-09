@@ -23,7 +23,7 @@ from typing import Callable
 log = logging.getLogger("yourharness")
 PACKAGE_PARENT = str(Path(__file__).resolve().parent.parent.parent)
 HEARTBEAT_S = float(os.environ.get("HARNESS_ENGINE_BEAT_S", 2))  # the lease is renewed this often while a partition runs
-OPS = ["batch.aggregate", "batch.groupby", "batch.transform", "python.map"]
+OPS = ["batch.aggregate", "batch.groupby", "batch.transform", "python.map", "ml.evaluate"]
 FORMATS = ["text", "jsonl", "csv"]
 
 
@@ -119,7 +119,8 @@ class EngineHost:
                                                         stderr=asyncio.subprocess.PIPE, env=env, cwd=str(self.home),
                                                         limit=64 * 1024 * 1024)
             self.running[key] = proc
-            job = {"server": self.server, "token": m["token"], "partition": pid, "attempt": n, "task": m["task"], "outDir": str(out_dir)}
+            job = {"server": self.server, "token": m["token"], "partition": pid, "attempt": n, "task": m["task"], "outDir": str(out_dir),
+                   "cache": str(self.home / "engine-cache")}
             assert proc.stdin is not None and proc.stdout is not None
             proc.stdin.write((json.dumps(job) + "\n").encode("utf-8"))
             await proc.stdin.drain()

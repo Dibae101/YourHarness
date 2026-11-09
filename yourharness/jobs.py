@@ -24,7 +24,8 @@ import textwrap
 
 from .client import Client, PoolError, setup_text
 
-__all__ = ["dataset", "aggregate", "group_by", "transform", "map_items", "map_records", "where", "run", "plan", "PoolError", "SetupNeeded"]
+__all__ = ["dataset", "model", "aggregate", "group_by", "transform", "map_items", "map_records", "evaluate", "where", "run", "plan",
+           "PoolError", "SetupNeeded"]
 API_VERSION = "yourharness.dev/v1alpha1"
 
 _client: Client | None = None
@@ -41,6 +42,43 @@ def dataset(path, name: str | None = None, format: str | None = None, shareable:
     """Upload a file as a dataset. Returns its reference, like "dataset:d1a2b3c4"."""
     ds = client().add_dataset(path, name=name, fmt=format, classification="shareable" if shareable else None)
     return ds["ref"]
+
+
+def model(path, name: str | None = None, adapter: str | None = None) -> str:
+    """Upload a model for evaluate(): model.py (defining predict(model, batch) and optionally load(folder)),
+    a .zip with model.py at its top and the files it reads, or a TorchScript .pt (adapter="torchscript").
+    Returns its reference, like "model:m1a2b3c4"."""
+    return client().add_model(path, name=name, adapter=adapter)["ref"]
+
+
+def evaluate(model_ref: str, ds, *, label: str = "label", features=None, id: str | None = None, batch: int = 64,  # noqa: A002
+             predictions: bool = False, labels=None, device: str = "cpu", python: str | None = None, requirements=None,
+             name: str | None = None, **spec) -> dict:
+    """Score a model on a labeled dataset across your computers.
+
+    Returns accuracy, per-class precision/recall/F1, the confusion matrix and where it
+    came from (the model's and the data's SHA-256). With predictions=True the result
+    also has one {"id", "label", "prediction", "correct"} record per sample (see
+    run(..., wait=False) and the job's result download for large ones).
+    """
+    wl = {"type": "ml.evaluate", "label": label, "batch": batch, "predictions": predictions, "device": device}
+    if features is not None:
+        wl["features"] = [features] if isinstance(features, str) else list(features)
+    if id is not None:
+        wl["id"] = id
+    if labels is not None:
+        wl["labels"] = list(labels)
+    ref = model_ref if str(model_ref).startswith("model:") else f"model:{model_ref}"
+    spec, run_opts = _setup_args(_runtime(spec, python, requirements))
+    quiet = bool(spec.pop("quiet", False))
+    done = _wait(_start(_job(wl, {**_ref(ds), "model": {"ref": ref}}, name or "evaluate", **spec), **run_opts), quiet)
+    result = dict(done["result"] or {})
+    if predictions:  # the records are the job's download; the scores are its result
+        import json
+
+        raw = client().engine_result(done["id"])
+        result["predictions"] = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line]
+    return result
 
 
 def where(field: str, op: str, value=None) -> dict:
@@ -86,21 +124,32 @@ def run(job: dict, wait: bool = True, quiet: bool = False, approve_setup: bool =
     raises SetupNeeded, which says exactly what would be installed where.
     """
     c = client()
+    started = _start(job, approve_setup, downloads)
+    if not wait:
+        return started
+    done = _wait(started, quiet)
+    if done.get("resultTruncated") or done.get("outputs"):
+        return c.engine_result(done["id"])
+    return done["result"]
+
+
+def _start(job: dict, approve_setup: bool = False, downloads: bool = False) -> dict:
+    c = client()
     started = c.start_job(job)
     if started["status"] == "needs_approval":
         if not approve_setup:
             raise SetupNeeded(started)
         started = c.approve_setup(started["id"], downloads=downloads)
-    if not wait:
-        return started
-    done = c.wait_engine_job(started["id"], quiet=quiet)
+    return started
+
+
+def _wait(started: dict, quiet: bool = False) -> dict:
+    done = client().wait_engine_job(started["id"], quiet=quiet)
     if done["status"] == "needs_approval":
         raise SetupNeeded(done)
     if done["status"] != "done":
         raise PoolError(done.get("error") or f"The job was {done['status']}.")
-    if done.get("resultTruncated") or done.get("outputs"):
-        return c.engine_result(done["id"])
-    return done["result"]
+    return done
 
 
 def plan(job: dict) -> dict:

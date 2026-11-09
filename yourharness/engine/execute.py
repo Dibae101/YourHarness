@@ -24,12 +24,25 @@ class HaloTooSmall(Exception):
     """The bytes sent before the partition held fewer records than the operator needs. Retried with more."""
 
 
-def make_op(wl: dict, ctx: dict | None, write: Callable[[dict], None] | None):
+def writes_records(wl: dict) -> bool:
+    """Whether the workload writes output records (part.jsonl) besides its state."""
+    t = wl["type"]
+    return t == "batch.transform" or (t == "python.map" and wl.get("reducer") == "concat") or (t == "ml.evaluate" and bool(wl.get("predictions")))
+
+
+def make_op(wl: dict, ctx: dict | None, write: Callable[[dict], None] | None, *, bad: str = "fail", model: dict | None = None):
+    """The operator for a workload. model: {"adapter", "path"} of a fetched model, for ml.evaluate."""
     t = wl["type"]
     if t == "python.map":
         from .pyop import PythonOp
 
         return PythonOp(wl, ctx, write)
+    if t == "ml.evaluate":
+        from .ml import EvaluateOp, load_predictor
+
+        if model is None:
+            raise OpError("ml.evaluate needs its model")
+        return EvaluateOp(wl, ctx, write, load_predictor(model, wl), bad)
     cls = OPS.get(t)
     if cls is None:
         raise OpError(f"this computer can't run {t}")
@@ -71,8 +84,12 @@ def run_partition(op, fmt: str, header, chunks: Iterable[bytes], start: int, *, 
     n = 0
     last = time.monotonic()
     resumable = checkpoint is not None and getattr(op, "resumable", False)
-    for _s, end, rec in iter_records(fmt, chunks, start, header, on_bad=on_bad if bad == "skip" else None):
-        op.feed(rec)
+    feed_at = getattr(op, "feed_at", None)  # operators that need each record's offset (a sample's id)
+    for s, end, rec in iter_records(fmt, chunks, start, header, on_bad=on_bad if bad == "skip" else None):
+        if feed_at is not None:
+            feed_at(s, rec)
+        else:
+            op.feed(rec)
         n += 1
         if (resumable or progress) and n % 256 == 0 and time.monotonic() - last >= every_s:
             last = time.monotonic()

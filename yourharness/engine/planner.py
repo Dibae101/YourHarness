@@ -19,7 +19,7 @@ import os
 from .partition import target_bytes
 
 # Bytes per second one worker slot gets through, before any history exists.
-DEFAULT_RATE = {"batch.aggregate": 25e6, "batch.groupby": 15e6, "batch.transform": 12e6, "python.map": 4e6}
+DEFAULT_RATE = {"batch.aggregate": 25e6, "batch.groupby": 15e6, "batch.transform": 12e6, "python.map": 4e6, "ml.evaluate": 2e6}
 DEFAULT_ITEMS_PER_S = 20.0  # python.map over items: calls per second per slot
 NETWORK_BPS = float(os.environ.get("HARNESS_NETWORK_BPS", 25e6))  # what the coordinator can send to other computers
 PART_OVERHEAD_S = 0.4  # starting a worker process and fetching its input

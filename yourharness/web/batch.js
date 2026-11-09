@@ -16,14 +16,17 @@
     'batch.groupby': 'Totals per group',
     'batch.transform': 'Filter and reshape records',
     'python.map': 'Your own Python function',
+    'ml.evaluate': 'Evaluate a model on labeled records',
   };
-  const STATUS = { running: 'Running', reducing: 'Combining', done: 'Done', failed: 'Failed', cancelled: 'Cancelled', needs_approval: 'Needs your approval' };
+  const CODE_KINDS = ['python.map', 'ml.evaluate'];
+  const STATUS = { running: 'Running', reducing: 'Combining', verifying: 'Checking', done: 'Done', failed: 'Failed', cancelled: 'Cancelled', needs_approval: 'Needs your approval' };
   const SETUP_PHASE = { queued: 'Asked', uv: 'Finding uv', python: 'Making the environment', packages: 'Installing packages', preflight: 'Checking it', ready: 'Ready', warning: 'Ready, with a warning', failed: 'Failed' };
   const DECISION = {
     RUN_LOCAL: 'Kept on one computer', RUN_DISTRIBUTED: 'Spread over computers', WAIT_FOR_ELIGIBLE_WORKER: 'Waiting for a computer that can run it',
     NEEDS_SETUP_APPROVAL: 'Needs your approval to set up', UNSUPPORTED: 'Not supported', POLICY_DENIED: 'Not allowed',
   };
-  const B = { jobs: new Map(), datasets: [], devices: [], tab: 'jobs', detail: null, loaded: false };
+  const B = { jobs: new Map(), datasets: [], models: [], devices: [], tab: 'jobs', detail: null, loaded: false };
+  const pct = (x) => (x == null ? '' : `${(x * 100).toFixed(1)}%`);
 
   async function api(method, path, body, raw) {
     const opts = { method, credentials: 'same-origin', headers: {} };
@@ -40,6 +43,7 @@
       const data = await api('GET', '/api/engine');
       B.jobs = new Map(data.jobs.map((j) => [j.id, j]));
       B.datasets = data.datasets;
+      B.models = data.models || [];
       B.devices = data.devices || [];
       B.storage = data.storage;
       B.loaded = true;
@@ -97,6 +101,19 @@
               <label class="field" data-reducer="best"><span>Best is</span><select id="bj-best-order"><option value="max">the highest</option><option value="min">the lowest</option></select></label>
               <label class="field"><span>Records per call</span><input id="bj-batch" type="number" min="1" value="1"></label>
             </div>
+          </section>
+          <section class="panel" data-for="ml.evaluate"><h2>The model and the labels</h2>
+            <div class="ag-grid">
+              <label class="field"><span>Model (add one in Datasets)</span><select id="bj-model"></select></label>
+              <label class="field"><span>Field with the true label</span><input id="bj-label" value="label"></label>
+              <label class="field"><span>Features the model reads, in order (commas; empty: the whole record)</span><input id="bj-features" placeholder="x1, x2"></label>
+              <label class="field"><span>Sample id field (empty: the record's position)</span><input id="bj-id" placeholder="id"></label>
+              <label class="field"><span>Records per predict call</span><input id="bj-ml-batch" type="number" min="1" value="64"></label>
+              <label class="field"><span>Label names, in the model's output order (TorchScript; optional)</span><input id="bj-labels" placeholder="cat, dog"></label>
+            </div>
+            <label class="bj-check"><input type="checkbox" id="bj-preds"> Also write every prediction (id, label, prediction, correct) for download</label>
+          </section>
+          <section class="panel" data-for="python.map ml.evaluate"><h2>Python</h2>
             <div class="ag-grid">
               <label class="field"><span>Python to run it with</span><select id="bj-runtime">
                 <option value="native-python">The Python YourHarness runs on, with its packages</option>
@@ -149,6 +166,16 @@
           <p id="bj-ds-status" class="hint" aria-live="polite"></p>
         </section>
         <div id="bj-datasets" class="stack"></div>
+        <section class="panel"><h2>Add a model</h2>
+          <p class="hint">For “Evaluate a model”. A Python model is a model.py that defines <code>predict(model, batch)</code> (one prediction per sample) and, if it needs one, <code>load(folder)</code>; or a .zip with model.py at its top and the files it reads. A TorchScript model is a .pt saved with torch.jit.save. Every computer checks the model's SHA-256 before using it.</p>
+          <div class="ag-grid">
+            <label class="field"><span>Model file</span><input id="bj-model-file" type="file" accept=".py,.zip,.pt,.pth"></label>
+            <label class="field"><span>Kind</span><select id="bj-model-adapter"><option value="">From the file: .py and .zip are Python, .pt is TorchScript</option><option value="python">Python (model.py)</option><option value="torchscript">TorchScript</option></select></label>
+          </div>
+          <div class="ag-actions"><button class="btn primary" type="button" data-act="add-model">Add the model</button></div>
+          <p id="bj-model-status" class="hint" aria-live="polite"></p>
+        </section>
+        <div id="bj-models" class="stack"></div>
       </section>
       <section class="ag-pane" data-pane="computers" hidden>
         <section class="panel"><h2>What each computer can run</h2>
@@ -173,13 +200,17 @@
 
   // ---------------------------------------------------------------- jobs
   function badge(status) {
-    const cls = { done: 'ok', failed: 'bad', running: 'live', reducing: 'live', needs_approval: 'warn' }[status] || '';
+    const cls = { done: 'ok', failed: 'bad', running: 'live', reducing: 'live', verifying: 'live', needs_approval: 'warn' }[status] || '';
     return `<span class="ag-badge ${cls}">${esc(STATUS[status] || status)}</span>`;
   }
 
   function resultText(j) {
     if (j.status !== 'done') return '';
     const r = j.result || {};
+    if (j.workload === 'ml.evaluate' && r.classes) {
+      return `<b>Accuracy</b> ${esc(pct(r.accuracy))} (${nf.format(r.correct)} of ${nf.format(r.samples)}) · <b>macro F1</b> ${esc((r.macro.f1).toFixed(3))} · ${nf.format(r.classes.length)} labels`
+        + `${r.unlabeled ? ` · ${nf.format(r.unlabeled)} without a label left out` : ''}${j.outputs ? ` · ${nf.format(j.outputs.records)} predictions written` : ''}`;
+    }
     if (r.values) return Object.entries(r.values).map(([k, v]) => `<b>${esc(k)}</b> ${esc(typeof v === 'number' ? nf.format(v) : JSON.stringify(v))}`).join(' · ');
     if (r.groups) return `${nf.format(r.groupsTotal || r.groups.length)} groups`;
     if (j.outputs) return `${nf.format(j.outputs.records)} records written (${bytes(j.outputs.bytes)})`;
@@ -208,7 +239,7 @@
     const done = (j.counts && j.counts.done) || 0;
     const pct = j.total ? Math.round((done / j.total) * 100) : 100;
     const acts = [`<button class="btn ghost small" type="button" data-act="detail" data-id="${esc(j.id)}">Details</button>`];
-    if (['running', 'reducing', 'needs_approval'].includes(j.status)) acts.push(`<button class="btn ghost small danger" type="button" data-act="cancel" data-id="${esc(j.id)}">Cancel</button>`);
+    if (['running', 'reducing', 'verifying', 'needs_approval'].includes(j.status)) acts.push(`<button class="btn ghost small danger" type="button" data-act="cancel" data-id="${esc(j.id)}">Cancel</button>`);
     if (['failed', 'cancelled'].includes(j.status)) acts.push(`<button class="btn ghost small" type="button" data-act="retry" data-id="${esc(j.id)}">Retry</button>`);
     if (j.status === 'done') acts.push(`<a class="btn ghost small" href="/api/engine/jobs/${encodeURIComponent(j.id)}/result" download>Download the result</a>`);
     if (['done', 'failed', 'cancelled'].includes(j.status)) acts.push(`<button class="btn ghost small" type="button" data-act="delete" data-id="${esc(j.id)}">Delete</button>`);
@@ -221,7 +252,8 @@
       <div class="bj-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
       <p class="hint">${nf.format(done)} of ${nf.format(j.total)} partitions${who ? ` · ${who}` : ''}</p>
       ${j.note ? `<p>${esc(j.note)}</p>` : ''}${j.error ? `<p class="error">${esc(j.error)}</p>` : ''}
-      ${setupCard(j)}${resultText(j) ? `<p>${resultText(j)}</p>` : ''}${validation}</section>`;
+      ${setupCard(j)}${j.verify ? `<p class="hint">Checking: ${nf.format(j.verify.matched)} of ${nf.format(j.verify.sample)} partitions run again and matched${j.verify.running.length ? ` · running on ${esc(j.verify.running.join(', '))}` : ''}. The result is shown once every check matched.</p>` : ''}
+      ${resultText(j) ? `<p>${resultText(j)}</p>` : ''}${validation}</section>`;
   }
 
   function renderJobs() {
@@ -268,7 +300,7 @@
       const plan = job.plan || {};
       box.innerHTML = `<div class="panel-head"><h2>${esc(job.name)}</h2><button class="btn ghost small" type="button" data-act="close-detail">Close</button></div>
         ${(plan.reasons || []).length ? `<p class="hint">${esc(plan.reasons.join(' '))}</p>` : ''}
-        ${groups}
+        ${groups}${job.workload === 'ml.evaluate' && r.classes ? scores(r) : ''}${provenance(job.provenance)}
         <div class="scroll-x"><table class="res-table ag-table"><thead><tr><th>#</th><th>Status</th><th>Computer</th><th>Size</th><th>Records</th><th>Time</th><th>Tries</th></tr></thead><tbody>
         ${job.partitions.map((p) => `<tr><td>${p.idx + 1}</td><td>${badge(p.status === 'leased' ? 'running' : p.status)}${p.resumed ? ' <span class="hint">resumed</span>' : ''}${p.error ? `<div class="ag-detail error">${esc(p.error)}</div>` : ''}</td>
           <td>${esc(p.device || '')}</td><td>${bytes(p.bytes)}</td><td>${p.records == null ? '' : nf.format(p.records)}</td><td>${p.seconds == null ? '' : `${p.seconds} s`}</td>
@@ -277,6 +309,32 @@
         <details class="ag-more"><summary>The job as JSON</summary><pre class="ag-log">${esc(JSON.stringify(job.spec, null, 2))}</pre></details>`;
       box.scrollIntoView({ block: 'nearest' });
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  // A model's scores: per label, then the confusion matrix (rows: true labels, columns: predictions).
+  function scores(r) {
+    const f = (x) => esc(x.toFixed(3));
+    const rows = r.classes.slice(0, 200).map((c) => `<tr><td>${esc(c.label)}</td><td>${f(c.precision)}</td><td>${f(c.recall)}</td><td>${f(c.f1)}</td><td>${nf.format(c.support)}</td></tr>`).join('');
+    let matrix = '';
+    if (r.confusion && r.confusion.labels.length <= 30) {
+      const L = r.confusion.labels;
+      matrix = `<details class="ag-more" open><summary>Confusion matrix (rows: true label, columns: predicted)</summary><div class="scroll-x"><table class="res-table ag-table">
+        <thead><tr><th></th>${L.map((l) => `<th>${esc(l)}</th>`).join('')}</tr></thead><tbody>
+        ${r.confusion.rows.map((row, i) => `<tr><th>${esc(L[i])}</th>${row.map((n, k) => `<td${i === k ? ' class="bj-diag"' : ''}>${nf.format(n)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>`;
+    }
+    return `<p><b>Accuracy</b> ${esc(pct(r.accuracy))} · <b>macro</b> precision ${f(r.macro.precision)} recall ${f(r.macro.recall)} F1 ${f(r.macro.f1)} · <b>weighted</b> F1 ${f(r.weighted.f1)}</p>
+      <div class="scroll-x"><table class="res-table ag-table"><thead><tr><th>Label</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${matrix}${r.latency && r.latency.msPerRecord != null ? `<p class="hint">Predicting took ${esc(String(r.latency.msPerRecord))} ms per record on average (${esc(r.latency.note)})</p>` : ''}`;
+  }
+
+  function provenance(p) {
+    if (!p) return '';
+    const bits = [];
+    if (p.dataset) bits.push(`data ${esc(p.dataset.name || p.dataset.ref)} <code>${esc((p.dataset.sha256 || '').slice(0, 12))}</code>`);
+    if (p.model) bits.push(`model ${esc(p.model.name || p.model.ref)} <code>${esc((p.model.sha256 || '').slice(0, 12))}</code>`);
+    if (p.code) bits.push(`code <code>${esc(p.code.sha256.slice(0, 12))}</code>`);
+    if (p.environment && p.environment.id) bits.push(`Python ${esc(p.environment.python)} environment <code>${esc(p.environment.id)}</code>`);
+    return bits.length ? `<p class="hint">Made from: ${bits.join(' · ')} (SHA-256 prefixes).</p>` : '';
   }
 
   // ---------------------------------------------------------------- building a job
@@ -330,6 +388,13 @@
       $('#bj-rename').value.split('\n').forEach((line) => { const [a, b] = line.split('=').map((x) => (x || '').trim()); if (a && b) ren[a] = b; });
       if (Object.keys(ren).length) wl.rename = ren;
       if ($('#bj-roll-field').value.trim()) wl.rolling = { field: $('#bj-roll-field').value.trim(), window: Number($('#bj-roll-window').value) || 10 };
+    } else if (kind === 'ml.evaluate') {
+      wl.label = $('#bj-label').value.trim() || 'label';
+      if (list($('#bj-features').value).length) wl.features = list($('#bj-features').value);
+      if ($('#bj-id').value.trim()) wl.id = $('#bj-id').value.trim();
+      wl.batch = Number($('#bj-ml-batch').value) || 64;
+      wl.predictions = $('#bj-preds').checked;
+      if (list($('#bj-labels').value).length) wl.labels = list($('#bj-labels').value).map(value);
     } else {
       wl.code = $('#bj-code').value;
       wl.function = $('#bj-fn').value.trim() || 'process';
@@ -338,7 +403,7 @@
       if (wl.reducer === 'best') wl.bestBy = { key: $('#bj-best-key').value.trim(), order: $('#bj-best-order').value };
     }
     let runtime;
-    if (kind === 'python.map' && $('#bj-runtime').value === 'managed-python') {
+    if (CODE_KINDS.includes(kind) && $('#bj-runtime').value === 'managed-python') {
       const python = $('#bj-pyver').value.trim() || '3.12';
       if (!/^3\.\d{1,2}$/.test(python)) throw new Error('The Python version should look like 3.12.');
       const requirements = $('#bj-reqs').value.split('\n').map((x) => x.trim()).filter((x) => x && !x.startsWith('#'));
@@ -351,7 +416,7 @@
       if (!['exists', 'missing'].includes(w.op)) w.value = ['contains', 'regex'].includes(w.op) ? $('[data-w="value"]', r).value : value($('[data-w="value"]', r).value);
       return w;
     }).filter((w) => w.field);
-    if (where.length && kind !== 'python.map') wl.where = where;
+    if (where.length && !CODE_KINDS.includes(kind)) wl.where = where;
     if (kind !== 'python.map' && $('#bj-input').value === '__items__') throw new Error('Items work with your own Python function. Pick a dataset for this kind of job.');
     const input = $('#bj-input').value;
     let inputs;
@@ -363,6 +428,10 @@
       if (!input) throw new Error('Add a dataset first (Datasets tab), or pick items for your own function.');
       inputs = { dataset: { ref: input } };
     }
+    if (kind === 'ml.evaluate') {
+      if (!$('#bj-model').value) throw new Error('Add a model first (Datasets tab, “Add a model”).');
+      inputs.model = { ref: $('#bj-model').value };
+    }
     const partitioning = {};
     if (Number($('#bj-target').value) > 0) partitioning.targetBytes = Math.max(1024, Math.round(Number($('#bj-target').value) * 2 ** 20));
     if (Number($('#bj-per').value) > 0) partitioning.itemsPerPartition = Number($('#bj-per').value);
@@ -370,7 +439,7 @@
       apiVersion: API_VERSION, kind: 'Job', metadata: { name: $('#bj-name').value.trim() || KINDS[kind] },
       spec: {
         mode: $('#bj-mode').value, workload: wl, inputs, partitioning, ...(runtime ? { runtime } : {}),
-        security: { allowedTrust: kind === 'python.map' ? 'owned-only' : $('#bj-trust').value },
+        security: { allowedTrust: CODE_KINDS.includes(kind) ? 'owned-only' : $('#bj-trust').value },
         retry: { maxAttempts: Number($('#bj-tries').value) || 3, timeoutSeconds: Number($('#bj-timeout').value) || 900 },
         output: { onBadRecord: $('#bj-bad').value, spotCheck: Math.max(0, Number($('#bj-spot').value) || 0) },
       },
@@ -418,7 +487,7 @@
     const items = $('#bj-input').value === '__items__';
     document.querySelectorAll('#bj-form [data-for]').forEach((el) => { el.hidden = !el.dataset.for.split(' ').includes(kind); });
     $('#bj-items-field').hidden = !items;
-    $('#bj-trust').disabled = kind === 'python.map';
+    $('#bj-trust').disabled = CODE_KINDS.includes(kind);
     const best = $('#bj-reducer').value === 'best';
     document.querySelectorAll('#bj-form [data-reducer="best"]').forEach((el) => { el.hidden = !best; });
     const rt = $('#bj-runtime').value;
@@ -436,7 +505,37 @@
     opts.push(['__items__', 'A list of items or parameters (your own function only)']);
     sel.innerHTML = opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
     if (opts.some(([v]) => v === keep)) sel.value = keep;
+    const ms = $('#bj-model');
+    if (ms) {
+      const had = ms.value;
+      ms.innerHTML = B.models.length ? B.models.map((m) => `<option value="${esc(m.ref)}">${esc(m.name)} (${esc(m.adapter)}, ${esc(m.sha.slice(0, 8))})</option>`).join('')
+        : '<option value="">No models yet: add one in Datasets</option>';
+      if (B.models.some((m) => m.ref === had)) ms.value = had;
+    }
     showKind();
+  }
+
+  async function addModel() {
+    const file = $('#bj-model-file').files && $('#bj-model-file').files[0];
+    if (!file) { flash('#bj-model-status', 'Pick a model file first.', true); return; }
+    const q = new URLSearchParams({ name: file.name });
+    if ($('#bj-model-adapter').value) q.set('adapter', $('#bj-model-adapter').value);
+    flash('#bj-model-status', `Uploading ${file.name} (${bytes(file.size)})…`);
+    try {
+      const { model } = await api('PUT', `/api/engine/models?${q}`, undefined, file);
+      B.models = [model, ...B.models.filter((m) => m.id !== model.id)];
+      flash('#bj-model-status', `Added ${model.name}: ${model.adapter}, ${bytes(model.size)}, SHA-256 ${model.sha.slice(0, 12)}….`);
+      renderModels();
+      renderInputs();
+    } catch (e) { flash('#bj-model-status', e.message, true); }
+  }
+
+  function renderModels() {
+    const box = $('#bj-models');
+    if (!box) return;
+    box.innerHTML = B.models.map((m) => `<section class="panel" data-model="${esc(m.id)}">
+      <div class="panel-head"><h2>${esc(m.name)}</h2><div class="ag-acts"><button class="btn ghost small danger" type="button" data-act="delete-model" data-id="${esc(m.id)}">Delete</button></div></div>
+      <p class="hint">${m.adapter === 'torchscript' ? 'TorchScript' : 'Python'} model · ${bytes(m.size)} · SHA-256 <code>${esc(m.sha)}</code>${m.files ? ` · ${nf.format(m.files.length)} files` : ''} · added ${esc(when(m.createdAt))} by ${esc(m.createdBy || '?')}</p></section>`).join('');
   }
 
   // ---------------------------------------------------------------- datasets
@@ -531,6 +630,8 @@
       case 'approve-setup': act(() => approveSetup(id)); break;
       case 'delete': if (confirm('Delete this job and its results?')) act(async () => { await api('DELETE', `/api/engine/jobs/${encodeURIComponent(id)}`); B.jobs.delete(id); renderJobs(); }); break;
       case 'add-dataset': addDataset(); break;
+      case 'add-model': addModel(); break;
+      case 'delete-model': if (confirm('Delete this model? Finished jobs keep its SHA-256 in their results.')) act(async () => { await api('DELETE', `/api/engine/models/${encodeURIComponent(id)}`); B.models = B.models.filter((m) => m.id !== id); renderModels(); renderInputs(); }); break;
       case 'preview': act(async () => {
         const pre = document.querySelector(`[data-ds="${CSS.escape(id)}"] pre`);
         const { records } = await api('GET', `/api/engine/datasets/${encodeURIComponent(id)}/preview`);
@@ -554,7 +655,7 @@
     if (['bj-kind', 'bj-input', 'bj-reducer', 'bj-runtime'].includes(e.target.id)) showKind();
   }
 
-  function renderAll() { renderJobs(); renderDatasets(); renderInputs(); renderComputers(); }
+  function renderAll() { renderJobs(); renderDatasets(); renderModels(); renderInputs(); renderComputers(); }
 
   window.addEventListener('yh:msg', (e) => {
     const m = e.detail || {};
@@ -572,7 +673,7 @@
       if (had) renderJob(m.job.id); else renderJobs();
       if (B.detail === m.job.id && ['done', 'failed', 'cancelled'].includes(m.job.status)) showDetail(m.job.id);
     } else if (m.type === 'eng.datasets') {
-      api('GET', '/api/engine').then((data) => { B.datasets = data.datasets; renderDatasets(); renderInputs(); }).catch(() => {});
+      api('GET', '/api/engine').then((data) => { B.datasets = data.datasets; B.models = data.models || []; renderDatasets(); renderModels(); renderInputs(); }).catch(() => {});
     }
   });
 

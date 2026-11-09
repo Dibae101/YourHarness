@@ -25,6 +25,10 @@ def merge_states(wl: dict, states: list[dict]) -> dict:
         return {"seen": sum(int(s["seen"]) for s in states), "out": sum(int(s["out"]) for s in states)}
     if t == "python.map":
         return _merge_python(wl, states)
+    if t == "ml.evaluate":
+        from . import ml
+
+        return ml.merge(states)
     raise ReduceError(f"no reducer for {t}")
 
 
@@ -38,6 +42,10 @@ def final_result(wl: dict, st: dict) -> dict:
         return {"records": st["seen"], "written": st["out"]}
     if t == "python.map":
         return _final_python(wl, st)
+    if t == "ml.evaluate":
+        from . import ml
+
+        return ml.final(wl, st)
     raise ReduceError(f"no reducer for {t}")
 
 

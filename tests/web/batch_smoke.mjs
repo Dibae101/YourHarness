@@ -14,6 +14,12 @@ window.confirm = () => true;
 window.HTMLElement.prototype.scrollIntoView = () => {};
 const calls = [];
 const ds = { id: 'd1a2b3c4', ref: 'dataset:d1a2b3c4', name: 'sales.jsonl', format: 'jsonl', size: 123456, lines: 900, header: null, classification: 'owned-private', createdAt: 1, createdBy: 'Mac' };
+const clf = { id: 'm1', ref: 'model:m1', name: 'clf.zip', adapter: 'python', format: 'zip', sha: 'ab'.repeat(32), size: 2000, files: ['model.py', 'weights.json'], createdAt: 1, createdBy: 'Mac' };
+const scored = { id: 'j3', name: 'Score <b>it</b>', status: 'done', workload: 'ml.evaluate', total: 4, counts: { done: 4 }, perDevice: [{ name: 'Mac', n: 2 }, { name: 'PC', n: 2 }], createdAt: 4,
+  startedAt: 4, finishedAt: 6, outputs: { records: 8, bytes: 400 }, validation: { level: 'spot-checked', checks: ['2 of 4 partitions were run again on Mac, PC and matched exactly.'] },
+  result: { samples: 8, correct: 6, accuracy: 0.75, unlabeled: 0, macro: { precision: 0.75, recall: 0.75, f1: 0.75 }, weighted: { precision: 0.75, recall: 0.75, f1: 0.75 },
+    classes: [{ label: 'a', support: 4, predicted: 4, correct: 3, precision: 0.75, recall: 0.75, f1: 0.75 }, { label: '<i>b</i>', support: 4, predicted: 4, correct: 3, precision: 0.75, recall: 0.75, f1: 0.75 }],
+    confusion: { labels: ['a', '<i>b</i>'], rows: [[3, 1], [1, 3]] }, latency: { msPerRecord: 0.02, note: 'Measured on each computer.' } } };
 const steps = (py) => [`uv venv --python ${py} <YourHarness folder>/envs/env-0123456789abcdef0123`, 'uv pip install scikit-learn==1.5.2', 'a check that the packages import and the job’s worker starts'];
 const waiting = { id: 'j2', name: 'Fit', status: 'needs_approval', workload: 'python.map', total: 4, counts: { ready: 4 }, perDevice: [], createdAt: 3,
   runtime: { kind: 'managed-python', python: '3.11', requirements: ['scikit-learn==1.5.2'] }, setup: [],
@@ -24,7 +30,7 @@ window.fetch = async (url, opts = {}) => {
   const body = opts.body && typeof opts.body === 'string' ? JSON.parse(opts.body) : undefined;
   calls.push({ method, url, body });
   const json = (o, status = 200) => ({ ok: status < 400, status, headers: { get: () => 'application/json' }, json: async () => o, text: async () => JSON.stringify(o) });
-  if (url === '/api/engine') return json({ jobs: [], datasets: [ds], storage: { artifacts: 3, bytes: 200000 }, devices: [
+  if (url === '/api/engine') return json({ jobs: [], datasets: [ds], models: [clf], storage: { artifacts: 3, bytes: 200000 }, devices: [
     { id: 'a', name: 'Mac', kind: 'agent', owned: true, engine: { slots: 3, ops: ['batch.aggregate', 'python.map'], formats: ['jsonl', 'csv', 'text'], runtimes: ['builtin', 'native-python', 'managed-python'], busy: 0,
       envs: 2, accelerators: [{ kind: 'metal', name: 'Apple silicon GPU', memoryGB: null, driver: 'Metal' }] } },
     { id: 'b', name: 'iPhone', kind: 'browser', owned: true, engine: null }] });
@@ -39,6 +45,10 @@ window.fetch = async (url, opts = {}) => {
   if (url === '/api/engine/jobs/j1') return json({ job: { id: 'j1', name: 'Totals', plan: { reasons: ['Spread.'] }, result: {}, partitions: [{ idx: 0, status: 'done', device: 'Mac', bytes: 1000, records: 10, seconds: 0.2, attempt: 1, moves: 0 }], events: [], spec: {} } });
   if (url === '/api/engine/jobs/j2/approve-setup') return json({ job: { ...waiting, status: 'running', setupPlan: null, note: 'Preparing its Python environment on Mac.',
     setup: [{ device: 'Mac', phase: 'packages', note: 'Installing 1 package', error: null }] } });
+  if (url.startsWith('/api/engine/models?') && method === 'PUT') return json({ model: { ...clf, id: 'm2', ref: 'model:m2', name: new URL(url, 'http://x').searchParams.get('name'), format: 'py', files: null } }, 201);
+  if (url === '/api/engine/models/m2' && method === 'DELETE') return json({ ok: true });
+  if (url === '/api/engine/jobs/j3') return json({ job: { ...scored, plan: { reasons: [] }, partitions: [], events: [], spec: {},
+    provenance: { dataset: { ref: 'dataset:d1a2b3c4', name: 'sales.jsonl', sha256: 'cd'.repeat(32) }, model: { ref: 'model:m1', name: 'clf.zip', sha256: clf.sha }, environment: { kind: 'native-python' } } } });
   throw new Error(`unexpected ${method} ${url}`);
 };
 window.eval(src);
@@ -157,6 +167,41 @@ assert.deepEqual(calls.find((c) => c.url === '/api/engine/jobs/j2/approve-setup'
 assert.ok(!document.querySelector('[data-setup="j2"]'), 'the approval card goes away');
 assert.match(document.querySelector('[data-job="j2"]').textContent, /Python environment: Mac Installing packages/);
 
+// a model scored on labeled records
+document.querySelector('[data-tab="new"]').click();
+set('#bj-input', 'dataset:d1a2b3c4');
+set('#bj-kind', 'ml.evaluate');
+assert.equal(document.querySelector('#bj-model').value, 'model:m1');
+assert.equal(document.querySelector('#bj-trust').disabled, true, 'a model is your own code');
+assert.equal(document.querySelector('#bj-runtime').closest('section').hidden, false, 'it can run in its own environment too');
+document.querySelector('#bj-features').value = 'x, y';
+document.querySelector('#bj-id').value = 'id';
+document.querySelector('#bj-preds').checked = true;
+document.querySelector('#bj-labels').value = 'a, b';
+document.querySelector('#bj-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await settle();
+const ev = calls.filter((c) => c.method === 'POST' && c.url === '/api/engine/jobs').pop().body.job.spec;
+assert.deepEqual(ev.workload, { type: 'ml.evaluate', label: 'label', features: ['x', 'y'], id: 'id', batch: 64, predictions: true, labels: ['a', 'b'] });
+assert.deepEqual(ev.inputs, { dataset: { ref: 'dataset:d1a2b3c4' }, model: { ref: 'model:m1' } });
+assert.equal(ev.security.allowedTrust, 'owned-only');
+// checking it on another computer, then the scores
+msg({ type: 'eng.job', job: { ...scored, status: 'verifying', result: null, outputs: null, validation: null, verify: { sample: 2, matched: 1, running: ['PC'] } } });
+assert.match(document.querySelector('[data-job="j3"]').textContent, /Checking/);
+assert.match(document.querySelector('[data-job="j3"]').textContent, /1 of 2 partitions run again and matched · running on PC/);
+msg({ type: 'eng.job', job: scored });
+const sc = document.querySelector('[data-job="j3"]');
+assert.match(sc.textContent, /Accuracy 75\.0% \(6 of 8\)/);
+assert.match(sc.textContent, /8 predictions written/);
+assert.ok(!sc.querySelector('h2 b'), 'job names are escaped');
+document.querySelector('[data-act="detail"][data-id="j3"]').click();
+await settle();
+const det = document.querySelector('#bj-detail');
+assert.match(det.textContent, /Confusion matrix/);
+assert.equal(det.querySelectorAll('.bj-diag').length, 2);
+assert.ok(!det.querySelector('td i, th i'), 'labels are escaped');
+assert.match(det.textContent, /model clf\.zip abababababab/);
+set('#bj-kind', 'batch.aggregate');
+
 // datasets: import from the shared folder, preview, share
 document.querySelector('[data-tab="datasets"]').click();
 await settle();
@@ -172,6 +217,21 @@ assert.match(document.querySelector('[data-ds="d1a2b3c4"] pre').textContent, /"a
 document.querySelector('[data-act="share"][data-id="d1a2b3c4"]').click();
 await settle();
 assert.equal(calls.find((c) => c.url === '/api/engine/datasets/d1a2b3c4' && c.method === 'POST').body.classification, 'shareable');
+
+// models: listed with their digest, uploaded, deleted
+assert.match(document.querySelector('#bj-models').textContent, new RegExp(clf.sha));
+const mf = document.querySelector('#bj-model-file');
+Object.defineProperty(mf, 'files', { value: [new window.File(['def predict(model, batch):\n    return batch\n'], 'rule.py')] });
+document.querySelector('[data-act="add-model"]').click();
+await settle();
+const up = calls.find((c) => c.method === 'PUT' && c.url.startsWith('/api/engine/models?'));
+assert.equal(new URL(up.url, 'http://x').searchParams.get('name'), 'rule.py');
+assert.match(document.querySelector('#bj-model-status').textContent, /Added rule\.py/);
+assert.equal(document.querySelectorAll('#bj-model option').length, 2, 'the new model is offered for jobs');
+document.querySelector('[data-act="delete-model"][data-id="m2"]').click();
+await settle();
+assert.ok(calls.find((c) => c.method === 'DELETE' && c.url === '/api/engine/models/m2'));
+assert.equal(document.querySelectorAll('#bj-model option').length, 1);
 
 // computers
 document.querySelector('[data-tab="computers"]').click();
