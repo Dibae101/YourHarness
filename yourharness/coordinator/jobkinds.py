@@ -60,6 +60,10 @@ class Plan:
     params: dict
     runtimes: frozenset = BOTH
     data: dict = field(default_factory=dict)  # kept on the coordinator, never broadcast
+    # Only devices that joined with the owner link may compute it. Code someone typed
+    # runs with the lending computer's account and files, and a search reads the shared
+    # folder, which a lender is not allowed to see; built-in kernels are safe to lend.
+    owners_only: bool = False
 
 
 @dataclass
@@ -136,7 +140,7 @@ def _plan_grep(p, ctx):
         raise UserError(f"{name} is empty, so there is nothing to search.")
     chunk = clamp_int(p.get("chunkMB"), 1, 256, 4) * 1024 * 1024
     params = {"file": name, "term": term, "ignoreCase": bool(p.get("ignoreCase")), "chunkBytes": chunk, "size": size}
-    return Plan(f"Search {name} for “{term}”", math.ceil(size / chunk), params)
+    return Plan(f"Search {name} for “{term}”", math.ceil(size / chunk), params, owners_only=True)
 
 
 # --- Your own code, in JavaScript (browsers) or Python (agents)
@@ -152,7 +156,7 @@ def _plan_custom(p, ctx):
     label = "Python" if lang == "python" else "JavaScript"
     return Plan(
         f"Your {label} code, split into {fmt_int(chunks)} pieces", chunks,
-        {"code": code, "chunks": chunks, "combine": combine, "lang": lang}, runtimes=frozenset({lang}),
+        {"code": code, "chunks": chunks, "combine": combine, "lang": lang}, runtimes=frozenset({lang}), owners_only=True,
     )
 
 
@@ -187,6 +191,7 @@ def _plan_pymap(p, ctx):
     return Plan(
         f"pool.map({fn}) over {fmt_int(len(items))} items", total,
         {"code": code, "fn": fn, "perPiece": per, "count": len(items)}, runtimes=frozenset({"python"}), data={"items": items},
+        owners_only=True,
     )
 
 
