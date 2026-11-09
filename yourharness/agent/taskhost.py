@@ -160,6 +160,23 @@ class TaskFailed(Exception):
     pass
 
 
+async def _start_time(pid: int) -> str:
+    """When a process started, or "" if it isn't running (or that can't be told)."""
+    stat = Path(f"/proc/{pid}/stat")
+    if os.path.isdir("/proc/self"):  # Linux, including Ubuntu under WSL
+        try:
+            return stat.read_text().rsplit(")", 1)[1].split()[19]  # field 22, starttime
+        except (OSError, IndexError):
+            return ""
+    try:
+        proc = await asyncio.create_subprocess_exec("ps", "-o", "lstart=", "-p", str(pid), stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.DEVNULL, env={**os.environ, "LC_ALL": "C"})
+        out, _ = await asyncio.wait_for(proc.communicate(), 5)
+        return " ".join(out.decode("utf-8", "replace").split())
+    except (OSError, asyncio.TimeoutError):
+        return ""
+
+
 _LIVE_GROUPS: set[int] = set()  # process groups of running steps, stopped if this program exits
 
 
@@ -238,8 +255,16 @@ class Shell:
             script.unlink(missing_ok=True)
             return 127, f"Couldn't start bash: {e}", False
         self.procs[key] = proc
+        pidfile = self.dir / "pids" / f"{key}.pid"
         if not WINDOWS:
             _LIVE_GROUPS.add(proc.pid)  # start_new_session: its process group id is its pid
+            started = await _start_time(proc.pid)
+            if started:  # pid plus start time: a pid the system later gives to another program won't match
+                try:
+                    pidfile.parent.mkdir(parents=True, exist_ok=True)
+                    pidfile.write_text(f"{proc.pid}\n{started}\n")
+                except OSError:
+                    pass
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
         async def pump():
@@ -269,8 +294,37 @@ class Shell:
         finally:
             self.procs.pop(key, None)
             _LIVE_GROUPS.discard(proc.pid)
+            pidfile.unlink(missing_ok=True)
             script.unlink(missing_ok=True)
         return code, tail, timed_out
+
+    async def reap(self) -> int:
+        """Stop steps an earlier run of this program left behind when it was killed outright.
+
+        Only a process whose command line is one of this program's step scripts is
+        stopped, so a process id the system has since given to something else is safe.
+        """
+        if WINDOWS:
+            body = ('for __f in "$YH_ROOT"/pids/*.pid; do [ -e "$__f" ] || continue\n'
+                    '  case "$__f" in */reap.pid) continue ;; esac\n'
+                    '  __p=$(cat "$__f" 2>/dev/null)\n'
+                    '  if [ -n "$__p" ] && ps -o args= -p "$__p" 2>/dev/null | grep -q taskrun; then kill -TERM -- "-$__p" 2>/dev/null && echo reaped; fi\n'
+                    '  rm -f "$__f"\ndone\n')
+            _, out, _ = await self.run("reap", body, timeout=30)
+            return out.count("reaped")
+        stopped = 0
+        folder = self.dir / "pids"
+        for f in folder.glob("*.pid") if folder.exists() else []:
+            try:
+                pid_text, started = (f.read_text().splitlines() + ["", ""])[:2]
+                pid = int(pid_text)
+                if started and await _start_time(pid) == started:
+                    os.killpg(pid, signal.SIGTERM)
+                    stopped += 1
+            except (ValueError, OSError):
+                pass
+            f.unlink(missing_ok=True)
+        return stopped
 
     async def stop(self, key: str) -> None:
         proc = self.procs.get(key)
@@ -506,9 +560,18 @@ class TaskHost:
         self.attempts: dict[str, Attempt] = {}
         self.unacked: dict[tuple[str, int], dict] = {}
         self._detected_at = 0.0
+        self._reaped = False
 
     async def detect(self) -> None:
         self._detected_at = time.monotonic()
+        if self.shell.available and not self._reaped:
+            self._reaped = True
+            try:
+                n = await self.shell.reap()
+                if n:
+                    log.warning("Stopped %d agent task step(s) left running by an earlier run.", n)
+            except Exception as e:  # never stop the agent from starting
+                log.warning("Couldn't check for leftover task steps: %s", e)
         if not self.shell.available:
             self.tools = {"git": None, "agents": [], "problem": "Ubuntu (WSL) isn't set up on this PC." if WINDOWS else "bash isn't installed."}
             return

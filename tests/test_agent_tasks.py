@@ -148,6 +148,40 @@ def test_agent_output_becomes_readable_lines():
         "git": "git version 2.4", "curl": None, "agents": [{"id": "command", "version": ""}, {"id": "codex", "version": "codex-cli 1"}]}
 
 
+def test_steps_left_by_a_killed_agent_are_stopped_on_restart(tmp_path, monkeypatch):
+    """A step whose agent was killed outright (kill -9, power loss) is found by its pid file and stopped."""
+    import asyncio
+    import signal
+
+    from yourharness.agent import taskhost
+
+    if os.name == "nt":
+        pytest.skip("POSIX process groups")
+    started = {}
+
+    async def fake_start_time(pid):  # ps may be unavailable where the tests run
+        return started.get(pid, "")
+
+    monkeypatch.setattr(taskhost, "_start_time", fake_start_time)
+    shell = taskhost.Shell(tmp_path)
+    left = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        started[left.pid] = started[other.pid] = "Mon 9 Nov 05:00:00 2026"
+        (shell.dir / "pids").mkdir(parents=True)
+        (shell.dir / "pids" / "t1-1-agent1.pid").write_text(f"{left.pid}\nMon 9 Nov 05:00:00 2026\n")
+        (shell.dir / "pids" / "t2-1-agent1.pid").write_text(f"{other.pid}\nTue 1 Jan 00:00:00 2030\n")  # pid reused since
+        assert asyncio.run(shell.reap()) == 1
+        assert left.wait(5) == -signal.SIGTERM
+        assert other.poll() is None, "a process that only shares the pid is left alone"
+        assert not list((shell.dir / "pids").glob("*.pid"))
+    finally:
+        for p in (left, other):
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+
+
 def test_the_prompt_states_the_rules():
     p = build_prompt("Add login", {"instructions": "Add a login form", "scope": ["src/**"], "deny": [".github/workflows/**"],
                                    "checks": ["npm test"]}, feedback="test failed")
