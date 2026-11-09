@@ -17,6 +17,7 @@ What a step can reach:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import codecs
 import logging
 import os
@@ -159,6 +160,19 @@ class TaskFailed(Exception):
     pass
 
 
+_LIVE_GROUPS: set[int] = set()  # process groups of running steps, stopped if this program exits
+
+
+@atexit.register
+def _stop_live_groups() -> None:
+    """An agent CLI must not keep working, and spending, after the program that started it is gone."""
+    for pgid in list(_LIVE_GROUPS):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
 class Shell:
     """Runs a bash script on this computer, or inside WSL on Windows."""
 
@@ -224,6 +238,8 @@ class Shell:
             script.unlink(missing_ok=True)
             return 127, f"Couldn't start bash: {e}", False
         self.procs[key] = proc
+        if not WINDOWS:
+            _LIVE_GROUPS.add(proc.pid)  # start_new_session: its process group id is its pid
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
         async def pump():
@@ -252,6 +268,7 @@ class Shell:
             raise
         finally:
             self.procs.pop(key, None)
+            _LIVE_GROUPS.discard(proc.pid)
             script.unlink(missing_ok=True)
         return code, tail, timed_out
 

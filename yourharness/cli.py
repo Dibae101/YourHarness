@@ -29,6 +29,24 @@ def _setup_logging(verbose: bool) -> None:
     logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
+def _stop_cleanly_on_sigterm() -> None:
+    """Treat SIGTERM (how the desktop app and most service managers stop us) like Ctrl-C.
+
+    Without this, Python exits at once, and an agent task's AI CLI started in its own
+    process group would keep running, and spending, on its own.
+    """
+    import signal
+
+    def handler(signum, frame):
+        raise KeyboardInterrupt
+
+    if hasattr(signal, "SIGTERM"):
+        try:
+            signal.signal(signal.SIGTERM, handler)
+        except (ValueError, OSError):  # not the main thread
+            pass
+
+
 def _number(text: str) -> int:
     try:
         return int(float(text))
@@ -59,6 +77,7 @@ def cmd_serve(a) -> int:
         Store(cfg.data_dir).rotate_lend_token()
         print("Made a new lend link. Computers already lending stay signed in; the old link stops working.")
     _setup_logging(a.verbose)
+    _stop_cleanly_on_sigterm()
     try:
         asyncio.run(serve(cfg, public_url=a.public_url, show_qr=not a.no_qr and not os.environ.get("NO_QR"), local_agent=not a.no_local_agent))
     except KeyboardInterrupt:
@@ -112,6 +131,7 @@ def cmd_agent(a) -> int:
                       threads=threads, sharing=not a.no_share, workspace=bool(saved.get("workspace")), home=home,
                       tasks=saved.get("tasks"), task_slots=int(saved.get("task_slots") or 1))
     _setup_logging(a.verbose)
+    _stop_cleanly_on_sigterm()
     print(f"Connecting to {cfg.server} as {cfg.name}...", flush=True)
     try:
         return asyncio.run(Agent(cfg).run())
