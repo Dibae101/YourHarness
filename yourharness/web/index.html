@@ -19,6 +19,7 @@
 <link rel="stylesheet" href="style.css">
 <script src="app.js" defer></script>
 <script src="agents.js" defer></script>
+<script src="batch.js" defer></script>
 </head>
 <body>
 
@@ -70,6 +71,7 @@
         <button class="tile" type="button" data-open="jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/></svg><span>Jobs</span></button>
         <button class="tile" type="button" data-open="devices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v9H3zM1 17h16M18 8h4v11h-4z"/></svg><span>Devices</span></button>
         <button class="tile" type="button" data-open="agents"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14v11H5zM12 4v4M9 13h.01M15 13h.01M9 16h6"/></svg><span>Agents</span></button>
+        <button class="tile" type="button" data-open="batch"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 10h16M4 15h10M4 20h6M17 14l3 3-3 3"/></svg><span>Batch</span></button>
       </div>
     </div>
       <section class="win" id="win-monitor" data-app="monitor" aria-labelledby="wt-monitor" hidden>
@@ -440,6 +442,21 @@
         <div class="win-body" id="ag-body"></div>
         <div class="win-resize" aria-hidden="true"></div>
       </section>
+      <section class="win" id="win-batch" data-app="batch" aria-labelledby="wt-batch" hidden>
+        <header class="win-bar">
+          <button class="win-back" type="button" data-act="min" aria-label="Back to apps">‹</button>
+          <span class="win-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 10h16M4 15h10M4 20h6M17 14l3 3-3 3"/></svg></span>
+          <span class="win-title" id="wt-batch">Batch</span>
+          <span class="win-sub" id="wsub-batch">One job over a dataset, spread over your computers</span>
+          <div class="win-ctrl">
+            <button type="button" data-act="min" aria-label="Minimize Batch" title="Minimize">–</button>
+            <button type="button" data-act="max" aria-label="Maximize Batch" title="Maximize">▢</button>
+            <button type="button" data-act="close" aria-label="Close Batch" title="Close">×</button>
+          </div>
+        </header>
+        <div class="win-body" id="bj-body"></div>
+        <div class="win-resize" aria-hidden="true"></div>
+      </section>
   </div>
 
   <nav class="dock" aria-label="Apps">
@@ -449,6 +466,7 @@
     <button class="dock-item" type="button" data-open="jobs" title="Jobs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/></svg><span>Jobs</span></button>
     <button class="dock-item" type="button" data-open="devices" title="Devices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h12v9H3zM1 17h16M18 8h4v11h-4z"/></svg><span>Devices</span></button>
     <button class="dock-item" type="button" data-open="agents" title="Agents"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14v11H5zM12 4v4M9 13h.01M15 13h.01M9 16h6"/></svg><span>Agents</span></button>
+    <button class="dock-item" type="button" data-open="batch" title="Batch"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 10h16M4 15h10M4 20h6M17 14l3 3-3 3"/></svg><span>Batch</span></button>
   </nav>
 </div>
 

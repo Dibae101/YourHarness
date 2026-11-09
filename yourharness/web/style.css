@@ -567,3 +567,10 @@ button.fm-name:hover { text-decoration: underline; }
   .ag-actions .btn { flex: 1; }
   .ag-acts { justify-content: flex-start; }
 }
+
+/* ---------------------------------------------------------------- Batch app (batch.js) */
+.bj-bar { height: 6px; border-radius: 3px; background: var(--line-soft); overflow: hidden; margin: 8px 0 4px; }
+.bj-bar span { display: block; height: 100%; background: var(--focus); transition: width 0.3s; }
+.bj-row { align-items: center; }
+.bj-row select, .bj-row input { flex: 1; min-width: 0; }
+@media (prefers-reduced-motion: reduce) { .bj-bar span { transition: none; } }

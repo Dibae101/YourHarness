@@ -121,7 +121,7 @@ def run(chunk, total):
   function can(cap) { return !S.caps || S.caps.indexOf(cap) >= 0; }
 
   function applyCaps() {
-    const gated = { terminal: 'shell', files: 'files', agents: 'submit' };
+    const gated = { terminal: 'shell', files: 'files', agents: 'submit', batch: 'submit' };
     Object.keys(gated).forEach(function (app) {
       const ok = can(gated[app]);
       document.querySelectorAll('[data-open="' + app + '"]').forEach(function (b) { b.hidden = !ok; });
@@ -210,7 +210,7 @@ def run(chunk, total):
   };
 
   function handle(m) {
-    if (m.type === 'welcome' || m.type === 'devices' || (typeof m.type === 'string' && m.type.startsWith('agents.'))) {
+    if (m.type === 'welcome' || m.type === 'devices' || (typeof m.type === 'string' && (m.type.startsWith('agents.') || m.type.startsWith('eng.')))) {
       window.dispatchEvent(new CustomEvent('yh:msg', { detail: m }));
     }
     switch (m.type) {
@@ -1613,7 +1613,7 @@ def run(chunk, total):
   // -------------------------------------------------------------------------
   // Window manager: draggable, resizable windows on wide screens, full-screen apps on phones
   // -------------------------------------------------------------------------
-  const APP_SIZES = { monitor: [720, 640], terminal: [860, 600], files: [920, 600], jobs: [1000, 680], devices: [940, 680], agents: [1120, 760] };
+  const APP_SIZES = { monitor: [720, 640], terminal: [860, 600], files: [920, 600], jobs: [1000, 680], devices: [940, 680], agents: [1120, 760], batch: [1120, 780] };
   const WM = (() => {
     let z = 10;
     const saved = (() => { try { return JSON.parse(store.get('wm') || '{}'); } catch { return {}; } })();
@@ -1662,6 +1662,7 @@ def run(chunk, total):
       if (app === 'jobs') requestAnimationFrame(() => { if (viewJob()) renderCurrent(true); });
       if (app === 'monitor') requestAnimationFrame(drawSparks);
       if (app === 'agents' && window.YHAgents) window.YHAgents.opened(); // agents.js
+      if (app === 'batch' && window.YHBatch) window.YHBatch.opened(); // batch.js
     }
     function open(app) {
       if (!win(app)) return;

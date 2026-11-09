@@ -55,3 +55,4 @@ jobs:
           npm install --no-save --no-audit --no-fund jsdom@26
           node --check yourharness/web/app.js
           node tests/web/agents_smoke.mjs
+          node tests/web/batch_smoke.mjs

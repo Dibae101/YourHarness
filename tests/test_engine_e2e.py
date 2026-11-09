@@ -171,6 +171,14 @@ def test_bad_records_fail_the_job_with_the_offset_or_are_skipped(pool):
     assert job["status"] == "done" and job["result"]["values"] == {"sum_amount": 7} and job["result"]["badRecordsSkipped"] == 1
 
 
+def test_the_page_has_the_batch_app(pool):
+    import urllib.request
+
+    page = urllib.request.urlopen(pool.coord.base + "/").read().decode()
+    assert 'id="win-batch"' in page and 'src="batch.js"' in page and 'data-open="batch"' in page
+    assert "window.YHBatch" in urllib.request.urlopen(pool.coord.base + "/batch.js").read().decode()
+
+
 def test_the_job_description_is_checked_before_anything_runs(pool):
     with pytest.raises(Exception, match="spec.workload.metrics"):
         pool.start({"type": "batch.aggregate", "metrics": [{"op": "median", "field": "x"}]}, {"ref": "dataset:d00000000"})
