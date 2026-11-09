@@ -6,11 +6,18 @@ executor (local.py), so a partition computes the same thing wherever it runs.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Callable, Iterable
 
 from .ops import OPS, OpError, halo_records_needed
 from .records import RecordError, iter_records
+
+
+def dump_record(rec) -> str:
+    """One output record as a line of JSON. Workers and the coordinator write records the same way,
+    so a recomputed partition can be compared with what a worker sent back by digest alone."""
+    return json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
 class HaloTooSmall(Exception):

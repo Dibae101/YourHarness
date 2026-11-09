@@ -19,6 +19,7 @@ from pathlib import Path
 import aiohttp
 
 from .. import __version__, sysinfo
+from .enginehost import EngineHost
 from .slots import SlotPool
 from .taskhost import TaskHost
 
@@ -106,6 +107,7 @@ class Agent:
         self.runner = None
         self.cpu = sysinfo.CpuMeter()
         self.taskhost = TaskHost(cfg.server, cfg.home, self.send, cfg.tasks, cfg.task_slots, cfg.allow_commands)
+        self.enginehost = EngineHost(cfg.server, cfg.home, self.send, cfg.threads if cfg.sharing else 0)
         if cfg.workspace:  # a computer that hosts a terminal also lets the pool browse its home folder
             from .files import HomeFiles
 
@@ -176,6 +178,7 @@ class Agent:
             if self.terms:
                 self.terms.close_all()
             self.taskhost.stop_all()
+            self.enginehost.stop_all()
             await self.pool.close()
 
     def _hello(self) -> dict:
@@ -186,6 +189,7 @@ class Agent:
             "files": self.files.describe() if self.files else None,
             "exec": self.runner.describe() if self.runner else None,
             "tasks": self.taskhost.describe(),
+            "engine": self.enginehost.describe(),
         }
 
     async def _connect_once(self) -> int | None:
@@ -257,8 +261,12 @@ class Agent:
                 agents = ", ".join(a["id"] for a in th.tools.get("agents", []))
                 print(f"Agent tasks are allowed on this computer (with: {agents}).", flush=True)
             self.taskhost.connected()
+            self.enginehost.owned = self.taskhost.owned
+            self.enginehost.connected()
         elif isinstance(kind, str) and kind.startswith("task."):
             self.taskhost.handle(m)
+        elif isinstance(kind, str) and kind.startswith("eng."):
+            self.enginehost.handle(m)
         elif kind == "denied":
             print(m.get("reason") or "The coordinator refused this agent.", file=sys.stderr)
         elif kind == "chunk":

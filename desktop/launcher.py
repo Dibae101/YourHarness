@@ -5,6 +5,10 @@ if len(sys.argv) > 1 and sys.argv[1] == "__slot__":
     from yourharness.agent.slot import main as slot_main
 
     slot_main()
+elif len(sys.argv) > 1 and sys.argv[1] == "__engine__":  # one batch-job partition (yourharness/engine/worker.py)
+    from yourharness.engine.worker import main as engine_main
+
+    engine_main()
 else:
     from yourharness.cli import main
 

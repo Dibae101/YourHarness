@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .execute import feed_halo, make_op, run_items, run_partition
+from .execute import HaloTooSmall, feed_halo, make_op, run_items, run_partition
 from .ops import halo_records_needed
 from .partition import plan_items
 from .reducer import final_result, merge_states
@@ -29,14 +29,24 @@ def file_chunks(path: Path, start: int, end: int, size: int = CHUNK):
             yield data
 
 
-def run_range(job: dict, dataset: dict, path: Path, start: int, end: int, ctx: dict | None = None) -> tuple[dict, list]:
-    """One byte-range partition: (its state, the records it wrote)."""
+def run_range(job: dict, dataset: dict, path: Path, start: int, end: int, ctx: dict | None = None,
+              halo_bytes: int | None = None) -> tuple[dict, list]:
+    """One byte-range partition: (its state, the records it wrote).
+
+    halo_bytes limits how much of the data before the partition is read for operators
+    that need earlier records; by default all of it, which is always enough.
+    """
     wl = job["spec"]["workload"]
     out: list = []
     op = make_op(wl, ctx, out.append)
     if halo_records_needed(wl) and start > dataset["dataStart"]:
-        feed_halo(op, wl, dataset["format"], dataset.get("header"), file_chunks(path, dataset["dataStart"], start),
-                  dataset["dataStart"], dataset["dataStart"])
+        h0 = dataset["dataStart"] if halo_bytes is None else max(dataset["dataStart"], start - halo_bytes)
+        try:
+            feed_halo(op, wl, dataset["format"], dataset.get("header"), file_chunks(path, h0, start), h0, dataset["dataStart"])
+        except HaloTooSmall:
+            op = make_op(wl, ctx, out.append)
+            feed_halo(op, wl, dataset["format"], dataset.get("header"), file_chunks(path, dataset["dataStart"], start),
+                      dataset["dataStart"], dataset["dataStart"])
     run_partition(op, dataset["format"], dataset.get("header"), file_chunks(path, start, end), start,
                   bad=job["spec"]["output"]["onBadRecord"])
     return op.state(), out

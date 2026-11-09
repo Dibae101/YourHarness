@@ -100,6 +100,30 @@ def sanitize_tasks(t) -> dict | None:
     }
 
 
+ENGINE_OPS = ("batch.aggregate", "batch.groupby", "batch.transform", "python.map", "ml.evaluate", "tests.pytest", "batch.join")
+ENGINE_RUNTIMES = ("builtin", "native-python", "managed-python", "isolated-oci")
+
+
+def sanitize_engine(e) -> dict | None:
+    """What a computer says it can do for batch jobs. A friend's claims about runtimes don't matter:
+    the planner gives code to your own computers only."""
+    if not isinstance(e, dict):
+        return None
+    running = []
+    for r in (e.get("running") or [])[:256]:
+        if isinstance(r, dict) and isinstance(r.get("attempt"), int):
+            running.append({"partition": clean_text(r.get("partition"), 80, ""), "attempt": r["attempt"]})
+    return {
+        "slots": clamp_int(e.get("slots"), 0, 256, 0),
+        "ops": [o for o in e.get("ops") or [] if o in ENGINE_OPS],
+        "formats": [f for f in e.get("formats") or [] if f in ("text", "jsonl", "csv")],
+        "runtimes": [r for r in e.get("runtimes") or [] if r in ENGINE_RUNTIMES],
+        "python": clean_text(e.get("python"), 20, ""),
+        "envs": [clean_text(x, 80, "") for x in (e.get("envs") or [])[:500] if isinstance(x, str)],
+        "running": running,
+    }
+
+
 def sanitize_workspace(ws) -> dict | None:
     if not isinstance(ws, dict):
         return None
@@ -133,6 +157,7 @@ class Device:
         ex = hello.get("exec") if self.trusted else None  # can run the pool shell's commands
         self.exec = {"os": clean_text(ex.get("os"), 60, "Linux"), "linux": bool(ex.get("linux"))} if isinstance(ex, dict) else None
         self.tasks_info = sanitize_tasks(hello.get("tasks")) if self.kind == "agent" else None  # agent tasks
+        self.engine_info = sanitize_engine(hello.get("engine"))  # batch-job partitions
         self.load: dict = {}  # live CPU and memory use, reported every few seconds
         self.reserved_cpu = 0.0  # processor slots held by batch partitions and agent tasks (resources.py)
         self.inflight: set[tuple[str, int]] = set()
@@ -262,6 +287,9 @@ class Scheduler:
         self.poolshell = PoolShell(self)
         self.resources = Resources(self)
         self.tasks = TaskManager(self, store.dir)
+        from ..engine.manager import EngineManager
+
+        self.engine = EngineManager(self, store.dir)
         self.public_url = ""  # the address other devices use; set once the port is known
         self.repair_s = float(os.environ.get("HARNESS_REPAIR_S", 10))
         self._devices_pending = False
@@ -296,7 +324,8 @@ class Scheduler:
             "id": d.id, "name": d.name, "kind": d.kind, "color": d.color, "info": d.info, "threads": d.threads,
             "sharing": d.sharing, "runtimes": sorted(d.runtimes), "workspace": d.workspace, "busy": len(d.inflight),
             "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host, "coordinator": d.coordinator, "files": d.files, "exec": d.exec, "load": d.load,
-            "owned": d.owned, "agentTasks": self.tasks.device_view(d),
+            "owned": d.owned, "agentTasks": self.tasks.device_view(d), "engine": self.engine.device_view(d),
+            "reserved": self.resources.view(d.id),
         }
 
     def device_list(self) -> list[dict]:
@@ -328,6 +357,7 @@ class Scheduler:
             self.execs.device_gone(previous)
             self.poolshell.device_gone(previous)
             self.tasks.device_gone(previous)
+            self.engine.device_gone(previous)
             previous.close(4002, "This device connected again from somewhere else.")
         d = Device(rec, ws, hello, self.pick_color(rec), host)
         d.reserved_cpu = self.resources.cpu_reserved(d.id)  # work it was given before it reconnected
@@ -357,6 +387,8 @@ class Scheduler:
         self.dispatch()
         if d.kind == "agent":
             self.tasks.device_connected(d)
+        if d.engine_info is not None:
+            self.engine.device_connected(d)
         return d
 
     def disconnect(self, d: Device) -> None:
@@ -370,6 +402,7 @@ class Scheduler:
             self.execs.device_gone(d)
             self.poolshell.device_gone(d)
             self.tasks.device_gone(d)
+            self.engine.device_gone(d)
             log.info("%s left", d.name)
             self.pool_store.changed()
             self.broadcast_devices()
@@ -423,6 +456,13 @@ class Scheduler:
                     d.tasks_info["running"] = running  # only a fresh connection reports what it's working on
                 self.broadcast_devices()
                 self.tasks.dispatch()
+            if "engine" in msg:
+                running = (d.engine_info or {}).get("running", [])
+                d.engine_info = sanitize_engine(msg["engine"])
+                if d.engine_info is not None:
+                    d.engine_info["running"] = running
+                self.broadcast_devices()
+                self.engine.dispatch()
             if isinstance(msg.get("load"), dict):
                 d.load = {"cpu": _num_or_none(msg["load"].get("cpu"), 0, 100), "memUsedGB": _num_or_none(msg["load"].get("memUsedGB"), 0, 65536)}
                 self.broadcast_devices()
@@ -459,6 +499,9 @@ class Scheduler:
         elif isinstance(kind, str) and kind.startswith("task."):
             if d.kind == "agent":
                 self.tasks.handle(d, msg)
+        elif isinstance(kind, str) and kind.startswith("eng."):
+            if d.engine_info is not None:
+                self.engine.handle(d, msg)
         elif isinstance(kind, str) and kind.startswith("os."):
             if d.kind != "agent":
                 if not d.can(CAP_SHELL):
@@ -692,6 +735,7 @@ class Scheduler:
             self.broadcast_devices()
             self.dispatch()
         self.tasks.sweep()
+        self.engine.sweep()
 
     async def run_maintenance(self, every_s: float = 1.0) -> None:
         last_repair = 0.0

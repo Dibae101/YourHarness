@@ -151,6 +151,9 @@ class Coordinator:
         r.add_delete("/api/fs/{device_id}", self.fs_delete)
         r.add_post("/api/fs-copy", self.fs_copy)
         TaskAPI(self).register(r)
+        from ..engine.api import EngineAPI
+
+        EngineAPI(self).register(r)
         r.add_get("/install.sh", self.install_sh)
         r.add_get("/install.ps1", self.install_ps1)
         r.add_get("/agent.tar.gz", self.agent_tar)
@@ -162,6 +165,7 @@ class Coordinator:
 
     async def _on_startup(self, app):
         self.sched.tasks.start()
+        self.sched.engine.start()
         self._maintenance = asyncio.ensure_future(self.sched.run_maintenance())
 
     async def _on_shutdown(self, app):

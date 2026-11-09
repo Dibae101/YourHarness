@@ -98,9 +98,17 @@ class Coord:
         return Client(self.base, token)
 
 
-def start_coordinator(tmp: Path, stale_s: str = "2", extra_env: dict | None = None) -> Coord:
+def free_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def start_coordinator(tmp: Path, stale_s: str = "2", extra_env: dict | None = None, port: int = 0) -> Coord:
     env = {**os.environ, "HARNESS_STALE_S": stale_s, "NO_QR": "1", "HARNESS_REPAIR_S": "1", **(extra_env or {})}
-    args = [sys.executable, "-m", "yourharness", "serve", "--host", "127.0.0.1", "--port", "0",
+    args = [sys.executable, "-m", "yourharness", "serve", "--host", "127.0.0.1", "--port", str(port),
             "--data-dir", str(tmp / "data"), "--shared-dir", str(tmp / "shared"), "--no-qr", "--no-local-agent"]
     proc = Proc(args, env)
     port = int(proc.wait_for("Listening on port").rsplit(" ", 1)[1])
