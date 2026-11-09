@@ -24,6 +24,18 @@ from yourharness import kernels
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def pytest_runtest_logreport(report):
+    """On GitHub Actions, a failing test also becomes an annotation, readable from the run's page and API without its logs."""
+    if os.environ.get("GITHUB_ACTIONS") != "true" or not report.failed:
+        return
+    text = str(getattr(report, "longreprtext", "") or "")
+    lines = [ln for ln in text.splitlines() if ln.startswith("E ")] or text.splitlines()[-5:]
+    msg = "\n".join(lines[:12])[-1800:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+    title = report.nodeid.replace("%", "%25").replace(",", "%2C").replace(":", "%3A")[:200]
+    sys.__stdout__.write(f"\n::error title={title} ({report.when})::{msg}\n")  # at the start of a line, after pytest's progress dots
+    sys.__stdout__.flush()
+
+
 class Proc:
     """A subprocess whose output is drained in the background so it never blocks."""
 

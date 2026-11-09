@@ -342,13 +342,15 @@ def test_removing_a_friends_computer_hands_back_its_work_cleans_it_up_and_keeps_
         coord.proc.stop()
 
 
-def test_removing_a_computer_mid_partition_gives_it_to_another_at_once(tmp_path):
+def test_removing_a_computer_mid_partition_gives_it_to_another_at_once(tmp_path, monkeypatch):
     coord = start_coordinator(tmp_path / "c")
     try:
         eng = Engine(coord)
+        monkeypatch.setenv("YH_SLOW", "1")  # only this computer is slow: it would hold the partition for a minute
         coord.agent("Slow", threads=1, extra=("--no-tasks",))
+        monkeypatch.delenv("YH_SLOW")
         eng.ready({"Slow"})
-        code = "import time\ndef process(x):\n    time.sleep(2)\n    return x + 1\n"
+        code = "import os, time\ndef process(x):\n    if os.environ.get('YH_SLOW'):\n        time.sleep(60)\n    return x + 1\n"
         job = eng.start({"type": "python.map", "code": code}, items=[1, 2], mode="distributed", partitioning={"itemsPerPartition": 2})
         end = time.monotonic() + 20
         while time.monotonic() < end and not any(p["status"] == "leased" for p in eng.get(job["id"])["partitions"]):
