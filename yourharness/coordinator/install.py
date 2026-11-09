@@ -86,7 +86,7 @@ $code = Read-Host 'Join code (shown where the coordinator is running)'
 if ($code -notmatch '^[0-9]{4}$') { Write-Host 'The join code is 4 digits.'; return }
 Write-Host 'Installing the agent inside Ubuntu. It may ask for your Linux password once.'
 Write-Host 'Keep this window open while you want this PC in the pool.'
-wsl.exe -d Ubuntu -- bash -lc "sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv tmux curl && curl -fsSL $server/install.sh | bash -s -- --join $code --workspace"
+wsl.exe -d Ubuntu -- bash -lc "sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv tmux curl git && curl -fsSL $server/install.sh | bash -s -- --join $code --workspace"
 """
 
 

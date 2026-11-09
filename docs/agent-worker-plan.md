@@ -1,6 +1,6 @@
 # Agent workers: plan, workflow and tests
 
-**Status:** plan only, November 2026. Nothing in this document is built yet.
+**Status:** Phases 0 to 4 are built on the `feat/agent-tasks` branch, with you writing the tasks and picking a computer for each in the Agents app. A few things differ from this plan. Results travel as Git bundles over HTTP rather than smart HTTP, and the coordinator checks them itself instead of rerunning the tests on a trusted runner. Friends' computers can take tasks when their owner allows it. Not built yet: the planner (Phase 5), general tasks writing to `/pool` (general tasks write to `results/` in the repository instead), and benchmarks (Phase 8). See [agent-tasks.md](agent-tasks.md) for how to use it.
 **Based on:** `main` at `a9cd08e` (v0.7.2) and *YourHarness — Product Vision & Technical Blueprint* (cited below as "vision §N").
 
 ---

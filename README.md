@@ -76,6 +76,14 @@ Releases are built by GitHub Actions: push a tag such as `v0.3.0` and the `.dmg`
 
 The first prototype (Node, `server.js` and `public/`) is still in the repo and still runs with `npm start`. It will be removed once the Python version replaces it.
 
+## Agent tasks (preview, on the `feat/agent-tasks` branch)
+
+The **Agents** app gives each computer a task and picks what does it: Claude Code, Codex CLI, Kiro CLI, or a plain command with no AI. You choose the model, the files it may change and the checks it must pass, and which GitHub repository and branch the results go to. Each task runs in its own Git worktree on its computer. The coordinator checks every result (file scope, protected files, links, sizes, anything that looks like a secret), combines the accepted ones on a new branch, pushes it and opens a draft pull request. It never pushes to `main` and never merges.
+
+Friends' computers join with a one-time friend code, can never control the pool, and run agent tasks only if their owner allows it (`--tasks`, or the checkbox in the app). The GitHub token stays on the coordinator's computer.
+
+Setup, a first run with no AI, and troubleshooting: [docs/agent-tasks.md](docs/agent-tasks.md). The design and test plan: [docs/agent-worker-plan.md](docs/agent-worker-plan.md).
+
 ## Quick start
 
 ### 1. Start the coordinator (Mac)
