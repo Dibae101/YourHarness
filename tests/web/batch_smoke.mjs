@@ -20,6 +20,10 @@ const scored = { id: 'j3', name: 'Score <b>it</b>', status: 'done', workload: 'm
   result: { samples: 8, correct: 6, accuracy: 0.75, unlabeled: 0, macro: { precision: 0.75, recall: 0.75, f1: 0.75 }, weighted: { precision: 0.75, recall: 0.75, f1: 0.75 },
     classes: [{ label: 'a', support: 4, predicted: 4, correct: 3, precision: 0.75, recall: 0.75, f1: 0.75 }, { label: '<i>b</i>', support: 4, predicted: 4, correct: 3, precision: 0.75, recall: 0.75, f1: 0.75 }],
     confusion: { labels: ['a', '<i>b</i>'], rows: [[3, 1], [1, 3]] }, latency: { msPerRecord: 0.02, note: 'Measured on each computer.' } } };
+const tested = { id: 'j5', name: 'tests: proj', status: 'done', workload: 'tests.pytest', total: 4, counts: { done: 4 }, perDevice: [{ name: 'Mac', n: 2 }, { name: 'PC', n: 2 }],
+  createdAt: 6, startedAt: 6, finishedAt: 9, result: { total: 20, passed: 16, failed: 1, error: 0, skipped: 1, xfailed: 1, xpassed: 0, flaky: 1, missing: 0, ok: false,
+    notPassing: [{ test: 'tests/a.py::<b>bad</b>', outcome: 'failed', message: 'def test_bad():\nE   assert 1 == 2\ntests/a.py:3: AssertionError' }],
+    flakyTests: [{ test: 'tests/f.py::test_flaky', message: 'first try' }], slowest: [{ test: 'tests/s.py::test_slow', seconds: 2.5 }], testSeconds: 12.3, pytestRuns: 6 } };
 const steps = (py) => [`uv venv --python ${py} <YourHarness folder>/envs/env-0123456789abcdef0123`, 'uv pip install scikit-learn==1.5.2', 'a check that the packages import and the job’s worker starts'];
 const waiting = { id: 'j2', name: 'Fit', status: 'needs_approval', workload: 'python.map', total: 4, counts: { ready: 4 }, perDevice: [], createdAt: 3,
   runtime: { kind: 'managed-python', python: '3.11', requirements: ['scikit-learn==1.5.2'] }, setup: [],
@@ -47,6 +51,8 @@ window.fetch = async (url, opts = {}) => {
     setup: [{ device: 'Mac', phase: 'packages', note: 'Installing 1 package', error: null }] } });
   if (url.startsWith('/api/engine/models?') && method === 'PUT') return json({ model: { ...clf, id: 'm2', ref: 'model:m2', name: new URL(url, 'http://x').searchParams.get('name'), format: 'py', files: null } }, 201);
   if (url === '/api/engine/models/m2' && method === 'DELETE') return json({ ok: true });
+  if (url === '/api/engine/jobs/j5') return json({ job: { ...tested, plan: { reasons: [] }, partitions: [], events: [], spec: {},
+    provenance: { project: { ref: 'model:m5', name: 'proj.zip', sha256: 'cd'.repeat(32) }, environment: { kind: 'isolated-oci', image: `python:3.12-slim@sha256:${'ef'.repeat(32)}` } } } });
   if (url === '/api/engine/jobs/j3') return json({ job: { ...scored, plan: { reasons: [] }, partitions: [], events: [], spec: {},
     provenance: { dataset: { ref: 'dataset:d1a2b3c4', name: 'sales.jsonl', sha256: 'cd'.repeat(32) }, model: { ref: 'model:m1', name: 'clf.zip', sha256: clf.sha }, environment: { kind: 'native-python' } } } });
   throw new Error(`unexpected ${method} ${url}`);
@@ -241,6 +247,19 @@ document.querySelector('[data-tab="jobs"]').click();
 msg({ type: 'eng.job', job: { id: 'j4', name: 'Groups', status: 'running', workload: 'batch.groupby', total: 7, counts: { done: 5, leased: 2 }, perDevice: [], createdAt: 5,
   stages: [{ name: 'group', kind: 'shuffle-map', status: 'done', total: 4, done: 4 }, { name: 'combine', kind: 'shuffle-reduce', status: 'running', total: 3, done: 1 }] } });
 assert.match(document.querySelector('[data-job="j4"]').textContent, /1\. group \(sort into buckets\): done → 2\. combine \(combine each bucket\): 1 of 3/);
+
+// a pytest suite in shards (started with harness test): counts on the card, every test that didn't pass in the detail
+msg({ type: 'eng.job', job: tested });
+const tc = document.querySelector('[data-job="j5"]').textContent;
+assert.match(tc, /A pytest suite in shards/); assert.match(tc, /Not all passed/); assert.match(tc, /16 passed, 1 failed, 1 skipped, 1 xfailed, 1 flaky/);
+document.querySelector('[data-act="detail"][data-id="j5"]').click();
+await settle();
+const td = document.querySelector('#bj-detail');
+assert.match(td.textContent, /tests\/a\.py::<b>bad<\/b>/, 'test ids are shown as text');
+assert.ok(!td.querySelector('code b'), 'test ids are escaped');
+assert.match(td.textContent, /assert 1 == 2/); assert.match(td.textContent, /Flaky: failed, then passed on a rerun/);
+assert.match(td.textContent, /project proj\.zip cdcdcdcdcdcd/); assert.match(td.textContent, /container python:3\.12-slim@sha256:/);
+assert.ok(![...document.querySelectorAll('#bj-kind option')].some((o) => o.value === 'tests.pytest'), 'test jobs start from harness test, not the form');
 
 // datasets: import from the shared folder, preview, share
 document.querySelector('[data-tab="datasets"]').click();

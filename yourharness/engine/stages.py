@@ -189,6 +189,11 @@ def combine(mgr, job: dict, stage: dict, parts: list[dict], first_stage_result: 
     if wl["type"] == "ml.evaluate":
         result["provenance"] = mgr.provenance(job)
         result["latency"] = mgr.latency(parts)
+    if wl["type"] == "tests.pytest":  # timings and failure messages, beside the checked outcomes
+        from .testing import report
+
+        result = report(mgr.accepted_metrics(parts), result)
+        result["provenance"] = mgr.provenance(job)
     validation = {"level": "structural", "checks": checks}
     n = min(spec["output"]["spotCheck"], len(parts))
     if not n:

@@ -40,6 +40,8 @@ jobs:
       - name: Run the tests
         env:
           HARNESS_AGENT_CLIS: ""
+          # Linux runners have Docker: the real-container isolation test must run there, not skip
+          YH_EXPECT_DOCKER: ${{ runner.os == 'Linux' && '1' || '' }}
         run: python -m pytest -q -p no:cacheprovider tests
 
   web:

@@ -30,7 +30,7 @@ from typing import Callable
 log = logging.getLogger("yourharness")
 PACKAGE_PARENT = str(Path(__file__).resolve().parent.parent.parent)
 HEARTBEAT_S = float(os.environ.get("HARNESS_ENGINE_BEAT_S", 2))  # the lease is renewed this often while a partition runs
-OPS = ["batch.aggregate", "batch.groupby", "batch.transform", "python.map", "ml.evaluate", "batch.join"]
+OPS = ["batch.aggregate", "batch.groupby", "batch.transform", "python.map", "ml.evaluate", "batch.join", "tests.pytest"]
 FORMATS = ["text", "jsonl", "csv"]
 
 

@@ -51,8 +51,13 @@ WORKLOADS = {
     "python.map": {"input": "dataset|items", "runtimes": ("native-python", "managed-python", "isolated-oci")},
     "ml.evaluate": {"input": "dataset", "runtimes": ("native-python", "managed-python", "isolated-oci")},
     "batch.join": {"input": "dataset", "runtimes": ("builtin",)},
+    "tests.pytest": {"input": "project", "runtimes": ("native-python", "managed-python", "isolated-oci")},
 }
-CODE_WORKLOADS = ("python.map", "ml.evaluate")  # they run your own code: only on your own computers
+CODE_WORKLOADS = ("python.map", "ml.evaluate", "tests.pytest")  # they run your own code: only on your own computers
+MAX_TESTS = 20_000
+TEST_ID = re.compile(r"[^\x00-\x1f]{1,2000}")
+# pytest options a test job sets itself, to run exactly a shard's tests and read their outcomes
+RESERVED_PYTEST = ("-p", "--rootdir", "--junitxml", "--junit-xml", "--collect-only", "--co", "-c", "--confcutdir", "--resultlog")
 MAX_LABELS = 10_000
 MAX_STAGES = 8
 MAX_BUCKETS = 1024
@@ -256,12 +261,42 @@ def _workload(w, path: str) -> dict:
                 "batch": _num(w.get("batch"), f"{path}.batch", 1, 100_000, 64, integer=True),
                 "predictions": predictions, "labels": labels,
                 "device": _choice(w.get("device"), f"{path}.device", ("cpu", "auto"), "cpu")}
+    if t == "tests.pytest":
+        tests = w.get("tests")
+        if not isinstance(tests, list) or not tests or len(tests) > MAX_TESTS or any(not isinstance(x, str) or not TEST_ID.fullmatch(x) for x in tests):
+            raise SpecError(f"{path}.tests", f'should be the collected test ids, 1 to {MAX_TESTS:,}, like "tests/test_app.py::test_login"')
+        if len(set(tests)) != len(tests):
+            raise SpecError(f"{path}.tests", "lists a test twice")
+        want = set(tests)
+        durations = {k: float(v) for k, v in _obj(w.get("durations"), f"{path}.durations").items()
+                     if k in want and isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0}
+        args = w.get("args") or []
+        if not isinstance(args, list) or len(args) > 50 or any(not isinstance(a, str) or len(a) > 500 or "\x00" in a for a in args):
+            raise SpecError(f"{path}.args", "should be a list of at most 50 pytest options")
+        bad = next((a for a in args if a.split("=", 1)[0] in RESERVED_PYTEST or (a.startswith("-p") and not a.startswith("--"))), None)
+        if bad is not None:
+            raise SpecError(f"{path}.args", f"can't include {bad}: YourHarness sets it to run exactly each shard's tests")
+        return {"type": t, "count": len(tests), "args": list(args),
+                "reruns": _num(w.get("reruns"), f"{path}.reruns", 0, 3, 1, integer=True),
+                "timeout": _num(w.get("timeout"), f"{path}.timeout", 10, 86_400, 3600, integer=True),
+                "shards": _num(w.get("shards"), f"{path}.shards", 1, 256, None, integer=True),
+                "_tests": tests, "_durations": durations}  # parse() turns these into the shards, the job's items
     raise SpecError(f"{path}.type", "isn't built yet")  # pragma: no cover
 
 
 def _inputs(v, path: str, wl: dict, wants_model: bool = False) -> dict:
     v = _obj(v, path)
     need = WORKLOADS[wl["type"]]["input"]
+    if wl["type"] == "tests.pytest":  # the project archive the tests run in; harness test makes and uploads it
+        p = _obj(v.get("project"), f"{path}.project")
+        ref, sha = p.get("ref"), p.get("sha256")
+        if not isinstance(ref, str) or not re.fullmatch(r"model:m[0-9a-f]{8}", ref):
+            raise SpecError(f"{path}.project.ref", 'should be an uploaded project archive, like "model:m1a2b3c4d" (harness test uploads it)')
+        if sha is not None and (not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha)):
+            raise SpecError(f"{path}.project.sha256", "should be the archive's SHA-256, 64 hex digits")
+        if set(v) - {"project"}:
+            raise SpecError(path, "a test job takes only its project; the tests are the workload's")
+        return {"project": {"ref": ref, "sha256": sha}}
     model = None
     if wants_model or wl["type"] == "ml.evaluate":
         m = _obj(v.get("model"), f"{path}.model")
@@ -339,6 +374,14 @@ def parse(doc) -> dict:
             raise SpecError(f"spec.stages[{i}].workload", f"{st['workload']['type']} reads a dataset, and this job's inputs are items")
     if any(st["workload"]["type"] == "ml.evaluate" for st in stages) and "model" not in inputs:
         raise SpecError("spec.inputs.model.ref", 'should be an uploaded model, like "model:m1a2b3c4"')
+    if any(st["workload"]["type"] == "tests.pytest" for st in stages):
+        if len(stages) > 1:
+            raise SpecError("spec.stages", "a test job has one stage")
+        from .testing import auto_shards, shard
+
+        tests, durations = wl.pop("_tests"), wl.pop("_durations")
+        inputs["items"] = shard(tests, durations, wl["shards"] or auto_shards(tests, durations))  # each test in exactly one shard
+        wl["shards"] = len(inputs["items"])
     code = any(st["workload"]["type"] in CODE_WORKLOADS for st in stages)
     rt = _obj(s.get("runtime"), "spec.runtime")
     allowed_rt = ("native-python", "managed-python", "isolated-oci") if code else ("builtin",)
@@ -380,6 +423,8 @@ def parse(doc) -> dict:
         "maxInflightPerWorker": _num(part.get("maxInflightPerWorker"), "spec.partitioning.maxInflightPerWorker", 1, 64, 4, integer=True),
         "itemsPerPartition": _num(part.get("itemsPerPartition"), "spec.partitioning.itemsPerPartition", 1, MAX_ITEMS, None, integer=True),
     }
+    if wl["type"] == "tests.pytest":
+        partitioning["itemsPerPartition"] = 1  # one shard per partition
     res = _obj(s.get("resources"), "spec.resources")
     resources = {
         "cpuSlots": _num(res.get("cpuSlots"), "spec.resources.cpuSlots", 1, 64, 1, integer=True),

@@ -431,6 +431,32 @@ def _print_engine_result(job: dict) -> None:
     print(f"  {job['total']} partitions{f' ({per})' if per else ''}, {took:.1f} s{f', {v}' if v else ''}", file=sys.stderr)
 
 
+def cmd_test(a) -> int:
+    """harness test: a project's pytest suite, in shards across your computers (yourharness/testrun.py)."""
+    from .client import PoolError
+    from .engine.testing import junit_xml
+    from .jobs import SetupNeeded
+    from .testrun import TestSetupError, run, summary
+
+    args = list(a.pytest_args or [])
+    limits = {k: v for k, v in (("memoryMB", a.memory_mb), ("cpus", a.cpus)) if v}
+    try:
+        job = run(a.project, args, shards=a.shards, reruns=a.reruns, python=a.python, requirements=a.requirement, container=a.container,
+                  limits=limits or None, mode="local" if a.local else "distributed", approve_setup=a.approve_setup, downloads=a.downloads,
+                  spot_check=a.spot_check)
+    except SetupNeeded as e:
+        print(e, file=sys.stderr)
+        return 2
+    except (TestSetupError, PoolError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(summary(job))
+    if a.junit and job["status"] == "done":
+        Path(a.junit).write_text(junit_xml(job["result"], name=Path(a.project).resolve().name), encoding="utf-8")
+        print(f"JUnit report: {a.junit}", file=sys.stderr)
+    return 0 if job["status"] == "done" and job["result"].get("ok") else 1
+
+
 def cmd_job(a) -> int:
     from .client import setup_text
 
@@ -556,6 +582,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_agent)
 
+    s = sub.add_parser("test", help="run a project's pytest suite in shards across your computers",
+                       description="Collects the tests here, sends the project (the files git tracks) to your computers in shards of about "
+                                   "equal running time, and reports every test's outcome. Options after -- go to pytest.")
+    s.add_argument("project", nargs="?", default=".", help="the project folder (default: this one)")
+    s.add_argument("--shards", type=int, help="how many shards (default: about 20 s of tests each, from the last run's timings)")
+    s.add_argument("--reruns", type=int, default=1, help="run failing tests again this many times; one that then passes is reported "
+                                                         "as flaky, not passed (default 1)")
+    s.add_argument("--junit", metavar="FILE", help="also write a JUnit XML report")
+    s.add_argument("--local", action="store_true", help="run every shard on one computer")
+    s.add_argument("--python", help="run in a managed environment with this Python version (needs --requirement pytest ...)")
+    s.add_argument("-r", "--requirement", action="append", help="a package for the managed environment, e.g. pytest==8.3.3 (repeat it)")
+    s.add_argument("--container", metavar="IMAGE@sha256:...", help="run in this container image (with pytest in it), with no network")
+    s.add_argument("--memory-mb", type=int, help="the container's memory limit (default 2048)")
+    s.add_argument("--cpus", type=float, help="the container's CPU limit (default 1)")
+    s.add_argument("--spot-check", type=int, default=0, metavar="N", help="also run N shards again on another computer and compare outcomes")
+    s.add_argument("--approve-setup", action="store_true", help="approve preparing the environment or checking the image")
+    s.add_argument("--downloads", action="store_true", help="with --approve-setup: allow downloading what it needs")
+    s.set_defaults(fn=cmd_test, pytest_args=[])  # pytest's own options come after --, e.g. harness test -- -k login
+
     s = sub.add_parser("discover", help="find coordinators on this network")
     s.add_argument("--wait", type=float, default=1.5)
     s.set_defaults(fn=cmd_discover)
@@ -622,7 +667,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    passed: list[str] = []
+    if argv[:1] == ["test"] and "--" in argv:  # harness test [options] -- [pytest options]
+        i = argv.index("--")
+        argv, passed = argv[:i], argv[i + 1:]
     args = build_parser().parse_args(argv)
+    if args.cmd == "test":
+        args.pytest_args = passed
     if args.cmd not in ("serve", "agent", "discover"):
         from .client import PoolError
 

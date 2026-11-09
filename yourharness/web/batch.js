@@ -20,6 +20,9 @@
     'batch.join': 'Join two datasets on a key',
   };
   const CODE_KINDS = ['python.map', 'ml.evaluate'];
+  // shown in the job list, not offered in the form: harness test collects a suite's tests on your computer first
+  const LABELS = { ...KINDS, 'tests.pytest': 'A pytest suite in shards' };
+  const TEST_OUTCOMES = ['passed', 'failed', 'error', 'skipped', 'xfailed', 'xpassed', 'flaky', 'missing'];
   const STATUS = { running: 'Running', reducing: 'Combining', verifying: 'Checking', done: 'Done', failed: 'Failed', cancelled: 'Cancelled', needs_approval: 'Needs your approval' };
   const SETUP_PHASE = { queued: 'Asked', uv: 'Finding uv', python: 'Making the environment', packages: 'Installing packages', preflight: 'Checking it', ready: 'Ready', warning: 'Ready, with a warning', failed: 'Failed' };
   const DECISION = {
@@ -234,6 +237,9 @@
       return `<b>Accuracy</b> ${esc(pct(r.accuracy))} (${nf.format(r.correct)} of ${nf.format(r.samples)}) · <b>macro F1</b> ${esc((r.macro.f1).toFixed(3))} · ${nf.format(r.classes.length)} labels`
         + `${r.unlabeled ? ` · ${nf.format(r.unlabeled)} without a label left out` : ''}${j.outputs ? ` · ${nf.format(j.outputs.records)} predictions written` : ''}`;
     }
+    if (j.workload === 'tests.pytest' && r.total != null) {
+      return `<b>${r.ok ? 'All passed' : 'Not all passed'}</b> · ${TEST_OUTCOMES.filter((o) => r[o]).map((o) => `${nf.format(r[o])} ${o}`).join(', ')}`;
+    }
     if (r.values) return Object.entries(r.values).map(([k, v]) => `<b>${esc(k)}</b> ${esc(typeof v === 'number' ? nf.format(v) : JSON.stringify(v))}`).join(' · ');
     if (j.workload === 'batch.join') return `${nf.format(r.records || 0)} joined records · ${nf.format(r.matchedLeft || 0)} of ${nf.format(r.leftRecords || 0)} left records matched`;
     if (r.groups) return `${nf.format(r.groupsTotal || r.groups.length)} groups`;
@@ -284,7 +290,7 @@
     const validation = j.validation ? `<p class="hint">${j.validation.level === 'spot-checked' ? 'Spot-checked' : 'Checked'}: ${esc((j.validation.checks || []).slice(-1)[0] || '')}</p>` : '';
     return `<section class="panel ag-run" data-job="${esc(j.id)}">
       <div class="panel-head"><h2>${esc(j.name)} ${badge(j.status)}</h2><div class="ag-acts">${acts.join(' ')}</div></div>
-      <p class="hint">${esc(KINDS[j.workload] || j.workload)} · ${input} · ${esc(DECISION[j.decision] || j.decision || '')} · ${esc(when(j.createdAt))} by ${esc(j.createdBy || '?')}${j.finishedAt ? ` · took ${dur(j.startedAt, j.finishedAt)}` : ''}</p>
+      <p class="hint">${esc(LABELS[j.workload] || j.workload)} · ${input} · ${esc(DECISION[j.decision] || j.decision || '')} · ${esc(when(j.createdAt))} by ${esc(j.createdBy || '?')}${j.finishedAt ? ` · took ${dur(j.startedAt, j.finishedAt)}` : ''}</p>
       <div class="bj-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
       <p class="hint">${nf.format(done)} of ${nf.format(j.total)} partitions${who ? ` · ${who}` : ''}</p>
       ${stageLine(j)}
@@ -324,6 +330,20 @@
     renderJob(job.id);
   }
 
+  // A test job: every test that didn't pass, the flaky ones (failed, then passed on a rerun), and the slowest
+  function testReport(r) {
+    const first = (m) => { const lines = String(m || '').split('\n'); return (lines.find((l) => l.startsWith('E ')) || lines[lines.length - 1] || '').replace(/^E\s+/, ''); };
+    const bad = (r.notPassing || []).map((t) => `<tr><td>${badge(t.outcome === 'missing' ? 'failed' : t.outcome === 'error' ? 'failed' : t.outcome)} ${esc(t.outcome)}</td>
+      <td><code>${esc(t.test)}</code>${t.message ? `<div class="ag-detail error">${esc(first(t.message))}</div>` : ''}</td></tr>`).join('');
+    const flaky = (r.flakyTests || []).map((t) => `<li><code>${esc(typeof t === 'string' ? t : t.test)}</code></li>`).join('');
+    const slow = (r.slowest || []).slice(0, 10).map((t) => `<li><code>${esc(t.test)}</code> ${esc(String(t.seconds))} s</li>`).join('');
+    return `<p>${TEST_OUTCOMES.filter((o) => r[o]).map((o) => `<b>${nf.format(r[o])}</b> ${esc(o)}`).join(' · ')} of ${nf.format(r.total)} tests
+        · ${esc(String(r.testSeconds || 0))} s of test time in ${nf.format(r.pytestRuns || 0)} pytest runs</p>
+      ${bad ? `<div class="scroll-x"><table class="res-table ag-table"><thead><tr><th>Outcome</th><th>Test</th></tr></thead><tbody>${bad}</tbody></table></div>` : ''}
+      ${flaky ? `<details class="ag-more" open><summary>Flaky: failed, then passed on a rerun</summary><ul>${flaky}</ul></details>` : ''}
+      ${slow ? `<details class="ag-more"><summary>Slowest tests</summary><ul>${slow}</ul></details>` : ''}`;
+  }
+
   async function showDetail(id) {
     const box = $('#bj-detail');
     box.hidden = false;
@@ -337,7 +357,7 @@
       const plan = job.plan || {};
       box.innerHTML = `<div class="panel-head"><h2>${esc(job.name)}</h2><button class="btn ghost small" type="button" data-act="close-detail">Close</button></div>
         ${(plan.reasons || []).length ? `<p class="hint">${esc(plan.reasons.join(' '))}</p>` : ''}
-        ${groups}${job.workload === 'ml.evaluate' && r.classes ? scores(r) : ''}${provenance(job.provenance)}
+        ${groups}${job.workload === 'ml.evaluate' && r.classes ? scores(r) : ''}${job.workload === 'tests.pytest' && r.total != null ? testReport(r) : ''}${provenance(job.provenance)}
         <div class="scroll-x"><table class="res-table ag-table"><thead><tr><th>#</th><th>Status</th><th>Computer</th><th>Size</th><th>Records</th><th>Time</th><th>Tries</th></tr></thead><tbody>
         ${job.partitions.map((p) => `<tr><td>${p.idx + 1}</td><td>${badge(p.status === 'leased' ? 'running' : p.status)}${p.resumed ? ' <span class="hint">resumed</span>' : ''}${p.error ? `<div class="ag-detail error">${esc(p.error)}</div>` : ''}</td>
           <td>${esc(p.device || '')}</td><td>${bytes(p.bytes)}</td><td>${p.records == null ? '' : nf.format(p.records)}</td><td>${p.seconds == null ? '' : `${p.seconds} s`}</td>
@@ -369,8 +389,10 @@
     const bits = [];
     if (p.dataset) bits.push(`data ${esc(p.dataset.name || p.dataset.ref)} <code>${esc((p.dataset.sha256 || '').slice(0, 12))}</code>`);
     if (p.model) bits.push(`model ${esc(p.model.name || p.model.ref)} <code>${esc((p.model.sha256 || '').slice(0, 12))}</code>`);
+    if (p.project) bits.push(`project ${esc(p.project.name || p.project.ref)} <code>${esc((p.project.sha256 || '').slice(0, 12))}</code>`);
     if (p.code) bits.push(`code <code>${esc(p.code.sha256.slice(0, 12))}</code>`);
-    if (p.environment && p.environment.id) bits.push(`Python ${esc(p.environment.python)} environment <code>${esc(p.environment.id)}</code>`);
+    if (p.environment && p.environment.kind === 'isolated-oci') bits.push(`container <code>${esc(p.environment.image)}</code>, no network`);
+    else if (p.environment && p.environment.id) bits.push(`Python ${esc(p.environment.python)} environment <code>${esc(p.environment.id)}</code>`);
     return bits.length ? `<p class="hint">Made from: ${bits.join(' · ')} (SHA-256 prefixes).</p>` : '';
   }
 

@@ -24,6 +24,7 @@ from .partition import target_bytes
 DEFAULT_RATE = {"batch.aggregate": 25e6, "batch.groupby": 15e6, "batch.transform": 12e6, "python.map": 4e6, "ml.evaluate": 2e6,
                 "batch.join": 8e6}
 DEFAULT_ITEMS_PER_S = 20.0  # python.map over items: calls per second per slot
+ITEMS_RATE = {"tests.pytest": 1 / 20}  # a test shard holds about 20 s of tests (engine/testing.py)
 NETWORK_BPS = float(os.environ.get("HARNESS_NETWORK_BPS", 25e6))  # what the coordinator can send to other computers
 PART_OVERHEAD_S = 0.4  # starting a worker process and fetching its input
 MIN_DISTRIBUTED_BYTES = 16 * 2**20
@@ -91,7 +92,7 @@ class Planner:
         secs = sum(r["seconds"] for r in rows)
         if rows and secs > 0.5:
             return sum(r["units"] for r in rows) / secs, True
-        return (DEFAULT_ITEMS_PER_S if items else DEFAULT_RATE.get(wl_type, 5e6)), False
+        return (ITEMS_RATE.get(wl_type, DEFAULT_ITEMS_PER_S) if items else DEFAULT_RATE.get(wl_type, 5e6)), False
 
     def estimate(self, job: dict, ds: dict | None, devices: list) -> dict:
         spec = job["spec"]

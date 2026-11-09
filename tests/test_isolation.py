@@ -258,8 +258,9 @@ def _docker_works() -> bool:
         return False
 
 
-@pytest.mark.skipif(not _docker_works(), reason="needs a running Docker")
+@pytest.mark.skipif(not _docker_works() and os.environ.get("YH_EXPECT_DOCKER") != "1", reason="needs a running Docker")
 def test_a_real_container_has_no_network_no_host_files_and_its_limits(tmp_path):
+    assert _docker_works(), "YH_EXPECT_DOCKER is set (the Linux CI runners), so Docker must be running here"
     subprocess.run(["docker", "pull", "-q", "python:3.12-slim"], check=True, capture_output=True, timeout=600)
     digest = subprocess.run(["docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", "python:3.12-slim"],
                             check=True, capture_output=True, text=True).stdout.strip()

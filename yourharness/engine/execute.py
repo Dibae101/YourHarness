@@ -44,6 +44,10 @@ def make_op(wl: dict, ctx: dict | None, write: Callable[[dict], None] | None, *,
         if model is None:
             raise OpError("ml.evaluate needs its model")
         return EvaluateOp(wl, ctx, write, load_predictor(model, wl), bad)
+    if t == "tests.pytest":
+        from .testing import PytestOp
+
+        return PytestOp(wl, model)
     cls = OPS.get(t)
     if cls is None:
         raise OpError(f"this computer can't run {t}")

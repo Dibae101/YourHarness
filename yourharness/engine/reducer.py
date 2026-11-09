@@ -29,6 +29,10 @@ def merge_states(wl: dict, states: list[dict]) -> dict:
         from . import ml
 
         return ml.merge(states)
+    if t == "tests.pytest":
+        from . import testing
+
+        return testing.merge(states)
     raise ReduceError(f"no reducer for {t}")
 
 
@@ -46,6 +50,10 @@ def final_result(wl: dict, st: dict) -> dict:
         from . import ml
 
         return ml.final(wl, st)
+    if t == "tests.pytest":
+        from . import testing
+
+        return testing.final(wl, st)
     raise ReduceError(f"no reducer for {t}")
 
 

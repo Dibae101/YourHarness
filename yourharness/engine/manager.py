@@ -45,7 +45,7 @@ log = logging.getLogger("yourharness")
 
 MAX_DATASET = int(float(os.environ.get("HARNESS_MAX_DATASET_GB", 64)) * 2**30)
 MAX_MODEL = int(float(os.environ.get("HARNESS_MAX_MODEL_GB", 8)) * 2**30)
-MODEL_ADAPTERS = ("python", "torchscript")
+MODEL_ADAPTERS = ("python", "torchscript", "project")  # project: a .zip of a code base whose tests a tests.pytest job runs
 MAX_OUTPUT = 4 * 2**30
 INLINE_RESULT = 256 * 1024
 MAX_MOVES = 12
@@ -267,7 +267,10 @@ class EngineManager:
         adapter = adapter or ("torchscript" if fmt == "pt" else "python")
         if adapter not in MODEL_ADAPTERS:
             raise EngineError(f"The adapter should be one of {', '.join(MODEL_ADAPTERS)}.")
-        if fmt is None or (adapter == "python") != (fmt in ("py", "zip")):
+        if adapter == "project":
+            if fmt != "zip":
+                raise EngineError("A project for tests is a .zip of its files (harness test makes it).")
+        elif fmt is None or (adapter == "python") != (fmt in ("py", "zip")):
             raise EngineError("A python model is model.py, or a .zip with model.py at its top; a torchscript model is a .pt file "
                               "saved with torch.jit.save.")
         meta = {"filename": name}
@@ -284,9 +287,10 @@ class EngineManager:
                     names = z.namelist()
             except zipfile.BadZipFile:
                 raise EngineError("That .zip can't be read.") from None
-            if "model.py" not in names:
+            if "model.py" not in names and adapter == "python":
                 raise EngineError("The .zip needs model.py at its top level (not inside a folder).")
             meta["files"] = names[:200]
+            meta["fileCount"] = len(names)
         model_id = "m" + secrets.token_hex(4)
         self.db.insert("models", {"id": model_id, "name": name, "adapter": adapter, "format": fmt, "sha": sha, "size": size, "meta": meta,
                                   "created_by": by, "created_at": time.time()})
@@ -305,15 +309,16 @@ class EngineManager:
         if self.db.model(model_id) is None:
             raise EngineError("There's no model with that id.")
         users = [j for j in self.db.all("SELECT id, spec FROM jobs WHERE status NOT IN ('done', 'failed', 'cancelled')")
-                 if j["spec"]["spec"]["inputs"].get("model", {}).get("ref") == f"model:{model_id}"]
+                 if f"model:{model_id}" in (j["spec"]["spec"]["inputs"].get("model", {}).get("ref"), j["spec"]["spec"]["inputs"].get("project", {}).get("ref"))]
         if users:
             raise EngineError("A job that's still running uses this model. Cancel it first.")
         self.db.conn.execute("DELETE FROM models WHERE id = ?", (model_id,))
         self.s.broadcast({"type": "eng.datasets"}, need=CAP_SUBMIT)
 
     def job_model(self, job: dict) -> dict | None:
-        """The model a job was started with, by the SHA-256 pinned in its spec."""
-        m = job["spec"]["spec"]["inputs"].get("model")
+        """The model (or a test job's project archive) a job was started with, by the SHA-256 pinned in its spec."""
+        inputs = job["spec"]["spec"]["inputs"]
+        m = inputs.get("model") or inputs.get("project")
         if not m:
             return None
         row = self.db.model(m["ref"].split(":", 1)[1])
@@ -702,7 +707,7 @@ class EngineManager:
                 task["ctxRef"] = {"sha": st["context"], "size": st["contextSize"]}
         if runtime["kind"] in ("managed-python", "isolated-oci") and self.runtimes is not None:
             task["env"] = self.runtimes.env_for(job, d)
-        model = self.job_model(job) if wl["type"] == "ml.evaluate" else None
+        model = self.job_model(job) if wl["type"] in ("ml.evaluate", "tests.pytest") else None
         if model is not None:
             task["model"] = {"sha": model["sha"], "size": model["size"], "adapter": model["adapter"], "format": model["format"]}
         return task
@@ -787,7 +792,7 @@ class EngineManager:
             if j is None:
                 ref = spec["inputs"].get("dataset", {}).get("ref")
                 ds = self.db.dataset(ref.split(":", 1)[1]) if ref else None
-                m = spec["inputs"].get("model")
+                m = spec["inputs"].get("model") or spec["inputs"].get("project")
                 model = self.db.model(m["ref"].split(":", 1)[1]) if m else None
                 j = jobs[r["job_id"]] = {
                     "job": r["job_id"], "name": r["job_name"], "workload": spec["workload"]["type"], "runtime": spec["runtime"]["kind"],
@@ -1009,9 +1014,16 @@ class EngineManager:
                 return  # accepted by someone else a moment ago
             metrics = {"seconds": msg.get("seconds"), "bytes": msg.get("bytes")}
             extra = msg.get("metrics") if isinstance(msg.get("metrics"), dict) else {}
-            for k in ("predictSeconds", "predictCalls"):
+            for k in ("predictSeconds", "predictCalls", "pytestRuns", "pytestSeconds"):
                 if isinstance(extra.get(k), (int, float)) and not isinstance(extra.get(k), bool):
                     metrics[k] = extra[k]
+            for k in ("testSeconds", "testMessages"):  # a test shard's timings and failure messages (engine/testing.py)
+                v = extra.get(k)
+                if isinstance(v, dict) and len(v) <= jobspec.MAX_TESTS:
+                    if k == "testSeconds":
+                        metrics[k] = {str(t)[:2000]: float(x) for t, x in v.items() if isinstance(x, (int, float)) and not isinstance(x, bool)}
+                    else:
+                        metrics[k] = {str(t)[:2000]: str(x)[:4000] for t, x in v.items()}
             self.db.update("attempts", {"partition_id": p["id"], "n": a["n"]}, {"status": "done", "ended_at": now, "metrics": metrics})
             self.db.conn.execute("UPDATE stages SET done = done + 1 WHERE id = ?", (p["stage_id"],))
             st = self.stage_row(p["stage_id"])["spec"]
@@ -1135,10 +1147,11 @@ class EngineManager:
             if ref:
                 ds = self.db.dataset(ref.split(":", 1)[1])
                 out[name] = {"ref": ref, "name": ds["name"] if ds else None, "sha256": ds["sha"] if ds else None, "size": ds["size"] if ds else None}
-        m = spec["inputs"].get("model")
-        if m:
-            row = self.db.model(m["ref"].split(":", 1)[1])
-            out["model"] = {"ref": m["ref"], "name": row["name"] if row else None, "sha256": m["sha256"], "adapter": row["adapter"] if row else None}
+        for key in ("model", "project"):
+            m = spec["inputs"].get(key)
+            if m:
+                row = self.db.model(m["ref"].split(":", 1)[1])
+                out[key] = {"ref": m["ref"], "name": row["name"] if row else None, "sha256": m["sha256"], "adapter": row["adapter"] if row else None}
         codes = [st["workload"]["code"] for st in (spec.get("stages") or [{"workload": spec["workload"]}]) if st["workload"].get("code")]
         if codes:
             out["code"] = {"sha256": hashlib.sha256("\n".join(codes).encode("utf-8")).hexdigest()}
@@ -1167,6 +1180,14 @@ class EngineManager:
             samples += int(p["records"] or 0)
         return {"predictSeconds": round(secs, 3), "batches": calls, "msPerRecord": round(secs * 1000 / samples, 4) if samples else None,
                 "note": "Measured on each computer while it predicted; timing isn't part of the checked result."}
+
+    def accepted_metrics(self, parts: list[dict]) -> list[dict]:
+        """What the accepted attempts reported beside their checked states (timings, messages), in partition order."""
+        out = []
+        for p in parts:
+            a = self.db.attempt(p["id"], p["accepted_attempt"]) if p["accepted_attempt"] else None
+            out.append((a or {}).get("metrics") or {})
+        return out
 
     # ------------------------------------------------------------------ files for a computer working on a partition
     def attempt_for_token(self, token: str | None, pid: str, n: int, writing: bool = False) -> tuple[dict, dict] | None:
@@ -1362,4 +1383,9 @@ def _preview(wl: dict, result: dict) -> dict:
     if isinstance(out.get("value"), dict) and len(out["value"]) > 100:
         out["valueTotal"] = len(out["value"])
         out["value"] = dict(list(out["value"].items())[:100])
+    for key in ("outcomes", "durations"):  # a test job's per-test maps: in the download
+        if isinstance(out.get(key), dict):
+            out.pop(key)
+    if isinstance(out.get("notPassing"), list):
+        out["notPassing"] = out["notPassing"][:100]
     return out

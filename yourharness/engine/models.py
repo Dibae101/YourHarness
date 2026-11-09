@@ -88,7 +88,7 @@ def fetch(chunks, cache: Path, model: dict) -> Path:
             with zipfile.ZipFile(blob) as z:
                 safe_extract(z, tmp)
             blob.unlink()
-            if not (tmp / "model.py").is_file():
+            if model.get("adapter") != "project" and not (tmp / "model.py").is_file():  # a test job's project has no model.py
                 raise ModelIntegrityError("the model's .zip has no model.py at its top level")
         (tmp / ".complete").write_text(sha, encoding="ascii")
         try:
