@@ -134,7 +134,7 @@ class FakeBrowser:
         self.coord, self.name, self.threads = coord, name, threads
         self.stall, self.beat = stall, beat
         self.origin = origin or coord.base
-        self.join_token = token or coord.token
+        self.join_token = token  # None: the coordinator's owner link, read when joining
         self.msgs: list[dict] = []
         self.params: dict[str, dict] = {}
         self.computed = 0
@@ -142,7 +142,7 @@ class FakeBrowser:
 
     async def __aenter__(self):
         self.http = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
-        r = await self.http.post(f"{self.coord.base}/api/join", json={"token": self.join_token, "name": self.name})
+        r = await self.http.post(f"{self.coord.base}/api/join", json={"token": self.join_token or self.coord.token, "name": self.name})
         assert r.status == 200, await r.text()
         self.ws = await self.http.ws_connect(self.coord.base.replace("http", "ws") + "/ws", headers={"Origin": self.origin})
         await self.ws.send_json({"type": "hello", "name": self.name, "threads": self.threads, "sharing": True, "runtimes": ["js"], "info": {"platform": "Test", "cores": self.threads}})

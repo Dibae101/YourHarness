@@ -20,6 +20,10 @@ import aiohttp
 
 from .. import __version__, sysinfo
 from .slots import SlotPool
+from .taskhost import TaskHost
+
+# A friend invite code, as the coordinator makes them: ABCD-EFGH-JKLM-NPQR
+INVITE_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-?[A-HJ-NP-Z2-9]{4}){3}", re.I)
 
 log = logging.getLogger("yourharness")
 
@@ -48,7 +52,7 @@ def parse_join_link(link: str) -> tuple[str, str]:
 def join(link_or_code: str, name: str, server: str | None = None) -> dict:
     """Join with a 4-digit code plus the coordinator's address, or with a full join link."""
     text = link_or_code.strip()
-    if text.isdigit():
+    if text.isdigit() or INVITE_CODE.fullmatch(text):
         if not server:
             raise SignInError("A join code needs the coordinator's address too: harness agent --server http://192.168.1.20:8420 --join 1234")
         token = text
@@ -71,7 +75,8 @@ def join(link_or_code: str, name: str, server: str | None = None) -> dict:
         raise SignInError(message or f"The coordinator answered {e.code}.") from None
     except (urllib.error.URLError, OSError) as e:
         raise SignInError(f"Can't reach the coordinator at {server} ({e}). Check that it's running and that this computer is on the same network.") from None
-    return {"server": server, "token": body["deviceToken"], "deviceId": body["deviceId"], "name": body["name"]}
+    return {"server": server, "token": body["deviceToken"], "deviceId": body["deviceId"], "name": body["name"],
+            "caps": body.get("caps") if isinstance(body.get("caps"), list) else None}
 
 
 @dataclass
@@ -84,6 +89,8 @@ class AgentConfig:
     workspace: bool = False
     home: Path = field(default_factory=default_home)
     coordinator: bool = False
+    tasks: bool | None = None  # agent tasks; None means allowed on your own computers, not on a friend's
+    task_slots: int = 1
 
 
 class Agent:
@@ -97,6 +104,7 @@ class Agent:
         self.files = None
         self.runner = None
         self.cpu = sysinfo.CpuMeter()
+        self.taskhost = TaskHost(cfg.server, cfg.home, self.send, cfg.tasks, cfg.task_slots)
         if cfg.workspace:  # a computer that hosts a terminal also lets the pool browse its home folder
             from .files import HomeFiles
 
@@ -138,6 +146,8 @@ class Agent:
     # ------------------------------------------------------------------ main loop
     async def run(self) -> int:
         await self.pool.resize(self.cfg.threads if self.cfg.sharing else 0)
+        if self.cfg.tasks is not False:
+            await self.taskhost.detect()
         delay = 1.0
         try:
             while True:
@@ -164,6 +174,7 @@ class Agent:
         finally:
             if self.terms:
                 self.terms.close_all()
+            self.taskhost.stop_all()
             await self.pool.close()
 
     def _hello(self) -> dict:
@@ -173,6 +184,7 @@ class Agent:
             "workspace": self.terms.describe() if self.terms else None, "coordinator": self.cfg.coordinator,
             "files": self.files.describe() if self.files else None,
             "exec": self.runner.describe() if self.runner else None,
+            "tasks": self.taskhost.describe(),
         }
 
     async def _connect_once(self) -> int | None:
@@ -229,6 +241,8 @@ class Agent:
             await asyncio.sleep(INFO_S)
             info = await loop.run_in_executor(None, sysinfo.collect, str(self.cfg.home))
             self.send({"type": "update", "info": info})
+            if self.cfg.tasks is not False and await self.taskhost.refresh():  # an agent CLI installed since
+                self.send({"type": "update", "tasks": self.taskhost.describe()})
 
     def _handle(self, m: dict) -> None:
         kind = m.get("type")
@@ -236,6 +250,14 @@ class Agent:
             role = " and hosting the workspace" if self.terms else ""
             sharing = f"sharing {self.cfg.threads} worker processes" if self.cfg.sharing else "not sharing compute"
             print(f"Joined the pool as {m.get('name')}, {sharing}{role}.", flush=True)
+            self.taskhost.owned = "submit" in (m.get("caps") or [])
+            th = self.taskhost
+            if (th.enabled if th.enabled is not None else th.owned) and th.tools.get("git"):
+                agents = ", ".join(a["id"] for a in th.tools.get("agents", []))
+                print(f"Agent tasks are allowed on this computer (with: {agents}).", flush=True)
+            self.taskhost.connected()
+        elif isinstance(kind, str) and kind.startswith("task."):
+            self.taskhost.handle(m)
         elif kind == "denied":
             print(m.get("reason") or "The coordinator refused this agent.", file=sys.stderr)
         elif kind == "chunk":

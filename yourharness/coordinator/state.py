@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -45,6 +46,20 @@ CAP_REFUSALS = {
 
 def _digest(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+# Friend invite codes: 16 characters (80 bits) from an alphabet without look-alikes
+# (no 0/O, 1/I), shown as ABCD-EFGH-JKLM-NPQR. Each is good for one computer and
+# expires, and joining with one gives the same powers as the lend link: none.
+INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+INVITE_RE = re.compile(f"[{INVITE_ALPHABET}]{{16}}")
+
+
+def normalize_invite(text) -> str | None:
+    if not isinstance(text, str):
+        return None
+    s = re.sub(r"[\s-]", "", text).upper()
+    return s if INVITE_RE.fullmatch(s) else None
 
 
 def caps_of(rec: dict | None) -> tuple[str, ...]:
@@ -129,9 +144,60 @@ class Store:
         code = secrets.compare_digest(value, self.join_code.encode()) and allow_code and not self.code_locked
         if owner or code:
             return OWNER_CAPS
-        if lender:
+        if lender or self.invite_for(token) is not None:
             return LENDER_CAPS
         return None
+
+    # --- friend invites
+    def create_invite(self, label: str, hours: float = 24, uses: int = 1) -> tuple[dict, str]:
+        """A one-time code for a friend's computer. Only its hash is kept, so the code is shown once."""
+        code = "".join(secrets.choice(INVITE_ALPHABET) for _ in range(16))
+        now = time.time()
+        rec = {"id": secrets.token_hex(4), "label": label, "created": now, "expires": now + hours * 3600, "uses": uses,
+               "hash": _digest(code)}
+        self.data.setdefault("invites", []).append(rec)
+        self.save()
+        return self._invite_view(rec), "-".join(code[i:i + 4] for i in range(0, 16, 4))
+
+    def invite_for(self, token) -> dict | None:
+        norm = normalize_invite(token)
+        if norm is None:
+            return None
+        h, now = _digest(norm), time.time()
+        for rec in self.data.get("invites", []):
+            if secrets.compare_digest(rec["hash"], h) and rec["uses"] > 0 and rec["expires"] > now:
+                return rec
+        return None
+
+    def use_invite(self, token) -> None:
+        rec = self.invite_for(token)
+        if rec is not None:
+            rec["uses"] -= 1
+            rec["used"] = time.time()
+            self.save()
+
+    def invites(self) -> list[dict]:
+        """Invites still usable, and ones used or expired in the last day, newest first."""
+        now = time.time()
+        keep = [r for r in self.data.get("invites", []) if (r["uses"] > 0 and r["expires"] > now) or now - max(r["expires"], r.get("used", 0)) < 86400]
+        if len(keep) != len(self.data.get("invites", [])):
+            self.data["invites"] = keep
+            self.save()
+        return [self._invite_view(r) for r in sorted(keep, key=lambda r: -r["created"])]
+
+    def revoke_invite(self, invite_id: str) -> bool:
+        before = len(self.data.get("invites", []))
+        self.data["invites"] = [r for r in self.data.get("invites", []) if r["id"] != invite_id]
+        if len(self.data["invites"]) == before:
+            return False
+        self.save()
+        return True
+
+    @staticmethod
+    def _invite_view(rec: dict) -> dict:
+        now = time.time()
+        state = "used" if rec["uses"] <= 0 else "expired" if rec["expires"] <= now else "open"
+        return {"id": rec["id"], "label": rec["label"], "created": rec["created"], "expires": rec["expires"], "state": state}
 
     def join_ok(self, token, *, allow_code: bool = True) -> bool:
         """True for any current join link, or the 4-digit code when it is allowed."""

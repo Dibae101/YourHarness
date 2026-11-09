@@ -27,6 +27,8 @@ from .execs import Execs
 from .pool_store import PoolStore
 from .poolshell import PoolShell
 from .remote_fs import RemoteFS
+from .tasks import TaskManager
+from .tasks.rules import ADAPTERS
 from .terminals import Terminals
 
 log = logging.getLogger("yourharness")
@@ -69,6 +71,33 @@ def sanitize_info(info) -> dict:
     }
 
 
+def sanitize_tasks(t) -> dict | None:
+    """What a computer says about running agent tasks: whether it allows them, and with which agents.
+
+    A friend's computer is believed about this, unlike its other claims: allowing
+    tasks only puts that computer itself at risk, and it's the friend's choice.
+    """
+    if not isinstance(t, dict):
+        return None
+    agents = []
+    for a in (t.get("agents") or [])[:16]:
+        if isinstance(a, dict) and a.get("id") in ADAPTERS and a["id"] not in {x["id"] for x in agents}:
+            agents.append({"id": a["id"], "name": ADAPTERS[a["id"]], "version": clean_text(a.get("version"), 60, "")})
+    running = []
+    for r in (t.get("running") or [])[:64]:
+        if isinstance(r, dict) and isinstance(r.get("attempt"), int):
+            running.append({"task": clean_text(r.get("task"), 40, ""), "attempt": r["attempt"]})
+    enabled = t.get("enabled")
+    return {
+        "enabled": None if enabled is None else bool(enabled),
+        "slots": clamp_int(t.get("slots"), 1, 16, 1),
+        "agents": agents,
+        "git": clean_text(t.get("git"), 60, "") or None,
+        "problem": clean_text(t.get("problem"), 200, "") or None,
+        "running": running,
+    }
+
+
 def sanitize_workspace(ws) -> dict | None:
     if not isinstance(ws, dict):
         return None
@@ -101,6 +130,7 @@ class Device:
         self.files = self.trusted and isinstance(hello.get("files"), dict)  # lets the Files app browse its home folder
         ex = hello.get("exec") if self.trusted else None  # can run the pool shell's commands
         self.exec = {"os": clean_text(ex.get("os"), 60, "Linux"), "linux": bool(ex.get("linux"))} if isinstance(ex, dict) else None
+        self.tasks_info = sanitize_tasks(hello.get("tasks")) if self.kind == "agent" else None  # agent tasks
         self.load: dict = {}  # live CPU and memory use, reported every few seconds
         self.inflight: set[tuple[str, int]] = set()
         self.params_sent: set[str] = set()
@@ -227,6 +257,7 @@ class Scheduler:
         self.remote_fs = RemoteFS(self)
         self.execs = Execs(self)
         self.poolshell = PoolShell(self)
+        self.tasks = TaskManager(self, store.dir)
         self.public_url = ""  # the address other devices use; set once the port is known
         self.repair_s = float(os.environ.get("HARNESS_REPAIR_S", 10))
         self._devices_pending = False
@@ -256,12 +287,12 @@ class Scheduler:
     def list_files(self) -> list[dict]:
         return shared_files.list_files(self.shared_dir, self.file_meta)
 
-    @staticmethod
-    def device_view(d: Device) -> dict:
+    def device_view(self, d: Device) -> dict:
         return {
             "id": d.id, "name": d.name, "kind": d.kind, "color": d.color, "info": d.info, "threads": d.threads,
             "sharing": d.sharing, "runtimes": sorted(d.runtimes), "workspace": d.workspace, "busy": len(d.inflight),
             "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host, "coordinator": d.coordinator, "files": d.files, "exec": d.exec, "load": d.load,
+            "owned": d.owned, "agentTasks": self.tasks.device_view(d),
         }
 
     def device_list(self) -> list[dict]:
@@ -292,6 +323,7 @@ class Scheduler:
             self.remote_fs.device_gone(previous)
             self.execs.device_gone(previous)
             self.poolshell.device_gone(previous)
+            self.tasks.device_gone(previous)
             previous.close(4002, "This device connected again from somewhere else.")
         d = Device(rec, ws, hello, self.pick_color(rec), host)
         self.store.update_device(d.id, name=d.name, color=d.color)
@@ -318,6 +350,8 @@ class Scheduler:
         log.info("%s joined (%s, %s threads)", d.name, d.kind, d.threads)
         self.broadcast_devices()
         self.dispatch()
+        if d.kind == "agent":
+            self.tasks.device_connected(d)
         return d
 
     def disconnect(self, d: Device) -> None:
@@ -330,6 +364,7 @@ class Scheduler:
             self.remote_fs.device_gone(d)
             self.execs.device_gone(d)
             self.poolshell.device_gone(d)
+            self.tasks.device_gone(d)
             log.info("%s left", d.name)
             self.pool_store.changed()
             self.broadcast_devices()
@@ -376,6 +411,13 @@ class Scheduler:
                 d.sharing = bool(msg["sharing"])
             if "info" in msg:
                 d.info = sanitize_info(msg["info"])
+            if "tasks" in msg and d.kind == "agent":
+                running = (d.tasks_info or {}).get("running", [])
+                d.tasks_info = sanitize_tasks(msg["tasks"])
+                if d.tasks_info is not None:
+                    d.tasks_info["running"] = running  # only a fresh connection reports what it's working on
+                self.broadcast_devices()
+                self.tasks.dispatch()
             if isinstance(msg.get("load"), dict):
                 d.load = {"cpu": _num_or_none(msg["load"].get("cpu"), 0, 100), "memUsedGB": _num_or_none(msg["load"].get("memUsedGB"), 0, 65536)}
                 self.broadcast_devices()
@@ -409,6 +451,9 @@ class Scheduler:
         elif kind in ("exec.out", "exec.done"):
             if d.kind == "agent":
                 self.execs.handle(d, msg)
+        elif isinstance(kind, str) and kind.startswith("task."):
+            if d.kind == "agent":
+                self.tasks.handle(d, msg)
         elif isinstance(kind, str) and kind.startswith("os."):
             if d.kind != "agent":
                 if not d.can(CAP_SHELL):
@@ -641,6 +686,7 @@ class Scheduler:
         if changed:
             self.broadcast_devices()
             self.dispatch()
+        self.tasks.sweep()
 
     async def run_maintenance(self, every_s: float = 1.0) -> None:
         last_repair = 0.0

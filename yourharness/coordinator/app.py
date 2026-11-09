@@ -19,7 +19,8 @@ from .auth import COOKIE, Limiter, client_ip, same_origin, token_from
 from .install import agent_tarball, install_ps1, install_script
 from .jobkinds import UserError
 from .scheduler import Scheduler, clean_text
-from .state import CAP_ADMIN, CAP_FILES, CAP_SHELL, CAP_SUBMIT, CAP_REFUSALS, Store, caps_of
+from .state import CAP_ADMIN, CAP_FILES, CAP_SHELL, CAP_SUBMIT, CAP_REFUSALS, LENDER_CAPS, Store, caps_of
+from .tasks.api import TaskAPI
 
 log = logging.getLogger("yourharness")
 
@@ -149,6 +150,7 @@ class Coordinator:
         r.add_post("/api/fs/{device_id}/rename", self.fs_rename)
         r.add_delete("/api/fs/{device_id}", self.fs_delete)
         r.add_post("/api/fs-copy", self.fs_copy)
+        TaskAPI(self).register(r)
         r.add_get("/install.sh", self.install_sh)
         r.add_get("/install.ps1", self.install_ps1)
         r.add_get("/agent.tar.gz", self.agent_tar)
@@ -159,6 +161,7 @@ class Coordinator:
         return app
 
     async def _on_startup(self, app):
+        self.sched.tasks.start()
         self._maintenance = asyncio.ensure_future(self.sched.run_maintenance())
 
     async def _on_shutdown(self, app):
@@ -234,6 +237,8 @@ class Coordinator:
             if rec is not None and caps_of(rec) == caps:
                 return web.json_response({"deviceId": rec["id"], "name": rec["name"], "caps": list(caps)})
         rec, token = self.store.add_device(kind, name, caps)
+        if caps == LENDER_CAPS:
+            self.store.use_invite(offered)  # a friend invite code is good for one computer
         if kind == "agent":
             return web.json_response({"deviceId": rec["id"], "name": rec["name"], "deviceToken": token, "caps": list(caps)})
         resp = web.json_response({"deviceId": rec["id"], "name": rec["name"], "caps": list(caps)})

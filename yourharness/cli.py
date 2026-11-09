@@ -3,6 +3,7 @@
     harness serve                          start the coordinator
     harness agent --join '<link>'          join this computer as an agent
     harness agent --workspace              ...and host the shared Linux workspace
+    harness agent --tasks                  ...and allow agent tasks (needed on a friend's computer)
     harness devices | jobs                 see what's in the pool
     harness run primes --below 1e9         run a job and print the result
     harness run python job.py --pieces 64  run your own run(chunk, total) on every agent
@@ -99,12 +100,17 @@ def cmd_agent(a) -> int:
         saved["threads"] = a.threads
     if a.workspace or a.no_workspace:
         saved["workspace"] = bool(a.workspace)
+    if a.tasks or a.no_tasks:
+        saved["tasks"] = bool(a.tasks)
+    if a.task_slots:
+        saved["task_slots"] = max(1, min(16, a.task_slots))
     cfg_path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
     os.chmod(cfg_path, 0o600)
 
     threads = int(saved.get("threads") or max(1, (os.cpu_count() or 2) - 1))
     cfg = AgentConfig(server=saved["server"], token=saved["token"], name=saved.get("name") or _default_agent_name(),
-                      threads=threads, sharing=not a.no_share, workspace=bool(saved.get("workspace")), home=home)
+                      threads=threads, sharing=not a.no_share, workspace=bool(saved.get("workspace")), home=home,
+                      tasks=saved.get("tasks"), task_slots=int(saved.get("task_slots") or 1))
     _setup_logging(a.verbose)
     print(f"Connecting to {cfg.server} as {cfg.name}...", flush=True)
     try:
@@ -283,6 +289,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--workspace", action="store_true", help="host the shared Linux workspace terminal")
     s.add_argument("--no-workspace", action="store_true", help="stop hosting the workspace")
     s.add_argument("--no-share", action="store_true", help="connect without taking any pieces")
+    s.add_argument("--tasks", action="store_true",
+                   help="allow agent tasks (AI agents or commands working on a Git repository) on this computer; "
+                        "needed on a friend's computer, which doesn't allow them otherwise")
+    s.add_argument("--no-tasks", action="store_true", help="don't run agent tasks on this computer")
+    s.add_argument("--task-slots", type=int, help="agent tasks to run at the same time (default 1)")
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_agent)
 
