@@ -86,3 +86,10 @@ class GitHub:
             else:
                 raise
         return (data or {}).get("html_url") or ""
+
+    async def update_pr(self, full_name: str, url: str, body: str) -> None:
+        """Rewrite a pull request's description (after new results or final checks)."""
+        number = url.rstrip("/").rsplit("/", 1)[-1]
+        if not number.isdigit():
+            raise GitHubError(f"Can't tell the pull request number from {url}.")
+        await self._req("PATCH", f"/repos/{full_name}/pulls/{number}", body={"body": body})

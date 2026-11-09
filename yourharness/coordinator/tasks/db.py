@@ -12,7 +12,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-VERSION = 1
+VERSION = 2
 SCHEMA = [
     """CREATE TABLE IF NOT EXISTS repos (
         id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, default_branch TEXT, created_at REAL)""",
@@ -30,7 +30,7 @@ SCHEMA = [
     """CREATE TABLE IF NOT EXISTS events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, run_id TEXT, task_id TEXT, type TEXT, data TEXT)""",
 ]
-JSON_COLUMNS = ("spec", "result")
+JSON_COLUMNS = ("spec", "result", "validation")
 
 
 class TaskDB:
@@ -42,6 +42,9 @@ class TaskDB:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         for stmt in SCHEMA:
             self.conn.execute(stmt)
+        have = {r[1] for r in self.conn.execute("PRAGMA table_info(runs)")}
+        if "validation" not in have:  # version 1 -> 2: the final checks' outcome on the combined branch
+            self.conn.execute("ALTER TABLE runs ADD COLUMN validation TEXT")
         self.conn.execute(f"PRAGMA user_version={VERSION}")
         self.columns = {t: {r[1] for r in self.conn.execute(f"PRAGMA table_info({t})")} for t in ("repos", "runs", "tasks", "events")}
 

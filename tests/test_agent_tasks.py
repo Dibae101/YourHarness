@@ -340,6 +340,45 @@ def test_failing_checks_and_cancelling(pool):
     assert pool.wait(run["id"])["status"] == "cancelled"
 
 
+def test_final_checks_run_on_the_combined_branch_with_no_secrets(pool):
+    from yourharness.coordinator.tasks import final
+
+    env = final.clean_env({"PATH": "/bin", "HOME": "/h", "LC_ALL": "C", "GITHUB_TOKEN": "x", "HARNESS_TOKEN": "y", "MY_API_KEY": "z",
+                           "AWS_PROFILE": "p", "SSH_AUTH_SOCK": "/tmp/agent", "EDITOR": "vi"})
+    assert set(env) == {"PATH", "HOME", "LC_ALL", "CI", "YOURHARNESS_FINAL_CHECKS", "GIT_TERMINAL_PROMPT"}
+    origin = make_repo(pool.coord.tmp / "origin-final")
+    alpha, beta = pool.device("Alpha"), pool.device("Beta")
+    two = [task("A", "echo a > a.txt", alpha["id"]), task("B", "echo b > b.txt", beta["id"])]
+    # passes: both tasks' files are there together, which neither task's own checks could see
+    run = pool.start({"repo": {"kind": "local", "name": str(origin)}, "results_branch": "yh/final-ok", "tasks": two,
+                      "final_setup": ["echo setup > .setup-ran"], "final_checks": ["test -f a.txt && test -f b.txt && test -f .setup-ran",
+                                                                                   "test -z \"$HARNESS_TOKEN$GITHUB_TOKEN\""]})
+    run = pool.wait(run["id"])
+    assert run["status"] == "done", run
+    v = run["validation"]
+    assert v["status"] == "passed" and [c["code"] for c in v["checks"]] == [0, 0, 0] and v["commit"] == run["pushedCommit"], v
+    assert run["validationText"].startswith("Validated")
+    assert "test -f a.txt" in pool.c.request("GET", f"/api/agent-runs/{run['id']}/log").decode()
+    assert git("-C", str(origin), "show", "yh/final-ok:a.txt") == "a\n"
+    assert ".setup-ran" not in git("-C", str(origin), "ls-tree", "-r", "--name-only", "yh/final-ok"), "the checks' own files are never pushed"
+    # fails without a gate: pushed, marked not validated
+    run = pool.start({"repo": {"kind": "local", "name": str(origin)}, "results_branch": "yh/final-bad", "tasks": [task("C", "echo c > c.txt")],
+                      "final_checks": ["test -f a.txt"]})
+    run = pool.wait(run["id"])
+    assert run["status"] == "done" and run["pushedCommit"] and run["validation"]["status"] == "failed", run
+    assert run["validationText"] == "Not validated: the combined branch failed its final checks (test -f a.txt)."
+    # fails with a gate: nothing pushed until you push it yourself
+    run = pool.start({"repo": {"kind": "local", "name": str(origin)}, "results_branch": "yh/final-gate", "tasks": [task("D", "echo d > d.txt")],
+                      "final_checks": ["exit 3"], "final_gate": True})
+    run = pool.wait(run["id"])
+    assert run["status"] == "failed" and not run["pushedCommit"] and "final checks" in run["error"], run
+    assert "yh/final-gate" not in git("-C", str(origin), "branch", "--list", "yh/final-gate")
+    pool.c.request("POST", f"/api/agent-runs/{run['id']}/push", {})
+    run = pool.wait(run["id"], until=("done",))
+    assert run["pushedCommit"] and run["validation"]["status"] == "failed"
+    assert git("-C", str(origin), "show", "yh/final-gate:d.txt") == "d\n"
+
+
 def test_a_friends_computer_takes_tasks_only_when_its_owner_allows_it(pool):
     origin = make_repo(pool.coord.tmp / "origin-friend")
     coord = pool.coord
@@ -373,6 +412,18 @@ def test_a_friends_computer_takes_tasks_only_when_its_owner_allows_it(pool):
     anywhere = pool.wait_task(run["id"], lambda t: t["title"] == "Anywhere" and t["status"] == "done")
     assert anywhere["deviceName"] in ("Alpha", "Beta"), "“any of my computers” never means a friend's"
     pool.c.request("POST", f"/api/agent-runs/{run['id']}/cancel", {})
+    # final checks run code from a friend's computer on yours only when the run allows it
+    for allowed in (False, True):
+        origin2 = make_repo(pool.coord.tmp / f"origin-friend-final-{allowed}")
+        run = pool.start({"repo": {"kind": "local", "name": str(origin2)}, "final_checks": ["test -f sam.txt"], "final_with_friends": allowed,
+                          "tasks": [task("On Sam's", "echo sam > sam.txt", sam["id"])]})
+        run = pool.wait(run["id"])
+        assert run["status"] == "done" and run["pushedCommit"], run
+        if allowed:
+            assert run["validation"]["status"] == "passed" and run["validationText"].startswith("Validated"), run
+        else:
+            assert run["validation"]["status"] == "skipped" and "Sams PC" in run["validation"]["reason"], run
+            assert run["validationText"].startswith("Not validated")
 
 
 # ---------------------------------------------------------------------- GitHub, faked
@@ -423,6 +474,15 @@ class FakeGitHub:
                     return self._reply(201, {"html_url": "https://github.example/owner/demo/pull/1", "number": 1})
                 self._reply(404, {"message": "Not Found"})
 
+            def do_PATCH(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                gh.calls.append(("PATCH", self.path, body))
+                if not self._authed():
+                    return
+                if self.path == "/repos/owner/demo/pulls/1":
+                    return self._reply(200, {"html_url": "https://github.example/owner/demo/pull/1", "number": 1})
+                self._reply(404, {"message": "Not Found"})
+
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
@@ -460,6 +520,7 @@ def test_results_go_to_github_as_a_draft_pull_request(tmp_path):
         posted = [b for m, path, b in gh.calls if m == "POST"]
         assert posted[0]["head"] == run["resultsBranch"] and posted[0]["base"] == "main" and posted[0]["draft"] is True
         assert "Add hello" in posted[0]["body"]
+        assert "**Not validated:** this run has no final checks" in posted[0]["body"], "a pull request never looks validated when it wasn't"
         log = p.c.request("GET", f"/api/agent-tasks/{run['tasks'][0]['id']}/log").decode()
         assert token not in log
         # the coordinator restarts: runs and tasks are still there

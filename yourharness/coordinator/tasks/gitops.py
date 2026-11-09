@@ -232,6 +232,22 @@ class GitOps:
         finally:
             await git_rc("-C", path, "worktree", "remove", "--force", work)
 
+    async def checkout(self, repo: dict, commit: str, label: str) -> Path:
+        """A fresh working copy of one commit, for the final checks. Remove it with drop()."""
+        path = self.mirror(repo)
+        work = self.root / "work" / f"{label}-{secrets.token_hex(3)}"
+        work.parent.mkdir(parents=True, exist_ok=True)
+        await git_rc("-C", path, "worktree", "prune")
+        await git("-C", path, "worktree", "add", "-q", "--detach", work, commit)
+        return work
+
+    async def drop(self, repo: dict, work: Path) -> None:
+        await git_rc("-C", self.mirror(repo), "worktree", "remove", "--force", work)
+        if work.exists():
+            import shutil
+
+            shutil.rmtree(work, ignore_errors=True)
+
     async def push(self, repo: dict, run_id: str, branch: str) -> None:
         if branch in ("main", "master", "mainline", "trunk"):  # also refused when the run is made; checked again here
             raise GitError(f"Refusing to push to {branch}.")

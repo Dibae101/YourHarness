@@ -22,8 +22,8 @@ import secrets
 import time
 from pathlib import Path
 
-from ..state import CAP_SUBMIT
-from . import rules
+from ..state import CAP_SUBMIT, OWNER_CAPS, caps_of
+from . import final, rules
 from .db import TaskDB
 from .github import GitHub, GitHubError
 from .gitops import GitError, GitOps
@@ -78,6 +78,26 @@ def clean_result(res) -> dict:
     }
 
 
+def final_spec(run: dict) -> dict:
+    f = (run.get("spec") or {}).get("final") or {}
+    return {"checks": list(f.get("checks") or []), "setup": list(f.get("setup") or []), "time_limit_min": int(f.get("time_limit_min") or 30),
+            "gate": bool(f.get("gate")), "with_friends": bool(f.get("with_friends"))}
+
+
+def final_section(run: dict) -> str:
+    """What the pull request says about the final checks on the combined branch."""
+    v = run.get("validation") or {}
+    if not final_spec(run)["checks"]:
+        return "**Not validated:** this run has no final checks, so only each task's own checks ran, each on its own changes."
+    lines = [f"**{final.summary(v) or 'Not validated: the final checks have not run yet.'}**"]
+    if v.get("checks"):
+        lines.append(f"\nRan on the coordinator's computer ({_cell(v.get('on'))}) at `{(v.get('commit') or '')[:12]}`:")
+        for c in v["checks"]:
+            outcome = "passed" if c.get("code") == 0 else c.get("error") or f"exit code {c.get('code')}"
+            lines.append(f"- {'setup ' if c.get('phase') == 'setup' else ''}`{_cell(c.get('cmd'))}`: {outcome} ({(c.get('ms') or 0) / 1000:.1f} s)")
+    return "\n".join(lines)
+
+
 def pr_body(run: dict, tasks: list[dict]) -> str:
     rows, details = [], []
     for t in tasks:
@@ -99,7 +119,7 @@ def pr_body(run: dict, tasks: list[dict]) -> str:
             lines.append(f"> {t['error'][:500]}")
         details.append("\n".join(lines))
     head = (f"Results of the YourHarness run **{run['title']}** (`{run['id']}`), based on `{run['base_branch']}` "
-            f"at `{(run['base_commit'] or '')[:12]}`.\n\n| Task | Computer | Agent | Status | Files |\n|---|---|---|---|---|\n")
+            f"at `{(run['base_commit'] or '')[:12]}`.\n\n{final_section(run)}\n\n| Task | Computer | Agent | Status | Files |\n|---|---|---|---|---|\n")
     return head + "\n".join(rows) + "\n\n" + "\n\n".join(details) + "\n\n---\nMade by YourHarness. Nothing was merged: review this and merge it yourself."
 
 
@@ -423,6 +443,7 @@ class TaskManager:
                 return
             repo = self.db.repo(run["repo_id"])
             self._set_run(run_id, status="integrating", note="Combining the results…")
+            blocked = None
             try:
                 for _ in range(5):  # results that arrive while one batch is pushed go in the next batch
                     ready = [t for t in self.db.tasks(run_id) if t["status"] == "done" and not t["integrated"] and (t["result"] or {}).get("ref")]
@@ -440,19 +461,30 @@ class TaskManager:
                     head = await self.gitops.run_head(repo, run_id) if any(t["integrated"] for t in tasks) else None
                     run = self.db.run(run_id)
                     if head and head != run["pushed_commit"]:
+                        val = await self._final_checks(run, repo, head, tasks)
+                        if val and val.get("status") == "failed" and final_spec(run)["gate"] and not force:
+                            blocked = val
+                            break
                         self._set_run(run_id, note=f"Pushing to {run['results_branch']}…")
                         await self.gitops.push(repo, run_id, run["results_branch"])
                         self._set_run(run_id, pushed_commit=head)
-                        self.db.event(run_id, None, "pushed", {"commit": head, "branch": run["results_branch"]})
+                        self.db.event(run_id, None, "pushed", {"commit": head, "branch": run["results_branch"],
+                                                               "validation": (val or {}).get("status")})
                         run = self.db.run(run_id)
                         if run["open_pr"] and repo["kind"] == "github" and not run["pr_url"]:
                             self._set_run(run_id, note="Opening a pull request…")
                             url = await self.github.open_pr(repo["name"], run["results_branch"], run["base_branch"],
                                                             f"YourHarness: {run['title']}", pr_body(run, tasks))
                             self._set_run(run_id, pr_url=url)
+                        elif run["pr_url"] and repo["kind"] == "github":  # more results, or a new outcome of the final checks
+                            await self.github.update_pr(repo["name"], run["pr_url"], pr_body(run, tasks))
                     if not [t for t in self.db.tasks(run_id) if t["status"] == "done" and not t["integrated"] and (t["result"] or {}).get("ref")]:
                         break
                 tasks = self.db.tasks(run_id)
+                if blocked:
+                    self._set_run(run_id, status="failed", note="Use “Push now” to push it anyway, marked not validated.",
+                                  error="The combined branch failed its final checks, so it wasn't pushed. " + final.summary(blocked))
+                    return
                 if any(t["status"] in ACTIVE for t in tasks):
                     status = "running"
                 elif any(t["integrated"] for t in tasks) or all(t["status"] == "done" for t in tasks):
@@ -462,6 +494,42 @@ class TaskManager:
                 self._set_run(run_id, status=status, error=None, note=self._run_note(run_id))
             except (GitError, GitHubError) as e:
                 self._set_run(run_id, status="failed", error=self.secrets.redact(str(e)), note="Use “Push now” to try again.")
+
+    def _device_owned(self, device_id: str | None) -> bool:
+        rec = self.s.store.get(device_id) if device_id else None
+        return bool(rec) and set(OWNER_CAPS) <= set(caps_of(rec))
+
+    async def _final_checks(self, run: dict, repo: dict, head: str, tasks: list[dict]) -> dict | None:
+        """The run's final checks on the combined commit, on this computer; saved on the run. None when it has none."""
+        spec = final_spec(run)
+        if not spec["checks"]:
+            return None
+        val = run["validation"] or {}
+        if val.get("commit") == head and val.get("status") in ("passed", "failed", "skipped"):
+            return val  # this exact commit was checked already
+        run_id = run["id"]
+        friends = sorted({t["device_name"] or "?" for t in tasks if t["integrated"] and not self._device_owned(t["device_id"])})
+        if friends and not spec["with_friends"]:
+            val = {"status": "skipped", "commit": head, "checks": [], "at": time.time(),
+                   "reason": f"tasks from a friend's computer ({', '.join(friends)}) are in it, and the final checks run their code on yours "
+                             "only when the run allows it."}
+        else:
+            self._set_run(run_id, note="Running the final checks on the combined branch…")
+            self._append_log(f"run-{run_id}", f"\n=== Final checks on {head[:12]} ({time.strftime('%Y-%m-%d %H:%M:%S')}) ===\n")
+            work = await self.gitops.checkout(repo, head, f"final-{run_id}")
+            try:
+                val = await final.run_checks(work, spec["setup"], spec["checks"], spec["time_limit_min"] * 60,
+                                             lambda text: self._append_log(f"run-{run_id}", self.secrets.redact(text)))
+            finally:
+                await self.gitops.drop(repo, work)
+            val["commit"] = head
+        self._set_run(run_id, validation=val)
+        self.db.event(run_id, None, "final-checks", {"status": val["status"], "commit": head,
+                                                     "failed": [c["cmd"] for c in val.get("checks", []) if c.get("code") != 0][:5]})
+        return val
+
+    def run_log(self, run_id: str) -> str:
+        return self.log_tail(f"run-{run_id}")
 
     def _run_note(self, run_id: str) -> str:
         run = self.db.run(run_id)
@@ -500,7 +568,7 @@ class TaskManager:
         run_id = rules.new_id("r")
         self.db.add_run({"id": run_id, "title": spec["title"], "repo_id": rid, "base_branch": spec["base_branch"],
                          "results_branch": spec["results_branch"], "open_pr": int(spec["open_pr"]), "status": "preparing",
-                         "note": "Getting the repository ready…", "created_by": created_by, "spec": {"version": 1}})
+                         "note": "Getting the repository ready…", "created_by": created_by, "spec": {"version": 2, "final": spec["final"]}})
         for i, ts in enumerate(spec["tasks"]):
             self.db.add_task({"id": rules.new_id("t"), "run_id": run_id, "seq": i, "title": ts["title"], "spec": ts,
                               "status": "queued", "note": "Waiting for the repository."})
@@ -689,6 +757,8 @@ class TaskManager:
             "openPr": bool(run["open_pr"]), "status": run["status"], "note": run["note"] or "", "error": run["error"] or "",
             "createdBy": run["created_by"], "createdAt": run["created_at"], "updatedAt": run["updated_at"],
             "pushedCommit": run["pushed_commit"] or "", "prUrl": run["pr_url"] or "", "branchUrl": branch_url,
+            "final": final_spec(run), "validation": run["validation"] or None,
+            "validationText": final.summary(run["validation"]) if final_spec(run)["checks"] else "",
             "tasks": [self.task_view(t, with_spec) for t in tasks],
         }
 

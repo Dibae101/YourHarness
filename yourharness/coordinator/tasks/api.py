@@ -37,6 +37,7 @@ class TaskAPI:
         r.add_get("/api/agent-runs/{run_id}", self.get_run)
         r.add_post("/api/agent-runs/{run_id}/cancel", self.cancel_run)
         r.add_post("/api/agent-runs/{run_id}/push", self.push_run)
+        r.add_get("/api/agent-runs/{run_id}/log", self.run_log)
         r.add_post("/api/agent-tasks/{task_id}/cancel", self.cancel_task)
         r.add_post("/api/agent-tasks/{task_id}/retry", self.retry_task)
         r.add_post("/api/agent-tasks/{task_id}/accept", self.accept_task)
@@ -122,6 +123,14 @@ class TaskAPI:
         except RunError as e:
             raise self._fail(400, str(e))
         return web.json_response({"ok": True})
+
+    async def run_log(self, request):
+        """The output of the run's final checks."""
+        self._who(request)
+        run = self.tm.db.run(request.match_info["run_id"])
+        if run is None:
+            raise self._fail(404, "There's no run with that id.")
+        return web.Response(text=self.tm.run_log(run["id"]), content_type="text/plain", charset="utf-8", headers={"Cache-Control": "no-store"})
 
     async def cancel_task(self, request):
         rec = self._who(request, write=True)

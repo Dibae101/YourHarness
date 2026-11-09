@@ -94,6 +94,8 @@ assert.equal(card2.querySelector('[data-show="cmd"]').hidden, false);
 assert.equal(card2.querySelector('[data-show="ai"]').hidden, true);
 card2.querySelector('[data-f="title"]').value = 'List files';
 card2.querySelector('[data-f="command"]').value = 'ls > files.txt';
+document.querySelector('#ag-final-checks').value = 'pytest -q\nnpm test';
+document.querySelector('#ag-final-gate').checked = true;
 document.querySelector('#ag-form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
 await tick(); await tick(); await tick();
 const post = calls.find((c) => c.method === 'POST' && c.url === '/api/agent-runs');
@@ -108,6 +110,9 @@ assert.equal(post.body.tasks[0].command, '');
 assert.equal(post.body.tasks[1].adapter, 'command');
 assert.equal(post.body.tasks[1].command, 'ls > files.txt');
 assert.equal(post.body.tasks[1].instructions, '');
+assert.equal(post.body.final_checks, 'pytest -q\nnpm test');
+assert.equal(post.body.final_gate, true);
+assert.equal(post.body.final_with_friends, false, 'a friend’s code never runs on your computer unless you say so');
 assert.equal(document.querySelector('[data-pane="runs"]').hidden, false, 'switches to Runs after starting');
 
 // live updates
@@ -128,4 +133,14 @@ msg({ type: 'agents.log', task: 't0', data: 'more output\n' });
 assert.match(document.querySelector('#ag-viewer-text').textContent, /more output/);
 msg({ type: 'agents.run', run: { ...run, title: '<img src=x onerror=alert(1)>' } });
 assert.ok(!document.querySelector('#ag-runs img'), 'titles are escaped');
+// final checks on the combined branch
+msg({ type: 'agents.run', run: { ...run, final: { checks: ['pytest -q'] }, validation: { status: 'failed', commit: 'abc', checks: [{ cmd: '<b>pytest</b>', code: 1 }] },
+  validationText: 'Not validated: the combined branch failed its final checks (pytest).' } });
+html = document.querySelector('#ag-runs').textContent;
+assert.match(html, /Not validated: the combined branch failed/);
+assert.ok(!document.querySelector('#ag-runs code b'), 'commands are escaped');
+document.querySelector('[data-act="run-log"][data-id="r1"]').click();
+await tick(); await tick(); await tick();
+assert.ok(calls.find((c) => c.url === '/api/agent-runs/r1/log'), 'the final checks’ output can be read');
+assert.match(document.querySelector('#ag-viewer-h').textContent, /Final checks/);
 console.log('agents.js smoke test passed:', calls.length, 'requests');

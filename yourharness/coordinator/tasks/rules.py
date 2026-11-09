@@ -335,6 +335,22 @@ def clean_run(body) -> dict:
         "results_branch": results,
         "open_pr": bool(body.get("open_pr", True)) and kind == "github",
         "tasks": [clean_task(t, i + 1) for i, t in enumerate(tasks)],
+        "final": clean_final(body),
+    }
+
+
+def clean_final(body: dict) -> dict:
+    """The run's final checks: commands run on the combined branch on the coordinator's computer before it's pushed."""
+    checks = lines_of(body.get("final_checks"), 20, 1000)
+    setup = lines_of(body.get("final_setup"), 20, 1000)
+    if setup and not checks:
+        raise RunError("Final setup commands need final checks to go with them.")
+    return {
+        "checks": checks,
+        "setup": setup,
+        "time_limit_min": int(_num(body.get("final_time_limit_min"), 1, 240, 30)),
+        "gate": bool(body.get("final_gate")),  # don't push or open a pull request when they fail
+        "with_friends": bool(body.get("final_with_friends")),  # also run them when a task came from a friend's computer
     }
 
 

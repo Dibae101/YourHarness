@@ -117,6 +117,16 @@
             </div>
             <label class="switch ag-switch" id="ag-pr-field"><input id="ag-pr" type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span>Open a draft pull request</span></label>
             <p class="hint" id="ag-gh-hint"></p>
+            <details class="ag-more"><summary>Final checks on the combined branch</summary>
+              <p class="hint">Once the tasks' results are combined, these commands run on the coordinator's computer (yours), on exactly the commit that would be pushed. The run and its pull request say “Validated” only if they pass. They get no YourHarness or GitHub tokens.</p>
+              <div class="ag-grid">
+                <label class="field"><span>Setup first, one command per line (optional)</span><textarea id="ag-final-setup" rows="2" spellcheck="false" placeholder="pip install -e ."></textarea></label>
+                <label class="field"><span>Checks, one command per line</span><textarea id="ag-final-checks" rows="2" spellcheck="false" placeholder="pytest -q"></textarea></label>
+                <label class="field"><span>Time limit (minutes)</span><input id="ag-final-limit" type="number" min="1" max="240" value="30"></label>
+              </div>
+              <label class="bj-check"><input type="checkbox" id="ag-final-gate"> Don't push or open a pull request if they fail (you can still push with “Push now”)</label>
+              <label class="bj-check"><input type="checkbox" id="ag-final-friends"> Also run them when a task came from a friend's computer (its code then runs on yours)</label>
+            </details>
           </section>
           <div id="ag-tasks" class="stack"></div>
           <div class="ag-actions">
@@ -402,6 +412,11 @@
       results_branch: $('#ag-results').value.trim(),
       open_pr: kind === 'github' && $('#ag-pr').checked,
       tasks: [...document.querySelectorAll('#ag-tasks .ag-task')].map(readTask),
+      final_checks: $('#ag-final-checks').value,
+      final_setup: $('#ag-final-setup').value,
+      final_time_limit_min: Number($('#ag-final-limit').value) || 30,
+      final_gate: $('#ag-final-gate').checked,
+      final_with_friends: $('#ag-final-friends').checked,
     };
     const btn = $('#ag-form button[type="submit"]');
     btn.disabled = true;
@@ -429,6 +444,12 @@
       $('#ag-base').value = full.baseBranch || '';
       $('#ag-results').value = '';
       $('#ag-pr').checked = full.openPr;
+      const fin = full.final || {};
+      $('#ag-final-checks').value = (fin.checks || []).join('\n');
+      $('#ag-final-setup').value = (fin.setup || []).join('\n');
+      $('#ag-final-limit').value = fin.time_limit_min || 30;
+      $('#ag-final-gate').checked = !!fin.gate;
+      $('#ag-final-friends').checked = !!fin.with_friends;
       onRepoKind();
       $('#ag-tasks').innerHTML = '';
       full.tasks.forEach((t) => { const s = t.spec || {}; addTask({ ...s, title: s.title || t.title, scope: s.kind === 'general' ? [] : s.scope }); });
@@ -470,6 +491,17 @@
       <td>${badge(t.status)}<div class="ag-detail">${bits.join('<br>')}</div></td><td class="ag-acts">${acts.join(' ')}</td></tr>`;
   }
 
+  // The final checks on the combined branch: validated, failed, or skipped, and how each command went.
+  function finalLine(run) {
+    if (!run.final || !(run.final.checks || []).length) return '';
+    const v = run.validation || {};
+    const cls = v.status === 'passed' ? 'ok' : v.status ? 'bad' : '';
+    const label = { passed: 'Validated', failed: 'Not validated', skipped: 'Not validated' }[v.status] || 'Final checks waiting';
+    const cmds = (v.checks || []).map((c) => `<code>${esc(c.cmd)}</code> ${c.code === 0 ? '✓' : `✗ ${esc(c.error || c.code)}`}`).join(' · ');
+    return `<p><span class="ag-badge ${cls}">${esc(label)}</span> ${esc(run.validationText || '')}${cmds ? `<br><span class="hint">${cmds}</span>` : ''}
+      ${v.status && v.status !== 'skipped' ? ` <button class="btn ghost small" type="button" data-act="run-log" data-id="${esc(run.id)}">Output</button>` : ''}</p>`;
+  }
+
   function runCard(run) {
     const links = [];
     const branch = safeUrl(run.branchUrl);
@@ -485,6 +517,7 @@
       <div class="panel-head"><h2>${esc(run.title)} ${badge(run.status)}</h2><div class="ag-acts">${acts.join(' ')}</div></div>
       <p class="hint">${esc(run.repo.name)}${run.baseBranch ? ` · from <code>${esc(run.baseBranch)}</code>` : ''} · ${links.join(' · ')} · started ${esc(ago(run.createdAt))} by ${esc(run.createdBy || '?')}</p>
       ${run.note ? `<p>${esc(run.note)}</p>` : ''}${run.error ? `<p class="error">${esc(run.error)}</p>` : ''}
+      ${finalLine(run)}
       <div class="scroll-x"><table class="res-table ag-table"><thead><tr><th>Task</th><th>Computer</th><th>Agent</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>${run.tasks.map(taskRow).join('')}</tbody></table></div></section>`;
   }
@@ -507,14 +540,15 @@
   }
 
   async function openViewer(taskId, mode) {
-    const t = findTask(taskId);
+    const run = mode === 'run-log' ? A.runs.get(taskId) : null;
+    const t = run ? null : findTask(taskId);
     A.viewer = { taskId, mode };
     $('#ag-viewer').hidden = false;
-    $('#ag-viewer-h').textContent = `${mode === 'diff' ? 'Changes' : 'Log'}: ${t ? t.title : taskId}`;
+    $('#ag-viewer-h').textContent = run ? `Final checks: ${run.title}` : `${mode === 'diff' ? 'Changes' : 'Log'}: ${t ? t.title : taskId}`;
     const pre = $('#ag-viewer-text');
     pre.textContent = 'Loading…';
     try {
-      const text = await api('GET', `/api/agent-tasks/${encodeURIComponent(taskId)}/${mode}`);
+      const text = await api('GET', run ? `/api/agent-runs/${encodeURIComponent(taskId)}/log` : `/api/agent-tasks/${encodeURIComponent(taskId)}/${mode}`);
       if (A.viewer && A.viewer.taskId === taskId && A.viewer.mode === mode) {
         pre.textContent = text || (mode === 'diff' ? 'No changes.' : 'Nothing logged yet.');
         pre.scrollTop = pre.scrollHeight;
@@ -550,6 +584,7 @@
       case 'remove-task': if (document.querySelectorAll('#ag-tasks .ag-task').length > 1) { b.closest('.ag-task').remove(); renumber(); } break;
       case 'log': openViewer(id, 'log'); break;
       case 'diff': openViewer(id, 'diff'); break;
+      case 'run-log': openViewer(id, 'run-log'); break;
       case 'close-viewer': A.viewer = null; $('#ag-viewer').hidden = true; break;
       case 'cancel-task': act(() => api('POST', `/api/agent-tasks/${encodeURIComponent(id)}/cancel`, {})); break;
       case 'retry': act(() => api('POST', `/api/agent-tasks/${encodeURIComponent(id)}/retry`, {})); break;
