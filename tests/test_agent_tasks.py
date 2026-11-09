@@ -74,6 +74,21 @@ def test_secret_scan_finds_credentials_in_added_lines_only():
     assert found == ["config.py:1 (an AWS access key)"]
 
 
+def test_agents_only_edit_files_unless_asked_and_commands_are_recognized():
+    run = rules.clean_run({"repo": {"kind": "local", "name": "/tmp/x"}, "tasks": [
+        {"title": "a", "adapter": "claude", "instructions": "x"},
+        {"title": "b", "adapter": "claude", "instructions": "x", "autonomy": "full"},
+    ]})
+    edit, full = run["tasks"]
+    assert edit["autonomy"] == "edit", "the permission-bypass mode is never the default"
+    assert full["autonomy"] == "full"
+    assert not rules.needs_commands(edit)
+    assert rules.needs_commands(full)
+    assert rules.needs_commands({"adapter": "command"})
+    assert rules.needs_commands({"adapter": "claude", "checks": ["pytest"]})
+    assert rules.needs_commands({"adapter": "codex", "setup": ["npm ci"]})
+
+
 def test_results_never_go_to_the_main_branch():
     for name in ("main", "master", "trunk"):
         with pytest.raises(rules.RunError):
@@ -331,21 +346,28 @@ def test_a_friends_computer_takes_tasks_only_when_its_owner_allows_it(pool):
     invite = pool.c.request("POST", "/api/invites", {"label": "Sam"})
     assert invite["link"].endswith(invite["code"])
     # one friend joined with a one-time invite code and allowed tasks; another used the lend link and didn't
-    # the way a friend's computer joins: the pool's address plus the code, as install.sh runs it
-    coord.agent("Sams PC", threads=1, link=invite["code"], extra=("--server", coord.base, "--tasks", "--no-share"))
+    # the way a friend's computer joins: the pool's address plus the code, as install.sh runs it.
+    # Sam allows agent tasks and commands; Lee allows agent tasks only; Kim only lends compute.
+    coord.agent("Sams PC", threads=1, link=invite["code"], extra=("--server", coord.base, "--tasks", "--allow-commands", "--no-share"))
+    lee_code = pool.c.request("POST", "/api/invites", {"label": "Lee"})["code"]
+    coord.agent("Lees PC", threads=1, link=lee_code, extra=("--server", coord.base, "--tasks", "--no-share"))
     coord.agent("Kims PC", threads=1, link=f"{coord.base}/#join={coord.lend_token}", extra=("--no-share",))
-    sam = pool.device("Sams PC")
+    sam, lee = pool.device("Sams PC"), pool.device("Lees PC")
     kim = next(d for d in pool.c.devices() if d["name"] == "Kims PC")
-    assert not sam["owned"] and sam["agentTasks"]["on"]
+    assert not sam["owned"] and sam["agentTasks"]["on"] and sam["agentTasks"]["commands"]
+    assert not lee["owned"] and lee["agentTasks"]["on"] and not lee["agentTasks"]["commands"]
     assert not kim["owned"] and not kim["agentTasks"]["on"] and "friend" in kim["agentTasks"]["why"]
-    assert pool.c.request("GET", "/api/invites")["invites"][0]["state"] == "used"
+    assert {i["state"] for i in pool.c.request("GET", "/api/invites")["invites"]} == {"used"}
     run = pool.start({"repo": {"kind": "local", "name": str(origin)}, "tasks": [
         task("On Sam's", "echo sam > sam.txt", sam["id"]),
         task("On Kim's", "echo kim > kim.txt", kim["id"]),
+        task("On Lee's", "echo lee > lee.txt", lee["id"]),
         task("Anywhere", "echo any > any.txt"),
     ]})
     kim_task = pool.wait_task(run["id"], lambda t: t["title"] == "On Kim's" and "friend" in t["note"])
     assert kim_task["status"] == "queued"
+    lee_task = pool.wait_task(run["id"], lambda t: t["title"] == "On Lee's" and "doesn't allow commands" in t["note"])
+    assert lee_task["status"] == "queued", "a command never runs on a friend's computer that didn't allow commands"
     sam_task = pool.wait_task(run["id"], lambda t: t["title"] == "On Sam's" and t["status"] == "done")
     assert sam_task["deviceName"] == "Sams PC"
     anywhere = pool.wait_task(run["id"], lambda t: t["title"] == "Anywhere" and t["status"] == "done")

@@ -39,7 +39,8 @@
   <form id="f">
     <label>Pool address<input id="addr" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="192.168.1.51:8420"></label>
     <label>Join code (4 digits), or a friend code<input id="code" class="code" maxlength="24" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="0000 or ABCD-EFGH-JKLM-NPQR"></label>
-    <label class="check" id="tasks-row" hidden><input id="tasks" type="checkbox"> Allow agent tasks on this computer: the pool's owner can then have an AI agent or a command work on a copy of their repository here, using this computer's account and any AI tools signed in on it. Tick this only if you trust them.</label>
+    <label class="check" id="tasks-row" hidden><input id="tasks" type="checkbox"> Allow agent tasks on this computer: the pool's owner can then have an AI agent edit a copy of their repository here, using this computer's account and any AI tools signed in on it. Tick this only if you trust them.</label>
+    <label class="check" id="cmds-row" hidden><input id="cmds" type="checkbox"> Also allow commands: the owner can then run commands of their choosing here (tests, builds, scripts), not only an AI that edits files.</label>
     <p class="err" id="err" role="alert"></p>
     <button class="primary" type="submit">Join the pool</button>
   </form>
@@ -69,14 +70,21 @@
     if (found.length === 1) { $('#addr').value = `${found[0].host}:${found[0].port}`; $('#code').focus(); }
   }
   const FRIEND = /^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$/i;
-  $('#code').oninput = () => { $('#tasks-row').hidden = !FRIEND.test($('#code').value.trim()); };
+  const showRows = () => {
+    const friend = FRIEND.test($('#code').value.trim());
+    $('#tasks-row').hidden = !friend;
+    $('#cmds-row').hidden = !friend || !$('#tasks').checked;
+  };
+  $('#code').oninput = showRows;
+  $('#tasks').onchange = showRows;
   $('#f').onsubmit = async (e) => {
     e.preventDefault();
     const address = $('#addr').value.trim(), code = $('#code').value.trim();
     if (!address) { $('#err').textContent = 'Enter the pool address, for example 192.168.1.51:8420.'; return; }
     if (!/^\d{4}$/.test(code) && !FRIEND.test(code)) { $('#err').textContent = 'Type the 4-digit join code, or the friend code you were sent (like ABCD-EFGH-JKLM-NPQR).'; return; }
     $('#err').textContent = 'Joining…';
-    const r = await yh.pair({ address, code, tasks: FRIEND.test(code) && $('#tasks').checked });
+    const tasks = FRIEND.test(code) && $('#tasks').checked;
+    const r = await yh.pair({ address, code, tasks, commands: tasks && $('#cmds').checked });
     if (r && r.error) $('#err').textContent = r.error;
   };
   $('#again').onclick = look;

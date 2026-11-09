@@ -68,8 +68,10 @@ assert.deepEqual([...devSel.options].map((o) => o.value), ['', 'aaaaaa', 'bbbbbb
 assert.deepEqual([...card.querySelector('[data-f="adapter"]').options].map((o) => o.value), ['claude', 'command'], 'any of mine: what my own computers have');
 devSel.value = 'bbbbbb';
 devSel.dispatchEvent(new window.Event('change', { bubbles: true }));
-assert.deepEqual([...card.querySelector('[data-f="adapter"]').options].map((o) => o.value), ['codex', 'command']);
+assert.deepEqual([...card.querySelector('[data-f="adapter"]').options].map((o) => o.value), ['codex'], 'a friend who allowed no commands gets no Command agent');
 assert.match(card.querySelector('[data-f="warn"]').textContent, /friend’s computer/);
+assert.match(card.querySelector('[data-f="warn"]').textContent, /doesn’t allow commands/);
+assert.equal(card.querySelector('[data-f="autonomy"]').value, 'edit', 'agents only edit files unless asked otherwise');
 // a device update must not reset what was picked
 msg({ type: 'devices', devices });
 assert.equal(card.querySelector('[data-f="device"]').value, 'bbbbbb');

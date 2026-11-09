@@ -231,7 +231,7 @@
         <div class="field"><span>Link (opens the pool in a browser and joins)</span><div class="copyrow"><input id="ag-inv-link" readonly value="${esc(r.link)}"><button class="btn ghost small" type="button" data-copy="ag-inv-link">Copy</button></div></div>
         <div class="field"><span>Their Mac or Linux computer, in a terminal (needs Python 3.10 or newer, and git for agent tasks)</span><div class="copyrow"><textarea id="ag-inv-cmd" rows="3" readonly>curl -fsSL ${esc(addr)}/install.sh | bash -s -- --join ${esc(r.code)} --tasks</textarea><button class="btn ghost small" type="button" data-copy="ag-inv-cmd">Copy</button></div></div>
         <div class="field"><span>Their Windows PC, in PowerShell (sets up Ubuntu, then asks for the code and whether to allow agent tasks)</span><div class="copyrow"><input id="ag-inv-win" readonly value="irm ${esc(addr)}/install.ps1 | iex"><button class="btn ghost small" type="button" data-copy="ag-inv-win">Copy</button></div></div>
-        <p class="hint">Leave out <code>--tasks</code> if they only want to lend compute. The YourHarness desktop app takes friend codes from its next release (File → Join another pool); the v0.7 apps don't.</p>`;
+        <p class="hint">With <code>--tasks</code>, you can give their computer AI agents that may only edit files. Adding <code>--allow-commands</code> also lets you run commands there (the Command agent, setup and check commands). Leave both out if they only want to lend compute. The YourHarness desktop app takes friend codes from its next release (File → Join another pool); the v0.7 apps don't.</p>`;
       loadInvites();
     } catch (e) { alert(e.message); }
   }
@@ -281,7 +281,7 @@
         <label class="field"><span>Computer</span><select data-f="device"></select></label>
         <label class="field"><span>Done by</span><select data-f="adapter"></select></label>
         <label class="field" data-show="ai"><span>Model</span><input data-f="model" maxlength="100" autocomplete="off" placeholder="the agent's default"><datalist></datalist></label>
-        <label class="field" data-show="ai"><span>The agent may</span><select data-f="autonomy"><option value="full">Edit files and run commands</option><option value="edit">Only edit files</option></select></label>
+        <label class="field" data-show="ai"><span>The agent may</span><select data-f="autonomy"><option value="edit">Only edit files</option><option value="full">Edit files and run any command (no permission checks)</option></select></label>
       </div>
       <label class="field" data-show="ai"><span>Instructions for the agent</span><textarea data-f="instructions" rows="5" placeholder="Describe the change, what done looks like, and anything to avoid."></textarea></label>
       <label class="field" data-show="cmd" hidden><span>Command to run in the repository (bash)</span><textarea data-f="command" rows="3" placeholder="npm test > results/test-report.txt"></textarea></label>
@@ -330,11 +330,15 @@
     if (opts.some(([v]) => v === keep)) sel.value = keep;
   }
 
+  // A friend's computer that doesn't allow commands takes AI agents that may only edit files.
+  const allowsCommands = (d) => !!(d.owned || (d.agentTasks && d.agentTasks.commands));
+
   function adaptersFor(deviceId) {
-    const ids = new Set(['command']);
     const devs = deviceId ? computers().filter((d) => d.id === deviceId) : computers().filter((d) => d.owned);
-    devs.forEach((d) => agentsOf(d).forEach((a) => ids.add(a.id)));
-    return ['claude', 'codex', 'kiro', 'command'].filter((id) => ids.has(id));
+    const ids = new Set(devs.length && devs.every((d) => !allowsCommands(d)) ? [] : ['command']);
+    devs.forEach((d) => agentsOf(d).forEach((a) => { if (a.id !== 'command' || allowsCommands(d)) ids.add(a.id); }));
+    const list = ['claude', 'codex', 'kiro', 'command'].filter((id) => ids.has(id));
+    return list.length ? list : ['command'];
   }
 
   function fillAdapterSelect(card) {
@@ -365,7 +369,11 @@
     const d = computers().find((x) => x.id === devId);
     const warn = card.querySelector('[data-f="warn"]');
     const notes = [];
+    if (adapter !== 'command' && card.querySelector('[data-f="autonomy"]').value === 'full') {
+      notes.push('With “run any command”, Claude Code, Codex and Kiro run with their permission checks turned off: the agent can run any command as that computer’s user. Use it only where you’re prepared for that.');
+    }
     if (d && !d.owned) notes.push(`${d.name} is a friend’s computer: this task sends it the repository’s code, and the agent runs there with your friend’s account and AI subscription.`);
+    if (d && !allowsCommands(d)) notes.push(`${d.name} doesn’t allow commands, so tasks there can only use an AI agent that may only edit files, with no setup or check commands.`);
     if (d && d.agentTasks && !d.agentTasks.on) notes.push(`${d.name} can’t run agent tasks right now: ${d.agentTasks.why || 'it has them switched off'}. The task will wait.`);
     if (!devId && !computers().some((x) => x.owned && x.agentTasks && x.agentTasks.on)) notes.push('None of your computers can run agent tasks right now, so the task will wait until one can.');
     warn.hidden = !notes.length;

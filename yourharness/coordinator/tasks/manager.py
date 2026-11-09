@@ -33,6 +33,7 @@ from .secrets import SecretStore
 log = logging.getLogger("yourharness")
 
 LEASE_S = float(os.environ.get("HARNESS_TASK_LEASE_S", 120))  # how long a disconnected computer keeps its task
+AGENT_TASK_MEM_GB = float(os.environ.get("HARNESS_AGENT_TASK_MEM_GB", 1.0))  # memory an agent task needs free to start
 MAX_LOST = 3
 LOG_LIMIT = 5 * 1024 * 1024
 ACTIVE = ("queued", "running", "verifying")
@@ -129,6 +130,7 @@ class TaskManager:
         now = time.time()
         for t in self.db.tasks_in(("running",)):
             self.grace[t["id"]] = now + LEASE_S  # its computer gets time to reconnect and say it's still at it
+            self.s.resources.reserve(t["device_id"], f"task:{t['id']}", "agent-task", cpu=1, mem_gb=AGENT_TASK_MEM_GB)
         for t in self.db.tasks_in(("verifying",)):
             self._spawn(self._verify(t["id"], t["attempt"]))
         for r in self.db.runs_in(("preparing",)):
@@ -171,7 +173,8 @@ class TaskManager:
         elif not on:
             why = ("Agent tasks are switched off on this computer (it was started with --no-tasks)." if d.owned
                    else "Your friend hasn't allowed agent tasks on this computer.")
-        return {"on": on, "why": why, "slots": info.get("slots", 1), "busy": self.db.busy(d.id), "agents": info.get("agents", [])}
+        return {"on": on, "why": why, "slots": info.get("slots", 1), "busy": self.db.busy(d.id), "agents": info.get("agents", []),
+                "commands": bool(d.owned or info.get("commands"))}
 
     def device_connected(self, d) -> None:
         info = d.tasks_info or {}
@@ -243,7 +246,11 @@ class TaskManager:
             return False
         if spec["adapter"] not in {a["id"] for a in d.tasks_info.get("agents", [])}:
             return False
+        if not d.owned and not d.tasks_info.get("commands") and rules.needs_commands(spec):
+            return False  # a friend's computer runs commands only if its owner allowed them
         if (t["id"], d.id) in self.refused:
+            return False
+        if not self.s.resources.fits(d, "agent-task", cpu=1, mem_gb=AGENT_TASK_MEM_GB):
             return False
         return self.db.busy(d.id) < d.tasks_info.get("slots", 1)
 
@@ -275,8 +282,16 @@ class TaskManager:
             return view.get("why") or f"{name} can't run agent tasks."
         if spec["adapter"] not in {a["id"] for a in view.get("agents", [])}:
             return f"{adapter} isn't installed on {name}. Install it there, or pick another computer."
+        if not d.owned and not view.get("commands") and rules.needs_commands(spec):
+            return (f"{name} is a friend's computer that doesn't allow commands, so it only takes AI agents that may only "
+                    "edit files, with no setup or check commands. Its owner can allow commands with --allow-commands.")
         if (t["id"], d.id) in self.refused:
             return self.refused[(t["id"], d.id)][1]
+        if self.db.busy(d.id) >= d.tasks_info.get("slots", 1):
+            return f"Waiting for {name} to finish its other task."
+        busy = self.s.resources.why_not(d, "agent-task", cpu=1, mem_gb=AGENT_TASK_MEM_GB)
+        if busy:
+            return f"Waiting for {name}: {busy}."
         return f"Waiting for {name} to finish its other task."
 
     def _start(self, t: dict, d, run: dict) -> None:
@@ -284,6 +299,7 @@ class TaskManager:
         secret = secrets.token_urlsafe(24)
         start = t["start_commit"] or run["base_commit"]
         self._append_log(t["id"], f"\n--- Attempt {attempt} on {d.name} ---\n")
+        self.s.resources.reserve(d.id, f"task:{t['id']}", "agent-task", cpu=1, mem_gb=AGENT_TASK_MEM_GB)
         self._set(t["id"], status="running", attempt=attempt, device_id=d.id, device_name=d.name, token_hash=_hash(secret),
                   start_commit=start, started_at=time.time(), finished_at=None, phase="starting", note=f"Starting on {d.name}.", error=None)
         self.grace.pop(t["id"], None)
@@ -689,6 +705,8 @@ class TaskManager:
         before = self.db.task(task_id)
         self.db.update_task(task_id, **fields)
         t = self.db.task(task_id)
+        if t["status"] != "running":
+            self.s.resources.release(f"task:{task_id}")  # the computer isn't working on it anymore
         if "status" in fields and before and before["status"] != t["status"]:
             self.db.event(t["run_id"], task_id, "status", {"status": t["status"], "device": t["device_name"], "attempt": t["attempt"],
                                                           "error": t["error"]})

@@ -88,8 +88,13 @@ if ($code -match '^[0-9]{4}$') {
   $flags = '--workspace'
 } elseif ($code -match '^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$') {
   Write-Host 'This is a friend code. This PC lends its processor to someone else''s pool, which cannot open a terminal here or read your files.'
-  $answer = Read-Host 'Also allow agent tasks? The pool owner could then have an AI agent or a command work on a copy of their repository here, with your Ubuntu account and any AI tools signed in there. Type yes to allow'
-  $flags = if ($answer.Trim().ToLower() -eq 'yes') { '--tasks' } else { '' }
+  $answer = Read-Host 'Also allow agent tasks? The pool owner could then have an AI agent edit a copy of their repository here, with your Ubuntu account and any AI tools signed in there. Type yes to allow'
+  $flags = ''
+  if ($answer.Trim().ToLower() -eq 'yes') {
+    $flags = '--tasks'
+    $more = Read-Host 'Also allow commands? The owner could then run commands of their choosing here (tests, builds, scripts), not only an AI that edits files. Type yes to allow'
+    if ($more.Trim().ToLower() -eq 'yes') { $flags = '--tasks --allow-commands' }
+  }
 } else {
   Write-Host 'That is not a join code. Type the 4 digits, or the friend code you were sent.'
   return

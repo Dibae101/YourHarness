@@ -119,8 +119,10 @@ def cmd_agent(a) -> int:
         saved["threads"] = a.threads
     if a.workspace or a.no_workspace:
         saved["workspace"] = bool(a.workspace)
-    if a.tasks or a.no_tasks:
-        saved["tasks"] = bool(a.tasks)
+    if a.tasks or a.no_tasks or a.allow_commands:
+        saved["tasks"] = bool(a.tasks or a.allow_commands)
+    if a.allow_commands or a.no_tasks:
+        saved["allow_commands"] = bool(a.allow_commands)
     if a.task_slots:
         saved["task_slots"] = max(1, min(16, a.task_slots))
     cfg_path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
@@ -129,7 +131,8 @@ def cmd_agent(a) -> int:
     threads = int(saved.get("threads") or max(1, (os.cpu_count() or 2) - 1))
     cfg = AgentConfig(server=saved["server"], token=saved["token"], name=saved.get("name") or _default_agent_name(),
                       threads=threads, sharing=not a.no_share, workspace=bool(saved.get("workspace")), home=home,
-                      tasks=saved.get("tasks"), task_slots=int(saved.get("task_slots") or 1))
+                      tasks=saved.get("tasks"), task_slots=int(saved.get("task_slots") or 1),
+                      allow_commands=bool(saved.get("allow_commands")))
     _setup_logging(a.verbose)
     _stop_cleanly_on_sigterm()
     print(f"Connecting to {cfg.server} as {cfg.name}...", flush=True)
@@ -313,6 +316,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="allow agent tasks (AI agents or commands working on a Git repository) on this computer; "
                         "needed on a friend's computer, which doesn't allow them otherwise")
     s.add_argument("--no-tasks", action="store_true", help="don't run agent tasks on this computer")
+    s.add_argument("--allow-commands", action="store_true",
+                   help="on a friend's computer, also allow tasks that run the pool owner's commands (the Command agent, "
+                        "setup and check commands, AI agents allowed to run commands); implies --tasks")
     s.add_argument("--task-slots", type=int, help="agent tasks to run at the same time (default 1)")
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_agent)

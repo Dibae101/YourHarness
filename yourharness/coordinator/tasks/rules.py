@@ -129,6 +129,17 @@ def glob_regex(pattern: str) -> re.Pattern:
     return rx
 
 
+def needs_commands(spec: dict) -> bool:
+    """True when a task runs commands of the owner's choosing on the computer that takes it.
+
+    That covers the Command agent, setup and check commands, and an AI agent allowed to
+    run commands itself. A friend's computer takes such a task only if its owner started
+    YourHarness with --allow-commands; otherwise it gets AI agents that may only edit files.
+    """
+    return (spec.get("adapter") == "command" or bool(spec.get("setup")) or bool(spec.get("checks"))
+            or spec.get("autonomy") == "full")
+
+
 def matches(path: str, patterns) -> bool:
     return any(glob_regex(p).match(path) for p in patterns if str(p).strip())
 
@@ -277,7 +288,8 @@ def clean_task(raw: dict, n: int) -> dict:
         "model": model,
         "instructions": instructions,
         "command": command,
-        "autonomy": "edit" if raw.get("autonomy") == "edit" else "full",
+        # "full" runs the CLIs with their permission-bypass flags, so it has to be asked for by name
+        "autonomy": "full" if raw.get("autonomy") == "full" else "edit",
         "scope": scope,
         "deny": deny,
         "checks": lines_of(raw.get("checks"), 20, 1000),

@@ -91,6 +91,7 @@ class AgentConfig:
     coordinator: bool = False
     tasks: bool | None = None  # agent tasks; None means allowed on your own computers, not on a friend's
     task_slots: int = 1
+    allow_commands: bool = False  # on a friend's computer, also allow tasks that run commands
 
 
 class Agent:
@@ -104,7 +105,7 @@ class Agent:
         self.files = None
         self.runner = None
         self.cpu = sysinfo.CpuMeter()
-        self.taskhost = TaskHost(cfg.server, cfg.home, self.send, cfg.tasks, cfg.task_slots)
+        self.taskhost = TaskHost(cfg.server, cfg.home, self.send, cfg.tasks, cfg.task_slots, cfg.allow_commands)
         if cfg.workspace:  # a computer that hosts a terminal also lets the pool browse its home folder
             from .files import HomeFiles
 

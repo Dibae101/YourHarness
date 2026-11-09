@@ -548,11 +548,21 @@ class Attempt:
         self.host.finish(self, ok, error, result)
 
 
+def needs_commands(spec: dict) -> bool:
+    """Same rule as the coordinator's rules.needs_commands: the task runs commands of the pool owner's choosing."""
+    return (spec.get("adapter") == "command" or bool(spec.get("setup")) or bool(spec.get("checks"))
+            or spec.get("autonomy") == "full")
+
+
 class TaskHost:
-    def __init__(self, server: str, home: Path, send: Callable[[dict], None], enabled: bool | None = None, slots: int = 1):
+    def __init__(self, server: str, home: Path, send: Callable[[dict], None], enabled: bool | None = None, slots: int = 1,
+                 allow_commands: bool = False):
         self.server = server.rstrip("/")
         self.send = send
         self.enabled = enabled  # None: allowed on your own computers, not on a friend's
+        # On a friend's computer: may the pool's owner run commands here (the Command agent, setup and
+        # check commands, an AI agent allowed to run commands)? Off unless started with --allow-commands.
+        self.allow_commands = bool(allow_commands)
         self.slots = max(1, min(16, int(slots or 1)))
         self.shell = Shell(home)
         self.tools: dict = {"git": None, "agents": []}
@@ -598,7 +608,8 @@ class TaskHost:
         running = [{"task": a.task, "attempt": a.attempt} for a in self.attempts.values()]
         running += [{"task": t, "attempt": n} for (t, n) in self.unacked if t not in self.attempts]
         return {"enabled": self.enabled, "slots": self.slots, "git": None if self.tools.get("problem") else self.tools.get("git"),
-                "problem": self.tools.get("problem"), "agents": self.tools.get("agents", []), "running": running}
+                "problem": self.tools.get("problem"), "agents": self.tools.get("agents", []), "running": running,
+                "commands": self.allow_commands}
 
     def connected(self) -> None:
         """After a reconnect: say again what finished while the connection was down."""
@@ -641,6 +652,9 @@ class TaskHost:
         if len(self.attempts) >= self.slots:
             return refuse("This computer is busy with another task.")
         spec = m.get("spec") if isinstance(m.get("spec"), dict) else {}
+        if not self.owned and not self.allow_commands and needs_commands(spec):
+            return refuse("This is a friend's computer that doesn't allow commands: only AI agents that may only edit "
+                          "files, with no setup or check commands. Its owner can allow commands with --allow-commands.")
         if spec.get("adapter") not in {a["id"] for a in self.tools.get("agents", [])}:
             return refuse(f"{ADAPTERS.get(spec.get('adapter'), spec.get('adapter'))} isn't installed on this computer.")
         if not self.tools.get("git") or self.tools.get("problem"):

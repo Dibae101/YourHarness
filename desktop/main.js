@@ -171,7 +171,7 @@ async function joinRemote(info) {
   const friend = FRIEND_CODE.test(code);
   // --workspace: one of your own computers offers its terminal to the pool too (Ubuntu via WSL or PowerShell on Windows).
   // A friend's computer never does; it allows agent tasks only if its owner ticked the box.
-  const extra = friend ? (info.tasks ? ['--tasks'] : []) : ['--workspace'];
+  const extra = friend ? (info.tasks ? ['--tasks', ...(info.commands ? ['--allow-commands'] : [])] : []) : ['--workspace'];
   const agent = run(['agent', '--server', url, '--join', code, ...extra]);
   try {
     await waitFor(agent, /Joined the pool/, 25000);
@@ -292,7 +292,8 @@ ipcMain.handle('pair', (e, info) => {
   if (!fromApp(e)) return refused;
   const code = info && typeof info === 'object' ? String(info.code || '').trim() : '';
   if (!/^\d{4}$/.test(code) && !FRIEND_CODE.test(code)) return { error: 'Type the 4-digit join code, or a friend code like ABCD-EFGH-JKLM-NPQR.' };
-  return joinRemote({ address: String(info.address || ''), code, tasks: FRIEND_CODE.test(code) && info.tasks === true });
+  const tasks = FRIEND_CODE.test(code) && info.tasks === true;
+  return joinRemote({ address: String(info.address || ''), code, tasks, commands: tasks && info.commands === true });
 });
 ipcMain.handle('start-own', async (e) => {
   if (!fromApp(e)) return refused;

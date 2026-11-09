@@ -72,7 +72,12 @@ You can also use a Git repository on the coordinator's computer instead of GitHu
 **Computers → Invite a friend's computer → Make a code** gives a one-time code like `ABCD-EFGH-JKLM-NPQR`, valid for 24 hours. Their computer joins with it in one of these ways:
 
 - **Mac or Linux, in a terminal:** `curl -fsSL http://<address>:8420/install.sh | bash -s -- --join ABCD-EFGH-JKLM-NPQR --tasks`. It needs Python 3.10 or newer, and git for agent tasks. Leave out `--tasks` to only lend compute.
-- **Windows, in PowerShell:** `irm http://<address>:8420/install.ps1 | iex`. It sets up Ubuntu, asks for the code, and asks whether to allow agent tasks.
+- **Windows, in PowerShell:** `irm http://<address>:8420/install.ps1 | iex`. It sets up Ubuntu, asks for the code, then asks whether to allow agent tasks and, separately, commands.
+
+There are two levels of permission on a friend's computer:
+
+- `--tasks` lets you give it AI agents that **may only edit files**: no setup or check commands, no Command agent, and no “run any command” mode.
+- `--tasks --allow-commands` also lets you run commands there: the Command agent, setup and check commands, and AI agents allowed to run commands.
 - **The YourHarness app,** from its next release: File → Join another pool, then the address and the friend code. They tick **Allow agent tasks** only if they agree. The v0.7 apps don't take friend codes.
 
 The Agents app shows these commands with the address and the code filled in.
@@ -81,7 +86,7 @@ To try this without a second person, act as the friend on the Mac itself, in a s
 
 ```bash
 cd ~/Developer/YourHarness
-YOURHARNESS_HOME="$HOME/yh-friend-test" .venv/bin/python -m yourharness agent --server http://127.0.0.1:8420 --join ABCD-EFGH-JKLM-NPQR --tasks --no-share --name "Friend test"
+YOURHARNESS_HOME="$HOME/yh-friend-test" .venv/bin/python -m yourharness agent --server http://127.0.0.1:8420 --join ABCD-EFGH-JKLM-NPQR --tasks --allow-commands --no-share --name "Friend test"
 ```
 
 It shows up in **Computers** as a friend's computer. Tasks go to it only when you pick it by name.
@@ -101,7 +106,9 @@ On the computer it was given to:
 
 The agent, setup and check commands run with an emptied environment plus a short allowlist (`HOME`, `PATH`, proxies, and the variables the CLIs use, such as `ANTHROPIC_API_KEY` if you set it). The task's token, which can only download the starting point and upload the result, is only given to those two steps.
 
-| Agent | Command used | “Only edit files” | “Edit files and run commands” |
+“Only edit files” is the default. “Edit files and run any command” turns the CLIs' permission checks off, so the agent can run any command as that computer's user; it has to be picked for each task.
+
+| Agent | Command used | “Only edit files” (default) | “Edit files and run any command” |
 | --- | --- | --- | --- |
 | Claude Code | `claude -p … --output-format stream-json --verbose --no-session-persistence` | `--permission-mode acceptEdits` | `--permission-mode bypassPermissions` |
 | Codex CLI | `codex exec --json --ephemeral -C <worktree> -o <last message>` | `-s workspace-write` (Codex's own sandbox) | `--dangerously-bypass-approvals-and-sandbox` |

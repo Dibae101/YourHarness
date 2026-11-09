@@ -27,6 +27,7 @@ from .execs import Execs
 from .pool_store import PoolStore
 from .poolshell import PoolShell
 from .remote_fs import RemoteFS
+from .resources import Resources
 from .tasks import TaskManager
 from .tasks.rules import ADAPTERS
 from .terminals import Terminals
@@ -94,6 +95,7 @@ def sanitize_tasks(t) -> dict | None:
         "agents": agents,
         "git": clean_text(t.get("git"), 60, "") or None,
         "problem": clean_text(t.get("problem"), 200, "") or None,
+        "commands": bool(t.get("commands")),  # a friend allowed commands too (--allow-commands)
         "running": running,
     }
 
@@ -132,6 +134,7 @@ class Device:
         self.exec = {"os": clean_text(ex.get("os"), 60, "Linux"), "linux": bool(ex.get("linux"))} if isinstance(ex, dict) else None
         self.tasks_info = sanitize_tasks(hello.get("tasks")) if self.kind == "agent" else None  # agent tasks
         self.load: dict = {}  # live CPU and memory use, reported every few seconds
+        self.reserved_cpu = 0.0  # processor slots held by batch partitions and agent tasks (resources.py)
         self.inflight: set[tuple[str, int]] = set()
         self.params_sent: set[str] = set()
         self.done = 0
@@ -188,7 +191,7 @@ class Device:
 
     def can_take(self, job: "Job") -> bool:
         return (self.sharing and not self.stale and not self.closed and (self.owned or not job.owners_only)
-                and bool(self.runtimes & job.runtimes) and self.threads - len(self.inflight) > 0)
+                and bool(self.runtimes & job.runtimes) and self.threads - len(self.inflight) - self.reserved_cpu > 0)
 
 
 class Job:
@@ -257,6 +260,7 @@ class Scheduler:
         self.remote_fs = RemoteFS(self)
         self.execs = Execs(self)
         self.poolshell = PoolShell(self)
+        self.resources = Resources(self)
         self.tasks = TaskManager(self, store.dir)
         self.public_url = ""  # the address other devices use; set once the port is known
         self.repair_s = float(os.environ.get("HARNESS_REPAIR_S", 10))
@@ -326,6 +330,7 @@ class Scheduler:
             self.tasks.device_gone(previous)
             previous.close(4002, "This device connected again from somewhere else.")
         d = Device(rec, ws, hello, self.pick_color(rec), host)
+        d.reserved_cpu = self.resources.cpu_reserved(d.id)  # work it was given before it reconnected
         self.store.update_device(d.id, name=d.name, color=d.color)
         self.devices[d.id] = d
         latest = self.running_job() or (self.jobs[-1] if self.jobs else None)
