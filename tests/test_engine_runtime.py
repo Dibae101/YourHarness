@@ -64,6 +64,24 @@ def test_a_requirement_is_a_package_never_a_pip_option():
     assert jobspec.parse(base)["spec"]["runtime"]["requirements"][0] == "numpy==2.1.3"
 
 
+def test_a_running_job_stops_saying_its_environment_is_being_prepared(tmp_path):
+    from yourharness.engine.db import EngineDB
+
+    db = EngineDB(tmp_path / "engine.db")
+    rm = RuntimeManager(SimpleNamespace(db=db))
+    doc = jobspec.parse({"spec": {"workload": {"type": "python.map", "code": "def process(x):\n    return x\n"}, "inputs": {"items": [1]},
+                                  "runtime": {"kind": "managed-python", "python": "3.12", "requirements": ["numpy==2.1.3"]}}})
+    other = jobspec.parse({"spec": {"workload": {"type": "python.map", "code": "def process(x):\n    return x\n"}, "inputs": {"items": [1]},
+                                    "runtime": {"kind": "managed-python", "python": "3.11", "requirements": []}}})
+    for job_id, spec, note in (("j1", doc, "Preparing its Python environment on Alpha."), ("j2", other, "Preparing its Python environment on Alpha."),
+                               ("j3", doc, "Spread over 2 computers.")):
+        db.insert("jobs", {"id": job_id, "name": "t", "spec": spec, "status": "running", "note": note, "created_at": 0, "updated_at": 0})
+    rm._ready_notes(rm.fp(doc), SimpleNamespace(name="Alpha"))
+    assert db.job("j1")["note"] == "Its Python environment is ready on Alpha."
+    assert db.job("j2")["note"].startswith("Preparing"), "a job waiting for another environment still waits"
+    assert db.job("j3")["note"] == "Spread over 2 computers.", "a note about something else is left alone"
+
+
 def test_a_computer_that_restarted_while_preparing_is_not_waited_for_forever():
     doc = {"spec": {"runtime": {"kind": "managed-python", "python": "3.12", "requirements": []}}}
     stopped = []

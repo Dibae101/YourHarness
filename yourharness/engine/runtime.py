@@ -152,6 +152,7 @@ class RuntimeManager:
             bad = {k: v for k, v in (info.get("imports") or {}).items() if v != "ok"}
             if bad:
                 self.status[key] = {"phase": "warning", "note": "Some packages didn't import: " + ", ".join(bad)[:200], "error": None, "at": time.time()}
+            self._ready_notes(fp, d)
             self.e.s.broadcast_devices()
             self.e.dispatch()
         elif kind == "env.failed":
@@ -178,6 +179,13 @@ class RuntimeManager:
                 continue
             self._touch_jobs(fp)
             self._fail_if_hopeless(fp)
+
+    def _ready_notes(self, fp: str, d) -> None:
+        """A running job whose note still says its environment is being prepared now says where it's ready."""
+        for j in self.e.db.all("SELECT id, spec, note FROM jobs WHERE status = 'running'"):
+            kind = j["spec"]["spec"]["runtime"]["kind"]
+            if kind in KINDS and self.fp(j["spec"]) == fp and (j["note"] or "").startswith(("Preparing its Python environment", "Checking its container image")):
+                self.e.db.update("jobs", {"id": j["id"]}, {"note": f"Its {what(kind)} is ready on {d.name}.", "updated_at": time.time()})
 
     def _touch_jobs(self, fp: str) -> None:
         for j in self.e.db.all("SELECT id, spec FROM jobs WHERE status IN ('running', 'needs_approval')"):
