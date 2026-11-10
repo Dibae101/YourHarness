@@ -315,12 +315,25 @@ class Agent:
             if self.cfg.tasks is not False and await self.taskhost.refresh():  # an agent CLI installed since
                 self.send({"type": "update", "tasks": self.taskhost.describe()})
 
+    def _limits_note(self, lim, by: str | None = None) -> None:
+        """Say what the pool's owner allows this computer (the Home screen): once on joining, then on each change."""
+        if not isinstance(lim, dict):
+            return
+        where = f"on the Home screen by {by}" if by else "on the Home screen"
+        if lim.get("paused"):
+            print(f"Paused {where}: this computer takes no new work, and what it's running finishes.", flush=True)
+        elif isinstance(lim.get("threads"), int) and lim["threads"] < self.cfg.threads:
+            print(f"The pool uses {lim['threads']} of this computer's {self.cfg.threads} worker processes (set {where}).", flush=True)
+        elif by:
+            print(f"The pool may use all {self.cfg.threads} worker processes (set {where}).", flush=True)
+
     def _handle(self, m: dict) -> None:
         kind = m.get("type")
         if kind == "welcome":
             role = " and hosting the workspace" if self.terms else ""
             sharing = f"sharing {self.cfg.threads} worker processes" if self.cfg.sharing else "not sharing compute"
             print(f"Joined the pool as {m.get('name')}, {sharing}{role}.", flush=True)
+            self._limits_note(m.get("limits"))
             self.taskhost.owned = "submit" in (m.get("caps") or [])
             th = self.taskhost
             if (th.enabled if th.enabled is not None else th.owned) and th.tools.get("git"):
@@ -342,6 +355,8 @@ class Agent:
                 self.envs.prepare(m)
         elif kind == "denied":
             print(m.get("reason") or "The coordinator refused this agent.", file=sys.stderr)
+        elif kind == "limits":  # the pool's owner paused this computer or changed its threads
+            self._limits_note(m, by=m.get("by") or "the pool's owner")
         elif kind == "chunk":
             if "params" in m:
                 self.params[m["jobId"]] = m["params"]

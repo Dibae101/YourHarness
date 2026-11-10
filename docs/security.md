@@ -62,7 +62,7 @@ Every computer keeps its own record of what it did, in `~/.yourharness/activity.
 The coordinator keeps the other side:
 
 - **Activity** next to each device in the Devices list (`GET /api/devices/{id}/activity`): the jobs it worked on, which dataset and how it's classified, whether it ran your code or the built-in operators, the model, partitions tried and accepted, bytes read, and the agent tasks it ran with their repositories. It stays available after the device is removed. Any device can see its own (`/api/devices/me/activity`).
-- **An audit trail** (`GET /api/audit`, owner only): devices joining (and whether as a friend), removals and who removed them, friend codes made, used and revoked, and replaced links.
+- **An audit trail** (`GET /api/audit`, owner only): devices joining (and whether as a friend), removals and who removed them, friend codes made, used and revoked, replaced links, and sharing changes from Home ("sharing changed": a device paused or resumed, or its threads limited, and by whom).
 
 A friend code that expires or is revoked stops new joins with it; a computer that already joined has to be removed.
 

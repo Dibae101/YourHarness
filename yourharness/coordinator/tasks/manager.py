@@ -288,7 +288,7 @@ class TaskManager:
 
     def _eligible(self, t: dict, d) -> bool:
         spec = t["spec"]
-        if d.closed or d.stale or not self.tasks_on(d):
+        if d.closed or d.stale or getattr(d, "paused", False) or not self.tasks_on(d):  # paused on the Home screen: no new work
             return False
         if spec["adapter"] not in {a["id"] for a in d.tasks_info.get("agents", [])}:
             return False
@@ -323,6 +323,8 @@ class TaskManager:
             return f"Waiting for {name} to connect."
         if d.stale:
             return f"Waiting for {name}, which isn't responding."
+        if getattr(d, "paused", False):
+            return f"Waiting for {name}, which is paused on the Home screen."
         view = self.device_view(d) or {}
         if not view.get("on"):
             return view.get("why") or f"{name} can't run agent tasks."

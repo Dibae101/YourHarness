@@ -56,6 +56,8 @@ class Planner:
             return "runs a YourHarness without the job engine" if d.kind == "agent" else "is a browser tab on a page too old for batch jobs (reload it)"
         if d.kind == "browser" and not info.get("slots") and (info.get("profile") or {}).get("blocked"):
             return f"is a browser tab that isn't taking partitions ({info['profile']['blocked']})"
+        if getattr(d, "paused", False):
+            return "is paused on the Home screen"
         if not d.sharing or not info.get("slots"):
             return "isn't sharing its processor"
         workloads = [s["workload"] for s in (spec.get("stages") or [{"workload": wl}])]

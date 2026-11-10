@@ -22,6 +22,7 @@
 <script src="app.js" defer></script>
 <script src="agents.js" defer></script>
 <script src="batch.js" defer></script>
+<script src="home.js" defer></script>
 </head>
 <body>
 
@@ -48,7 +49,7 @@
 
 <div id="app" class="app" hidden>
   <header class="panelbar">
-    <button id="pb-home" class="pb-logo" type="button" title="Show all apps">YourHarness</button>
+    <button id="pb-home" class="pb-logo" type="button" title="Home: what's running and every device">YourHarness</button>
     <div class="pb-status">
       <span id="conn" class="pb-item conn" data-state="connecting">Connecting</span>
       <span id="pb-cpu" class="pb-item" title="Processor use across the pool's computers"></span>
@@ -67,6 +68,7 @@
     <div id="launcher" class="launcher">
       <p class="launcher-h">Apps</p>
       <div class="tiles">
+        <button class="tile" type="button" data-open="home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 9.5V20h14V9.5"/><path d="M10 20v-6h4v6"/></svg><span>Home</span></button>
         <button class="tile" type="button" data-open="monitor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v12H3zM8 20h8M12 16v4"/><path d="M6 12l3-3 3 2 4-4 2 2"/></svg><span>System Monitor</span></button>
         <button class="tile" type="button" data-open="terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v14H3z"/><path d="M7 10l3 2-3 2M12 15h5"/></svg><span>Terminal</span></button>
         <button class="tile" type="button" data-open="files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg><span>Files</span></button>
@@ -76,6 +78,21 @@
         <button class="tile" type="button" data-open="batch"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 10h16M4 15h10M4 20h6M17 14l3 3-3 3"/></svg><span>Batch</span></button>
       </div>
     </div>
+      <section class="win" id="win-home" data-app="home" aria-labelledby="wt-home" hidden>
+        <header class="win-bar">
+          <button class="win-back" type="button" data-act="min" aria-label="Back to apps">‹</button>
+          <span class="win-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 9.5V20h14V9.5"/><path d="M10 20v-6h4v6"/></svg></span>
+          <span class="win-title" id="wt-home">Home</span>
+          <span class="win-sub" id="wsub-home"></span>
+          <div class="win-ctrl">
+            <button type="button" data-act="min" aria-label="Minimize Home" title="Minimize">–</button>
+            <button type="button" data-act="max" aria-label="Maximize Home" title="Maximize">▢</button>
+            <button type="button" data-act="close" aria-label="Close Home" title="Close">×</button>
+          </div>
+        </header>
+        <div class="win-body"><div id="home" class="home"></div></div>
+        <div class="win-resize" aria-hidden="true"></div>
+      </section>
       <section class="win" id="win-monitor" data-app="monitor" aria-labelledby="wt-monitor" hidden>
         <header class="win-bar">
           <button class="win-back" type="button" data-act="min" aria-label="Back to apps">‹</button>
@@ -416,6 +433,7 @@
         </label>
         <label class="field"><span>Device name</span><input id="me-name" maxlength="40" autocomplete="off"></label>
         <p id="me-awake" class="hint"></p>
+        <p id="me-limit" class="hint" hidden></p>
         <button id="me-leave" class="btn ghost" type="button">Leave the pool on this device</button>
       </section></div>
           <section id="resources" class="panel resources" aria-labelledby="res-h">
@@ -463,6 +481,7 @@
   </div>
 
   <nav class="dock" aria-label="Apps">
+    <button class="dock-item" type="button" data-open="home" title="Home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 9.5V20h14V9.5"/><path d="M10 20v-6h4v6"/></svg><span>Home</span></button>
     <button class="dock-item" type="button" data-open="monitor" title="System Monitor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v12H3zM8 20h8M12 16v4"/><path d="M6 12l3-3 3 2 4-4 2 2"/></svg><span>Monitor</span></button>
     <button class="dock-item" type="button" data-open="terminal" title="Terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v14H3z"/><path d="M7 10l3 2-3 2M12 15h5"/></svg><span>Terminal</span></button>
     <button class="dock-item" type="button" data-open="files" title="Files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg><span>Files</span></button>

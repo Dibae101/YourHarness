@@ -224,8 +224,8 @@ def run(chunk, total):
   };
 
   function handle(m) {
-    if (m.type === 'welcome' || m.type === 'devices' || (typeof m.type === 'string' && (m.type.startsWith('agents.') || m.type.startsWith('eng.')))) {
-      window.dispatchEvent(new CustomEvent('yh:msg', { detail: m }));
+    if (['welcome', 'devices', 'job', 'progress', 'limits'].includes(m.type) || (typeof m.type === 'string' && (m.type.startsWith('agents.') || m.type.startsWith('eng.')))) {
+      window.dispatchEvent(new CustomEvent('yh:msg', { detail: m })); // agents.js, batch.js and home.js listen
     }
     switch (m.type) {
       case 'welcome': {
@@ -237,6 +237,7 @@ def run(chunk, total):
         S.joinCode = m.joinCode;
         S.lendToken = m.lendToken;
         S.caps = m.caps || [];
+        S.limits = m.limits || null; // what the pool's owner allows this device (the Home screen)
         applyCaps();
         S.procs = m.procs || [];
         S.address = m.address || location.origin;
@@ -263,6 +264,10 @@ def run(chunk, total):
         break;
       case 'denied':
         S.deniedReason = m.reason || '';
+        break;
+      case 'limits': // the pool's owner paused this device or changed its threads
+        S.limits = m;
+        renderMe();
         break;
       case 'devices':
         S.devices = m.devices;
@@ -1257,6 +1262,13 @@ def run(chunk, total):
     r.value = S.threads;
     $('#me-threads-out').textContent = `${S.threads} of ${CORES} available`;
     if (document.activeElement !== $('#me-name')) $('#me-name').value = S.name;
+    const l = S.limits;
+    let limit = '';
+    if (l && l.paused) limit = 'Paused from the Home screen: this device takes no new work.';
+    else if (l && l.cap != null && l.cap < S.threads) limit = `The pool uses ${l.cap} of these threads (set on the Home screen).`;
+    else if (l && l.mobile && l.cap == null && S.threads > 1) limit = 'Phones and tablets take small tasks only: the pool uses 1 thread here unless you give it more on the Home screen.';
+    $('#me-limit').textContent = limit;
+    $('#me-limit').hidden = !limit;
     renderAwake();
   }
 
@@ -1392,7 +1404,9 @@ def run(chunk, total):
     }
     const when = (t) => (t ? new Date(t * 1000).toLocaleString() : '');
     const d = a.device;
-    const trail = a.audit.map((r) => `<li>${esc(when(r.at))}: ${esc(r.action)}${r.by ? ` by ${esc(r.by)}` : ''}</li>`).join('');
+    const what = (r) => (r.action !== 'sharing changed' ? ''
+      : ` (${r.paused ? 'paused' : 'taking work'}, ${r.threads ? `${nf.format(r.threads)} thread${r.threads === 1 ? '' : 's'}` : 'no thread limit'})`);
+    const trail = a.audit.map((r) => `<li>${esc(when(r.at))}: ${esc(r.action)}${esc(what(r))}${r.by ? ` by ${esc(r.by)}` : ''}</li>`).join('');
     const jobs = a.jobs.map((j) => `<tr><td>${esc(j.name)}<span class="res-sub">${esc(j.job)}</span></td>
       <td>${esc(j.workload)}<span class="res-sub">${esc(j.runtime)}</span></td>
       <td>${j.dataset ? `${esc(j.dataset.name)}<span class="res-sub">${esc(j.dataset.classification)}</span>` : j.items != null ? `${nf.format(j.items)} items` : ''}</td>
@@ -1680,7 +1694,7 @@ def run(chunk, total):
   // -------------------------------------------------------------------------
   // Window manager: draggable, resizable windows on wide screens, full-screen apps on phones
   // -------------------------------------------------------------------------
-  const APP_SIZES = { monitor: [720, 640], terminal: [860, 600], files: [920, 600], jobs: [1000, 680], devices: [940, 680], agents: [1120, 760], batch: [1120, 780] };
+  const APP_SIZES = { home: [980, 760], monitor: [720, 640], terminal: [860, 600], files: [920, 600], jobs: [1000, 680], devices: [940, 680], agents: [1120, 760], batch: [1120, 780] };
   const WM = (() => {
     let z = 10;
     const saved = (() => { try { return JSON.parse(store.get('wm') || '{}'); } catch { return {}; } })();
@@ -1730,6 +1744,7 @@ def run(chunk, total):
       if (app === 'monitor') requestAnimationFrame(drawSparks);
       if (app === 'agents' && window.YHAgents) window.YHAgents.opened(); // agents.js
       if (app === 'batch' && window.YHBatch) window.YHBatch.opened(); // batch.js
+      if (app === 'home' && window.YHHome) window.YHHome.opened(); // home.js
     }
     function open(app) {
       if (!win(app)) return;
@@ -1760,19 +1775,17 @@ def run(chunk, total):
       requestAnimationFrame(() => { fitTerminal(); drawSparks(); });
     }
     function restore() {
-      const apps = Object.keys(APP_SIZES).filter((a) => state[a] && state[a].open && !state[a].min);
-      if (!apps.length && !phone()) {
-        // first visit on a wide screen: the monitor on the left, the terminal on the right
+      // The page starts on Home: what's connected, what each shares, what's running. On a wide
+      // screen the windows that were open stay open behind it; a phone shows one app at a time.
+      const apps = phone() ? [] : Object.keys(APP_SIZES).filter((a) => a !== 'home' && state[a] && state[a].open && !state[a].min);
+      if (!phone() && !(state.home && state.home.w)) {
         const W = desk.clientWidth, H = desk.clientHeight;
-        const half = Math.floor((W - 36) / 2);
-        state.monitor = { x: 12, y: 12, w: Math.max(360, half), h: H - 24, open: true };
-        state.terminal = { x: Math.min(W - 372, 24 + half), y: 12, w: Math.max(360, half), h: H - 24, open: true };
-        apps.push('monitor', 'terminal');
+        state.home = { x: Math.max(12, Math.round((W - Math.min(980, W - 24)) / 2)), y: 12, w: Math.min(980, W - 24), h: H - 24 };
       }
       apps.forEach((a) => { win(a).hidden = false; place(a); focus(a); });
-      if (state.front && apps.includes(state.front)) focus(state.front);
       dockState();
       apps.forEach(opened);
+      open('home');
     }
 
     // dragging and resizing with pointer events (mouse, pen and touch)
@@ -1828,10 +1841,7 @@ def run(chunk, total):
     return { open, close, minimize, isOpen, restore, dockState };
   })();
 
-  $('#pb-home').addEventListener('click', () => {
-    if (matchMedia('(max-width: 820px)').matches) Object.keys(APP_SIZES).forEach((a) => { if (WM.isOpen(a)) WM.minimize(a); });
-    else WM.open('monitor');
-  });
+  $('#pb-home').addEventListener('click', () => WM.open('home'));
   // links inside apps such as href="#terminal" open that app's window
   document.addEventListener('click', (e) => {
     const a = e.target.closest('a[href^="#"]');

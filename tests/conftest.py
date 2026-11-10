@@ -152,8 +152,8 @@ class FakeBrowser:
     """Signs in with a cookie and computes pieces like a browser tab would."""
 
     def __init__(self, coord: Coord, name: str, threads: int = 2, *, stall: bool = False, beat: bool = True, origin: str | None = None,
-                 token: str | None = None):
-        self.coord, self.name, self.threads = coord, name, threads
+                 token: str | None = None, platform: str = "Test"):
+        self.coord, self.name, self.threads, self.platform = coord, name, threads, platform
         self.stall, self.beat = stall, beat
         self.origin = origin or coord.base
         self.join_token = token  # None: the coordinator's owner link, read when joining
@@ -167,7 +167,7 @@ class FakeBrowser:
         r = await self.http.post(f"{self.coord.base}/api/join", json={"token": self.join_token or self.coord.token, "name": self.name})
         assert r.status == 200, await r.text()
         self.ws = await self.http.ws_connect(self.coord.base.replace("http", "ws") + "/ws", headers={"Origin": self.origin})
-        await self.ws.send_json({"type": "hello", "name": self.name, "threads": self.threads, "sharing": True, "runtimes": ["js"], "info": {"platform": "Test", "cores": self.threads}})
+        await self.ws.send_json({"type": "hello", "name": self.name, "threads": self.threads, "sharing": True, "runtimes": ["js"], "info": {"platform": self.platform, "cores": self.threads}})
         self.reader = asyncio.ensure_future(self._read())
         self.beater = asyncio.ensure_future(self._beat())
         return self

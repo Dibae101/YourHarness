@@ -38,7 +38,20 @@ The Mac and Windows apps join a pool with a code, share the computer from the me
 
 Open the coordinator's address and enter the code. A tab shares its processor while the page is open and visible: it takes pieces of the older compute jobs and partitions of batch totals and group-bys. It hands its partitions back as soon as the page is hidden or the screen locks, so keep it in front while you want it to work. Below 20% battery and not charging it takes no batch partitions. The first time, it runs a short benchmark; the Batch app's Computers tab shows the result and why a tab isn't taking work.
 
+A phone or tablet takes small tasks only: the pool uses one of its threads, whatever its own slider says, until you give it more on Home. It's mostly for watching what the pool is doing.
+
 Over HTTPS (see [security.md](security.md)) the page can also keep the screen on while it works.
+
+## Pausing a device, or limiting its threads
+
+Home lists every connected device. As the pool's owner you get two controls on each:
+
+- **The switch** pauses the device. It takes no new work of any kind: compute jobs, batch partitions, test shards, agent tasks or pool commands. What it's running finishes. Turn it back on to resume.
+- **− and +** set how many of its threads the pool may use, up to what the device offers. On a computer, going back up to the full count removes the limit.
+
+The coordinator keeps both with the device's sign-in, so they hold when the device reconnects or the coordinator restarts, and it enforces them, so a device can't take more than you allow. The device's own sharing switch and thread slider still count: the pool uses the smaller of what the device offers and what you allow. The device says so too: a browser under **This device**, an agent in its terminal.
+
+From a script: `POST /api/devices/{id}/limits` with `{"paused": true}`, `{"threads": 2}`, or `{"threads": null}` for no limit (owner only). Each change goes in the audit trail.
 
 ## A friend's computer
 

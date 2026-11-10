@@ -36,6 +36,8 @@ log = logging.getLogger("yourharness")
 
 WIRE_COLORS = ["#E0A100", "#2563C9", "#D1433B", "#23935A", "#8B5CC4", "#E0742A", "#1795A8", "#C2417D"]
 OUTBOX_LIMIT = 5000
+MOBILE_PLATFORMS = ("iPhone", "iPad", "Android")  # as the page names them (web/app.js detectPlatform)
+MOBILE_THREADS = 1  # a phone or tablet takes small tasks only, unless its owner gives it more on the Home screen
 
 
 def now_ms() -> int:
@@ -183,8 +185,12 @@ class Device:
         self.color = color
         self.name = clean_text(hello.get("name"), 40, rec.get("name") or "Unnamed device")
         self.info = sanitize_info(hello.get("info"))
-        self.threads = clamp_int(hello.get("threads"), 1, 256, 1)
-        self.sharing = hello.get("sharing") is not False
+        # What the device offers, and what the pool owner allows it (the Home screen): threads and
+        # sharing below are the result, and everything that hands out work reads only those two.
+        self.want_threads = clamp_int(hello.get("threads"), 1, 256, 1)
+        self.want_sharing = hello.get("sharing") is not False
+        self.limits: dict = dict(rec.get("limits") or {})
+        self.apply_limits()
         offered = hello.get("runtimes") if isinstance(hello.get("runtimes"), list) else []
         allowed = {"python"} if self.kind == "agent" else {"js"}
         self.runtimes = frozenset(r for r in offered if r in allowed) or frozenset(allowed)
@@ -213,6 +219,25 @@ class Device:
         self._close: tuple[int, str] | None = None
         self.outbox: asyncio.Queue = asyncio.Queue()
         self.writer = asyncio.ensure_future(self._write())
+
+    @property
+    def mobile(self) -> bool:
+        """A phone or tablet: mostly for watching, and by default it takes small tasks only (one thread)."""
+        return self.kind == "browser" and self.info.get("platform") in MOBILE_PLATFORMS
+
+    def apply_limits(self) -> None:
+        lim = self.limits or {}
+        self.paused = bool(lim.get("paused"))  # the owner paused it: no new work of any kind
+        cap = lim.get("threads")
+        if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+            cap = MOBILE_THREADS if self.mobile else None
+        self.threads = min(self.want_threads, cap) if cap else self.want_threads
+        self.sharing = self.want_sharing and not self.paused
+
+    def limits_view(self) -> dict:
+        cap = (self.limits or {}).get("threads")
+        return {"paused": self.paused, "threads": self.threads, "wantThreads": self.want_threads, "wantSharing": self.want_sharing,
+                "cap": cap if isinstance(cap, int) and not isinstance(cap, bool) else None, "mobile": self.mobile}
 
     def send(self, msg: dict) -> None:
         self.send_raw(json.dumps(msg, separators=(",", ":")))
@@ -367,8 +392,32 @@ class Scheduler:
             "sharing": d.sharing, "runtimes": sorted(d.runtimes), "workspace": d.workspace, "busy": len(d.inflight),
             "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host, "coordinator": d.coordinator, "files": d.files, "exec": d.exec, "load": d.load,
             "owned": d.owned, "agentTasks": self.tasks.device_view(d), "engine": self.engine.device_view(d),
-            "reserved": self.resources.view(d.id),
+            "reserved": self.resources.view(d.id), "limits": d.limits_view(),
         }
+
+    def set_limits(self, device_id: str, by: str, **changes) -> dict | None:
+        """The pool owner pauses or resumes a device, or caps the threads it uses (the Home screen).
+
+        changes: paused (bool) and/or threads (1-256, or None for no cap; a phone or tablet then
+        takes small tasks, one thread). Kept with the device's sign-in, so it holds after a restart.
+        Work already running finishes; only new work follows the new limits."""
+        rec = self.store.get(device_id)
+        if rec is None:
+            return None
+        limits = {**(rec.get("limits") or {}), **{k: v for k, v in changes.items() if k in ("paused", "threads")}}
+        self.store.update_device(device_id, limits=limits)
+        self.store.audit("sharing changed", device=device_id, name=rec.get("name"), by=by, paused=bool(limits.get("paused")),
+                         threads=limits.get("threads"))
+        d = self.devices.get(device_id)
+        if d is not None:
+            d.limits = limits
+            d.apply_limits()
+            d.send({"type": "limits", **d.limits_view(), "by": by})
+            self.broadcast_devices()
+            self.dispatch()
+            self.engine.dispatch()
+            self.tasks.dispatch()
+        return limits
 
     def device_list(self) -> list[dict]:
         return [self.device_view(d) for d in self.devices.values()]
@@ -407,7 +456,7 @@ class Scheduler:
         self.devices[d.id] = d
         latest = self.running_job() or (self.jobs[-1] if self.jobs else None)
         hi = {
-            "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind, "caps": list(d.caps),
+            "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind, "caps": list(d.caps), "limits": d.limits_view(),
             "devices": self.device_list(), "jobs": [j.summary() for j in self.jobs], "snapshot": self.snapshot(latest),
             "files": [], "procs": [], "pool": self.pool_store.listing(names=False), "address": self.public_url,
         }
@@ -496,11 +545,12 @@ class Scheduler:
                 d.name = clean_text(msg["name"], 40, d.name)
                 self.store.update_device(d.id, name=d.name)
             if "threads" in msg:
-                d.threads = clamp_int(msg["threads"], 1, 256, d.threads)
+                d.want_threads = clamp_int(msg["threads"], 1, 256, d.want_threads)
             if "sharing" in msg:
-                d.sharing = bool(msg["sharing"])
+                d.want_sharing = bool(msg["sharing"])
             if "info" in msg:
                 d.info = sanitize_info(msg["info"])
+            d.apply_limits()  # what the owner allows still applies to what the device now offers
             if "tasks" in msg and d.kind == "agent":
                 running = (d.tasks_info or {}).get("running", [])
                 d.tasks_info = sanitize_tasks(msg["tasks"])

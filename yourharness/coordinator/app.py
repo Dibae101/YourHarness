@@ -127,6 +127,7 @@ class Coordinator:
         r.add_get("/api/devices", self.devices)
         r.add_delete("/api/devices/{device_id}", self.remove_device)
         r.add_get("/api/devices/{device_id}/activity", self.device_activity)
+        r.add_post("/api/devices/{device_id}/limits", self.device_limits)
         r.add_get("/api/audit", self.audit)
         r.add_get("/api/jobs", self.list_jobs)
         r.add_post("/api/jobs", self.submit_job)
@@ -286,6 +287,35 @@ class Coordinator:
         if not self.sched.remove_device(target, by=live.name if live else rec["name"]):
             raise fail(404, "There is no device with that id.")
         return web.json_response({"ok": True})
+
+    async def device_limits(self, request):
+        """Pause or resume a device, or cap the threads it uses: {"paused": bool} and/or {"threads": 1-256 or null}."""
+        rec = self.authed(request, write=True, need=CAP_ADMIN)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            body = None
+        if not isinstance(body, dict):
+            raise fail(400, 'Send {"paused": true or false} and/or {"threads": a number, or null for no limit}.')
+        changes = {}
+        if "paused" in body:
+            if not isinstance(body["paused"], bool):
+                raise fail(400, "paused should be true or false.")
+            changes["paused"] = body["paused"]
+        if "threads" in body:
+            t = body["threads"]
+            if t is not None and (isinstance(t, bool) or not isinstance(t, int) or not 1 <= t <= 256):
+                raise fail(400, "threads should be a whole number from 1 to 256, or null for no limit.")
+            changes["threads"] = t
+        if not changes:
+            raise fail(400, 'Send {"paused": true or false} and/or {"threads": a number, or null for no limit}.')
+        live = self.sched.devices.get(rec["id"])
+        target = request.match_info["device_id"]
+        limits = self.sched.set_limits(target, live.name if live else rec["name"], **changes)
+        if limits is None:
+            raise fail(404, "There is no device with that id.")
+        d = self.sched.devices.get(target)
+        return web.json_response({"limits": limits, "device": self.sched.device_view(d) if d is not None else None})
 
     async def device_activity(self, request):
         """What a device did for the pool: the jobs and data it worked on, its agent tasks, and when it joined or was removed.

@@ -48,10 +48,11 @@ The Terminal app opens **YourHarness OS**: a shell that belongs to the pool, not
 
 ### The desktop
 
-The app (and the page in any browser) is a small desktop: a status bar on top, a dock at the bottom, and windows you can move, resize, minimize and maximize. On phones each app opens full screen.
+The app (and the page in any browser) is a small desktop: a status bar on top, a dock at the bottom, and windows you can move, resize, minimize and maximize. On phones each app opens full screen. It opens on Home.
 
 | App | What it does |
 | --- | --- |
+| **Home** | **Running now**: every batch job, test run, agent run and compute job in progress, with a progress bar, the devices working on it and a button to its app, then what finished in the last day. **Devices**: one row per computer, browser tab, phone and tablet with what it has and what it's doing. The pool's owner also gets a switch on each (off pauses it: no new work, and what it's running finishes) and how many of its threads the pool may use. Phones and tablets take small tasks only (one thread) until you give them more. |
 | **System Monitor** | One card per computer or phone with what it shares, live CPU and memory use, and a two-minute CPU graph. Below: **Programs running in YourHarness OS** with the computer each is on. **Test the pool** runs a short job and shows how many pieces each device computed. |
 | **Terminal** | **YourHarness OS** (default) plus a direct shell on each computer. |
 | **Files** | Opens on `/pool`. Make folders, upload, download, rename and delete; each file shows which computers hold it. Also browse the home folder of every computer running the app, send a file from one computer to another, and the shared folder. |
@@ -131,7 +132,7 @@ The coordinator's own computer joins the pool and hosts a workspace by itself, s
 
 ### 2. Join phones, tablets and browsers
 
-Scan the QR code, or open the coordinator's address and type the code. The device signs in once and remembers it. Keep the page open with the screen on; a phone whose page is paused stops checking in, and its pieces move to other devices within about 20 seconds.
+Scan the QR code, or open the coordinator's address and type the code. The device signs in once and remembers it. Keep the page open with the screen on; a phone whose page is paused stops checking in, and its pieces move to other devices within about 20 seconds. A phone or tablet takes small tasks only: the pool uses one of its threads until you give it more on Home.
 
 ### 3. Add the Windows PC with its Ubuntu workspace
 
