@@ -587,7 +587,8 @@ button.fm-name:hover { text-decoration: underline; }
 /* ---------------------------------------------------------------- Home (home.js) */
 .home { display: flex; flex-direction: column; gap: 24px; width: 100%; max-width: 920px; margin: 0 auto; }
 .hm-head { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
-.hm-sum { color: var(--muted); font-size: 0.9375rem; }
+.hm-sum { display: flex; flex-wrap: wrap; gap: 2px 18px; color: var(--muted); font-size: 0.9375rem; }
+.hm-stat { white-space: nowrap; }
 .hm-sum b { color: var(--ink); font-weight: 650; }
 .hm-status { margin-top: -12px; }
 .hm-sec { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
@@ -605,7 +606,8 @@ button.fm-name:hover { text-decoration: underline; }
 .hm-job { display: flex; flex-direction: column; gap: 8px; }
 .hm-job[data-wait="true"] { border-color: color-mix(in srgb, var(--focus) 50%, var(--line)); }
 .hm-job-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.hm-job-name { flex: 1; min-width: 0; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hm-job-title { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.hm-job-name { font-weight: 650; overflow-wrap: anywhere; }
 .hm-bar { height: 6px; border-radius: 3px; background: var(--line-soft); overflow: hidden; }
 .hm-bar span { display: block; height: 100%; border-radius: inherit; background: var(--focus); transition: width 0.3s; }
 .hm-job-state { font-size: 0.875rem; color: var(--muted); }

@@ -62,7 +62,7 @@ window.YHHome.opened();
 await settle(); await settle();
 assert.ok(calls.some((c) => c.url === '/api/me') && calls.some((c) => c.url === '/api/devices'));
 const home = $('#home');
-assert.match(home.querySelector('.hm-sum').textContent.replace(/\s+/g, ' '), /6 devices connected · 26 threads shared · 2 working · 2 jobs running/);
+assert.deepEqual($$('.hm-stat').map((s) => s.textContent), ['6 devices connected', '26 threads shared', '2 working', '2 jobs running']);
 assert.equal($('#wsub-home').textContent, '2 running');
 
 // running now: the batch job and the agent run, newest first, names as text
@@ -91,7 +91,9 @@ const lists = $$('.hm-sec')[1].querySelectorAll('.hm-list');
 assert.deepEqual([...lists[0].children].map((li) => li.dataset.id), ['mac', 'pc', 'friend']);
 assert.deepEqual([...lists[1].children].map((li) => li.dataset.id), ['me1', 'pad', 'phone']);
 assert.equal(card('pc').querySelector('.hm-dev-name b').textContent, 'DESKTOP <b>PC</b>');
-assert.match(card('mac').querySelector('.hm-dev-sub').textContent, /macOS · 8 cores · 1\.5 of 8 GB memory free · runs the pool/);
+assert.equal(card('mac').querySelector('.hm-dev-sub').textContent, 'macOS · 8 cores · 1.5 of 8 GB memory free · runs the pool');
+assert.equal(card('phone').querySelector('.hm-dev-sub').textContent, 'iPhone · 6 cores');
+assert.equal(card('me1').querySelector('.hm-dev-sub').textContent, 'Browser tab, macOS · 8 cores');
 assert.equal(card('mac').dataset.state, 'working');
 assert.equal(card('pc').dataset.state, 'ready');
 assert.equal(card('phone').dataset.state, 'ready');

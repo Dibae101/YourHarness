@@ -42,22 +42,23 @@
   const limitsOf = (d) => d.limits || { paused: false, threads: d.threads, wantThreads: d.threads, wantSharing: d.sharing, cap: null,
     mobile: d.kind === 'browser' && MOBILE.includes((d.info || {}).platform) };
 
-  function kindOf(d) {
-    if (d.kind === 'agent') return 'Computer';
-    const p = (d.info || {}).platform;
-    if (p === 'iPhone' || p === 'Android') return 'Phone';
-    if (p === 'iPad') return 'Tablet';
-    return 'Browser tab';
-  }
   function order(d) {
     if (d.kind === 'agent') return d.coordinator ? 0 : 1;
     return limitsOf(d).mobile ? 3 : 2;
   }
   const gb = (n) => (n == null ? null : nf.format(Math.round(n * 10) / 10));
 
+  function what(d) {
+    const p = (d.info || {}).platform;
+    if (d.kind === 'agent') return p || 'Computer';
+    if (p === 'iPhone' || p === 'iPad') return p;
+    if (p === 'Android') return 'Android phone or tablet';
+    return p ? `Browser tab, ${p}` : 'Browser tab';
+  }
+
   function describe(d) {
     const i = d.info || {};
-    const bits = [kindOf(d) === 'Computer' ? (i.platform || 'Computer') : i.platform && i.platform !== kindOf(d) ? `${kindOf(d)}, ${i.platform}` : kindOf(d)];
+    const bits = [what(d)];
     if (i.cores) bits.push(`${nf.format(i.cores)} cores`);
     if (i.memoryGB) bits.push(i.memoryFreeGB != null ? `${gb(i.memoryFreeGB)} of ${gb(i.memoryGB)} GB memory free` : `${gb(i.memoryGB)} GB memory`);
     if (d.kind === 'agent' && i.diskFreeGB != null) bits.push(`${gb(i.diskFreeGB)} GB disk free`);
@@ -155,8 +156,7 @@
     const wait = it.status === 'needs_approval' || it.status === 'queued';
     return `<li class="hm-card hm-job"${wait ? ' data-wait="true"' : ''}>
       <div class="hm-job-top">
-        <span class="hm-kind">${esc(it.kind)}</span>
-        <b class="hm-job-name">${esc(it.name)}</b>
+        <p class="hm-job-title"><span class="hm-kind">${esc(it.kind)}</span> <b class="hm-job-name">${esc(it.name)}</b></p>
         <button class="btn ghost small" type="button" data-open="${it.app}">Open</button>
       </div>
       <div class="hm-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(it.pct * 100)}"><span style="width:${(it.pct * 100).toFixed(1)}%"></span></div>
@@ -189,10 +189,11 @@
     const busy = devs.filter((d) => working(d) > 0).length;
     const computers = devs.filter((d) => d.kind === 'agent');
     const others = devs.filter((d) => d.kind !== 'agent');
+    const stat = (n, one, many) => `<span class="hm-stat"><b>${nf.format(n)}</b> ${n === 1 ? one : many}</span>`;
     box.innerHTML = `
       <div class="hm-head">
-        <p class="hm-sum"><b>${nf.format(devs.length)}</b> device${devs.length === 1 ? '' : 's'} connected · <b>${nf.format(threads)}</b> threads shared ·
-          <b>${nf.format(busy)}</b> working · <b>${nf.format(live.length)}</b> job${live.length === 1 ? '' : 's'} running</p>
+        <p class="hm-sum">${stat(devs.length, 'device connected', 'devices connected')}${stat(threads, 'thread shared', 'threads shared')}${
+          stat(busy, 'working', 'working')}${stat(live.length, 'job running', 'jobs running')}</p>
         <button class="btn ghost small" type="button" data-open="devices">Add a device</button>
       </div>
       ${H.status ? `<p class="hm-status error" role="alert">${esc(H.status)}</p>` : ''}
@@ -205,7 +206,7 @@
       </section>
       <section class="hm-sec" aria-labelledby="hm-dev-h">
         <h2 id="hm-dev-h">Devices</h2>
-        ${isAdmin() ? '<p class="hint hm-help">The switch lets a device take work or pauses it (what it is doing finishes). The number is how many of its threads the pool may use. Phones and tablets take small tasks only unless you give them more.</p>' : ''}
+        ${isAdmin() ? '<p class="hint hm-help">Switching a device off pauses it: it takes no new work, and what it’s running finishes. The number is how many of its threads the pool may use.</p>' : ''}
         ${computers.length ? `<h3 class="hm-sub-h">Computers</h3><ul class="hm-list">${computers.map(devRow).join('')}</ul>` : ''}
         ${others.length ? `<h3 class="hm-sub-h">Phones, tablets and browser tabs</h3><ul class="hm-list">${others.map(devRow).join('')}</ul>` : ''}
         ${devs.length ? '' : '<p class="hm-empty">No devices are connected.</p>'}
