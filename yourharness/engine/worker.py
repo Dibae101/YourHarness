@@ -125,7 +125,7 @@ def staged_paths(task: dict) -> list[str]:
     inp = task["input"]
     if task.get("stage") in ("shuffle-reduce", "join-reduce"):
         return [f"/parts/{i}" for i in range(len(inp["parts"]))]
-    paths = [] if inp["kind"] == "items" else ["/input"]
+    paths = ["/input"] if inp["kind"] != "items" or task.get("trainingData") else []
     if inp.get("halo"):
         paths.append("/input?halo=1")
     if task.get("ctxRef"):
@@ -245,6 +245,35 @@ class ArtifactCache:
         if h is not None and h.hexdigest() != sha:
             raise InputIntegrityError(f"an input arrived with SHA-256 {h.hexdigest()[:12]}…, not {sha[:12]}…")
 
+    def training_file(self, ds: dict, http, dest: Path, counter: list) -> None:
+        """Give each trial a private file so writes in its training code cannot change the cache."""
+        import shutil
+
+        sha = ds["sha"]
+        if not isinstance(http, Staged):
+            try:
+                local = self.verified(sha)
+                if local is not None:
+                    shutil.copyfile(local, dest)
+                    return
+            except FileNotFoundError:
+                pass  # another worker evicted the entry
+        h = hashlib.sha256()
+        with dest.open("wb") as f:
+            for chunk in http.chunks("/input", counter):
+                h.update(chunk)
+                f.write(chunk)
+        if h.hexdigest() != sha or dest.stat().st_size != ds["size"]:
+            raise InputIntegrityError("The training dataset received by this trial does not match the registered file.")
+        if not isinstance(http, Staged) and ds["size"] <= self.cap:
+            # Keep an independent copy. The attempt directory owns this intermediate file until the atomic move.
+            copy = dest.with_suffix(".cache")
+            try:
+                shutil.copyfile(dest, copy)
+                self.keep(copy, sha)
+            except OSError:
+                copy.unlink(missing_ok=True)
+
 
 def _context(task: dict, http) -> dict:
     """The stage's context snapshot: inline when small, else fetched by its digest and checked."""
@@ -303,7 +332,14 @@ def run(job: dict, report) -> None:
 
             folder = fetch(lambda: http.chunks("/model"), cache_root, task["model"])
             model = {"adapter": task["model"]["adapter"], "path": str(folder)}
-        op = make_op(wl, _context(task, http), sink, bad=task.get("onBadRecord", "fail"), model=model)
+        ctx = _context(task, http)
+        if wl["type"] == "ml.trials":
+            ds = task["trainingData"]
+            path = out_dir / f"training.{ds['format']}"
+            cache.training_file(ds, http, path, read)
+            ctx = {**ctx, "datasetPath": str(path.resolve()), "datasetFormat": ds["format"], "datasetSha256": ds["sha"],
+                   "checkpointPath": str((out_dir / "checkpoint.bin").resolve())}
+        op = make_op(wl, ctx, sink, bad=task.get("onBadRecord", "fail"), model=model)
     if inp["kind"] == "items":
         stats = run_items(op, inp["items"], inp["first"])
     else:
@@ -353,6 +389,17 @@ def run(job: dict, report) -> None:
         state = op.state()
     if sink is not None:
         outputs["part.jsonl"] = _upload(http, cache, "part.jsonl", sink.path, sink.close())
+    if wl["type"] == "ml.trials" and (out_dir / "checkpoint.bin").exists():
+        from .ops import OpError
+
+        path = out_dir / "checkpoint.bin"
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= limit:
+            raise OpError(f"The trial checkpoint must be a regular file between 1 byte and {limit / 2**30:g} GiB.")
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            while chunk := f.read(READ):
+                h.update(chunk)
+        outputs["checkpoint.bin"] = _upload(http, cache, "checkpoint.bin", path, {"sha": h.hexdigest(), "size": path.stat().st_size})
     _finish(done, state, outputs, http, out_dir, report)
 
 

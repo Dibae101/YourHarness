@@ -16,10 +16,13 @@
     'batch.groupby': 'Totals per group',
     'batch.transform': 'Filter and reshape records',
     'python.map': 'Your own Python function',
+    'llm.generate': 'Generate text with a local LLM',
+    'ml.train': 'Train a linear or ridge regression',
+    'ml.trials': 'Run custom training trials',
     'ml.evaluate': 'Evaluate a model on labeled records',
     'batch.join': 'Join two datasets on a key',
   };
-  const CODE_KINDS = ['python.map', 'ml.evaluate'];
+  const CODE_KINDS = ['python.map', 'ml.evaluate', 'ml.trials'];
   // shown in the job list, not offered in the form: harness test collects a suite's tests on your computer first
   const LABELS = { ...KINDS, 'tests.pytest': 'A pytest suite in shards' };
   const TEST_OUTCOMES = ['passed', 'failed', 'error', 'skipped', 'xfailed', 'xpassed', 'flaky', 'missing'];
@@ -76,7 +79,53 @@
               <label class="field"><span>What to compute</span><select id="bj-kind">${Object.entries(KINDS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></label>
               <label class="field" id="bj-input-field"><span>Input</span><select id="bj-input"></select></label>
             </div>
+            <p class="hint" id="bj-columns" data-for="ml.train ml.trials"></p>
             <label class="field" id="bj-items-field" hidden><span>Items, as JSON: a list, or an object of parameter lists to try every combination of</span><textarea id="bj-items" rows="3" spellcheck="false">[1, 2, 3, 4, 5, 6, 7, 8]</textarea></label>
+          </section>
+          <section class="panel" data-for="llm.generate"><h2>Local language model</h2>
+            <p class="hint">Each prompt runs on one computer with this exact model installed. Several computers can answer separate prompts at the same time.</p>
+            <label class="bj-check"><input type="checkbox" id="bj-lend-prompts"> Allow friends who share this model to read and process these prompts</label>
+            <label class="field"><span>Installed model and hosts</span><select id="bj-llm-model"></select></label>
+            <p id="bj-llm-hint" class="hint" role="status"></p>
+            <label class="field"><span>Prompts (leave a blank line between requests)</span><textarea id="bj-prompts" rows="5" placeholder="Summarize the following meeting notes…"></textarea></label>
+            <label class="field"><span>Maximum generated tokens per prompt</span><input id="bj-tokens" type="number" min="1" max="4096" value="256"></label>
+          </section>
+          <section class="panel" data-for="ml.train"><h2>Fit a regression model</h2>
+            <p class="hint">Choose a CSV or JSON Lines dataset. The pool combines the numeric summaries from each partition and returns one set of weights.</p>
+            <div class="ag-grid">
+              <label class="field"><span>Numeric feature columns (comma-separated)</span><input id="bj-train-x" placeholder="floor_area, bedrooms"></label>
+              <label class="field"><span>Numeric target column</span><input id="bj-train-y" placeholder="price"></label>
+              <label class="field"><span>Ridge penalty (0 for ordinary least squares)</span><input id="bj-ridge" type="number" min="0" step="any" value="0"></label>
+            </div>
+          </section>
+          <section class="panel" data-for="ml.trials"><h2>Training experiments</h2>
+            <p class="hint">Each trial gets the entire dataset and one combination of parameters. Return JSON metrics and write an optional model file to <code>ctx["checkpointPath"]</code> to download it after training.</p>
+            <div class="ag-grid">
+              <label class="field"><span>Required hardware</span><select id="bj-trial-gpu"><option value="">Any computer</option><option value="cuda">NVIDIA CUDA GPU</option><option value="metal">Apple Metal GPU</option></select></label>
+              <label class="field"><span>Minimum free memory per trial (GiB)</span><input id="bj-trial-memory" type="number" min="0" max="4096" step="any" value="0.25"></label>
+            </div>
+            <p class="hint">GPU placement selects hosts by hardware. Your training function and its Python packages must use the GPU.</p>
+            <label class="field"><span>Parameter grid</span><textarea id="bj-grid" rows="2" spellcheck="false">{"degree":[1,2,3],"feature":["x"],"target":["y"]}</textarea></label>
+            <label class="field"><span>Training function</span><textarea id="bj-trial-code" rows="12" spellcheck="false">def train(params, ctx):
+    import csv
+    import numpy as np
+    with open(ctx["datasetPath"], encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    degree = params["degree"]
+    x = np.array([float(r[params["feature"]]) for r in rows])
+    y = np.array([float(r[params["target"]]) for r in rows])
+    order = np.random.default_rng(42).permutation(len(rows))
+    cut = int(len(rows) * 0.8)
+    if cut &lt; degree + 1:
+        raise ValueError("Need more training rows for this degree")
+    fit, holdout = order[:cut], order[cut:]
+    weights = np.polynomial.polynomial.polyfit(x[fit], y[fit], degree)
+    with open(ctx["checkpointPath"], "wb") as checkpoint:
+        np.save(checkpoint, weights, allow_pickle=False)
+    pred = np.polynomial.polynomial.polyval(x[holdout], weights)
+    return {"params": params, "validationRMSE": float(np.sqrt(np.mean((pred - y[holdout]) ** 2))),
+            "coefficients": weights.tolist()}</textarea></label>
+            <p class="hint">The starter fits polynomials to a CSV and scores each on the same held-out rows. Edit it for your data or choose a managed Python environment below for additional packages.</p>
           </section>
           <section class="panel" data-for="batch.aggregate batch.groupby"><h2>Totals</h2>
             <label class="field" data-for="batch.groupby"><span>Group by (field names, separated by commas)</span><input id="bj-by" placeholder="region"></label>
@@ -132,7 +181,7 @@
             </div>
             <label class="bj-check"><input type="checkbox" id="bj-preds"> Also write every prediction (id, label, prediction, correct) for download</label>
           </section>
-          <section class="panel" data-for="python.map ml.evaluate"><h2>Python</h2>
+          <section class="panel" data-for="python.map ml.evaluate ml.trials"><h2>Python</h2>
             <div class="ag-grid">
               <label class="field"><span>Python to run it with</span><select id="bj-runtime">
                 <option value="native-python">The Python YourHarness runs on, with its packages</option>
@@ -233,6 +282,9 @@
   function resultText(j) {
     if (j.status !== 'done') return '';
     const r = j.result || {};
+    if (j.workload === 'ml.train' && r.format) return `Trained on ${nf.format(r.rows)} rows · training RMSE ${esc(nf.format(r.trainingRMSE))} · ${nf.format(r.skipped)} rows excluded for missing or invalid values`;
+    if (j.workload === 'llm.generate' && r.model) return `${nf.format(r.completed)} prompt(s) answered by ${esc(r.model)}`;
+    if (j.workload === 'ml.trials') return `${nf.format(r.calls || 0)} training trials completed`;
     if (j.workload === 'ml.evaluate' && r.classes) {
       return `<b>Accuracy</b> ${esc(pct(r.accuracy))} (${nf.format(r.correct)} of ${nf.format(r.samples)}) · <b>macro F1</b> ${esc((r.macro.f1).toFixed(3))} · ${nf.format(r.classes.length)} labels`
         + `${r.unlabeled ? ` · ${nf.format(r.unlabeled)} without a label left out` : ''}${j.outputs ? ` · ${nf.format(j.outputs.records)} predictions written` : ''}`;
@@ -355,9 +407,21 @@
       const r = job.result || {};
       const groups = r.groups ? `<div class="scroll-x"><table class="res-table ag-table"><thead><tr><th>Group</th>${Object.keys(r.groups[0] || {}).filter((k) => k !== 'key').map((k) => `<th>${esc(k)}</th>`).join('')}</tr></thead><tbody>${r.groups.slice(0, 100).map((g) => `<tr><td>${esc(JSON.stringify(g.key))}</td>${Object.entries(g).filter(([k]) => k !== 'key').map(([, v]) => `<td>${esc(typeof v === 'number' ? nf.format(v) : JSON.stringify(v))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>${job.resultTruncated ? '<p class="hint">The first 100 groups; download the result for all of them.</p>' : ''}` : '';
       const plan = job.plan || {};
+      let outcome = '';
+      if (job.workload === 'ml.train' && r.format) {
+        outcome = `<h3>Predict ${esc(r.target)}</h3><div class="ag-grid">${r.features.map((f, i) => `<label class="field"><span>${esc(f)}</span><input type="number" step="any" data-feature="${i}"></label>`).join('')}</div>
+          <button type="button" class="btn ghost small" data-act="predict" data-id="${esc(id)}">Predict</button>
+          <output id="bj-prediction" aria-live="polite"></output>
+          <details><summary>Model weights</summary><dl><dt>Intercept</dt><dd>${esc(r.intercept)}</dd>${r.features.map((f, i) => `<dt>${esc(f)}</dt><dd>${esc(r.coefficients[i])}</dd>`).join('')}</dl></details>`;
+      } else if (job.workload === 'llm.generate' && r.completed) {
+        outcome = `<h3>Response preview</h3>${r.preview.map((row) => `<details open><summary>${esc(row.prompt)}</summary><pre class="ag-log">${esc(row.response)}</pre></details>`).join('')}<p class="hint">Download the result for every full prompt and response, in order.</p>`;
+      } else if (job.workload === 'ml.trials' && Array.isArray(r.value)) {
+        outcome = `<h3>Trial results</h3><pre class="ag-log">${esc(JSON.stringify(r.value.slice(0, 10), null, 2).slice(0, 8000))}</pre><p class="hint">Download the result for every trial.</p>`;
+        if (r.checkpoints?.length) outcome += `<h3>Model checkpoints</h3><ul>${r.checkpoints.map((c) => `<li><a href="/api/engine/jobs/${encodeURIComponent(id)}/checkpoints/${Number(c.trial)}" download>Trial ${nf.format(c.trial)} (${bytes(c.bytes)})</a></li>`).join('')}</ul>`;
+      }
       box.innerHTML = `<div class="panel-head"><h2>${esc(job.name)}</h2><button class="btn ghost small" type="button" data-act="close-detail">Close</button></div>
         ${(plan.reasons || []).length ? `<p class="hint">${esc(plan.reasons.join(' '))}</p>` : ''}
-        ${groups}${job.workload === 'ml.evaluate' && r.classes ? scores(r) : ''}${job.workload === 'tests.pytest' && r.total != null ? testReport(r) : ''}${provenance(job.provenance)}
+        ${outcome}${groups}${job.workload === 'ml.evaluate' && r.classes ? scores(r) : ''}${job.workload === 'tests.pytest' && r.total != null ? testReport(r) : ''}${provenance(job.provenance)}
         <div class="scroll-x"><table class="res-table ag-table"><thead><tr><th>#</th><th>Status</th><th>Computer</th><th>Size</th><th>Records</th><th>Time</th><th>Tries</th></tr></thead><tbody>
         ${job.partitions.map((p) => `<tr><td>${p.idx + 1}</td><td>${badge(p.status === 'leased' ? 'running' : p.status)}${p.resumed ? ' <span class="hint">resumed</span>' : ''}${p.error ? `<div class="ag-detail error">${esc(p.error)}</div>` : ''}</td>
           <td>${esc(p.device || '')}</td><td>${bytes(p.bytes)}</td><td>${p.records == null ? '' : nf.format(p.records)}</td><td>${p.seconds == null ? '' : `${p.seconds} s`}</td>
@@ -463,6 +527,20 @@
       wl.batch = Number($('#bj-ml-batch').value) || 64;
       wl.predictions = $('#bj-preds').checked;
       if (list($('#bj-labels').value).length) wl.labels = list($('#bj-labels').value).map(value);
+    } else if (kind === 'ml.train') {
+      wl.target = $('#bj-train-y').value.trim();
+      wl.features = list($('#bj-train-x').value);
+      wl.ridge = Number($('#bj-ridge').value);
+      if (!wl.target || !wl.features.length) throw new Error('Enter the numeric target and feature columns.');
+    } else if (kind === 'ml.trials') {
+      wl.code = $('#bj-trial-code').value;
+      wl.function = 'train';
+    } else if (kind === 'llm.generate') {
+      const opt = $('#bj-llm-model').selectedOptions[0];
+      if (!opt || !opt.value) throw new Error('Select a local model shared by a connected computer.');
+      wl.model = opt.dataset.name;
+      wl.digest = opt.dataset.digest;
+      wl.maxTokens = Number($('#bj-tokens').value);
     } else {
       wl.code = $('#bj-code').value;
       wl.function = $('#bj-fn').value.trim() || 'process';
@@ -488,17 +566,22 @@
       if (!['exists', 'missing'].includes(w.op)) w.value = ['contains', 'regex'].includes(w.op) ? $('[data-w="value"]', r).value : value($('[data-w="value"]', r).value);
       return w;
     }).filter((w) => w.field);
-    if (where.length && !CODE_KINDS.includes(kind) && kind !== 'batch.join') wl.where = where;
-    if (kind !== 'python.map' && $('#bj-input').value === '__items__') throw new Error('Items work with your own Python function. Pick a dataset for this kind of job.');
+    if (where.length && ['batch.aggregate', 'batch.groupby', 'batch.transform'].includes(kind)) wl.where = where;
     const input = $('#bj-input').value;
     let inputs;
-    if (input === '__items__') {
+    if (kind === 'llm.generate') {
+      inputs = { items: $('#bj-prompts').value.trim().split(/\n\s*\n/).filter(Boolean) };
+      if (!inputs.items.length) throw new Error('Enter at least one prompt.');
+    } else if (kind === 'python.map' && input === '__items__') {
       let items;
       try { items = JSON.parse($('#bj-items').value); } catch (e) { throw new Error(`The items aren't valid JSON: ${e.message}`); }
       inputs = Array.isArray(items) ? { items } : { grid: items };
     } else {
-      if (!input) throw new Error('Add a dataset first (Datasets tab), or pick items for your own function.');
+      if (!input || input === '__items__') throw new Error('Add a dataset in the Datasets tab, then select it here.');
       inputs = { dataset: { ref: input } };
+    }
+    if (kind === 'ml.trials') {
+      try { inputs.grid = JSON.parse($('#bj-grid').value); } catch (e) { throw new Error('The training grid must be a JSON object of parameter lists.'); }
     }
     if (kind === 'ml.evaluate') {
       if (!$('#bj-model').value) throw new Error('Add a model first (Datasets tab, “Add a model”).');
@@ -520,9 +603,10 @@
       apiVersion: API_VERSION, kind: 'Job', metadata: { name: $('#bj-name').value.trim() || KINDS[kind] },
       spec: {
         mode: $('#bj-mode').value, workload: wl, inputs, partitioning, ...(runtime ? { runtime } : {}), ...(context ? { context: { values: context } } : {}),
-        security: { allowedTrust: CODE_KINDS.includes(kind) ? 'owned-only' : $('#bj-trust').value },
+        ...(kind === 'ml.trials' ? { resources: { minFreeMemoryGiB: Number($('#bj-trial-memory').value), accelerator: $('#bj-trial-gpu').value || undefined } } : {}),
+        security: { allowedTrust: kind === 'llm.generate' ? ($('#bj-lend-prompts').checked ? 'owned-and-friends' : 'owned-only') : CODE_KINDS.includes(kind) ? 'owned-only' : $('#bj-trust').value },
         retry: { maxAttempts: Number($('#bj-tries').value) || 3, timeoutSeconds: Number($('#bj-timeout').value) || 900, speculate: $('#bj-speculate').checked },
-        output: { onBadRecord: $('#bj-bad').value, spotCheck: Math.max(0, Number($('#bj-spot').value) || 0) },
+        output: { onBadRecord: $('#bj-bad').value, spotCheck: ['llm.generate', 'ml.trials'].includes(kind) ? 0 : Math.max(0, Number($('#bj-spot').value) || 0) },
       },
     };
   }
@@ -540,7 +624,7 @@
       box.innerHTML = `<h2>${esc(DECISION[p.decision] || p.decision)}</h2><p>${esc((p.reasons || []).join(' '))}</p>
         <div class="scroll-x"><table class="res-table ag-table"><thead><tr><th>Computer</th><th>Can run it</th><th>Speed</th></tr></thead><tbody>
         ${(p.devices || []).map((d) => `<tr><td>${esc(d.name)}${d.owned ? '' : ' <span class="hint">(friend)</span>'}</td><td>${d.eligible ? '<span class="ag-badge ok">Yes</span>' : `<span class="ag-badge">No</span> <span class="hint">${esc(d.why || '')}</span>`}</td>
-          <td>${d.eligible ? `${p.unit === 'items' ? `${d.rate.toFixed(1)} items/s` : `${bytes(d.rate)}/s`}${d.measured ? '' : ' (estimate)'}` : ''}</td></tr>`).join('')}</tbody></table></div>
+          <td>${d.eligible ? `${p.unit === 'items' ? (d.rate > 0 && d.rate < 1 ? `${nf.format(1 / d.rate)} s/item` : `${d.rate.toFixed(1)} items/s`) : `${bytes(d.rate)}/s`}${d.measured ? '' : ' (estimate)'}` : ''}</td></tr>`).join('')}</tbody></table></div>
         ${(p.setup || []).length ? `<p class="hint">Once you start it, the job waits for you to approve the setup. Each of these computers would run:</p>
           ${p.setup.map((s) => `<p><b>${esc(s.name)}</b></p><ol class="bj-steps">${s.steps.map((x) => `<li><code>${esc(x)}</code></li>`).join('')}</ol>`).join('')}
           <p class="hint">${esc(p.setup[0].downloads)}</p>` : ''}`;
@@ -565,10 +649,29 @@
 
   function showKind() {
     const kind = $('#bj-kind').value;
-    const items = $('#bj-input').value === '__items__';
+    const llm = kind === 'llm.generate';
+    const trials = kind === 'ml.trials';
+    const input = $('#bj-input');
+    const itemOption = input.querySelector('option[value="__items__"]');
+    if (itemOption) itemOption.hidden = kind !== 'python.map';
+    if (kind !== 'python.map' && input.value === '__items__') input.value = B.datasets[0]?.ref || '';
+    if (kind === 'python.map' && !input.value && itemOption) input.value = '__items__';
+    const items = kind === 'python.map' && input.value === '__items__';
     document.querySelectorAll('#bj-form [data-for]').forEach((el) => { el.hidden = !el.dataset.for.split(' ').includes(kind); });
     $('#bj-items-field').hidden = !items;
+    $('#bj-input-field').hidden = llm;
+    const dataset = B.datasets.find((d) => d.ref === input.value);
+    $('#bj-columns').textContent = dataset?.header?.length ? 'Columns in this CSV: ' + dataset.header.join(', ')
+      : dataset ? 'Use the Datasets tab to preview the records and field names.' : 'Add your training data in the Datasets tab.';
+    $('#bj-trust').closest('label').hidden = llm;
+    $('#bj-spot').closest('label').hidden = llm || trials;
+    $('#bj-bad').closest('label').hidden = llm || trials;
+    $('#bj-speculate').closest('label').hidden = llm || trials;
+    $('#bj-per').closest('label').hidden = llm || trials;
+    $('#bj-target').closest('label').hidden = llm || trials;
     $('#bj-trust').disabled = CODE_KINDS.includes(kind);
+    if (CODE_KINDS.includes(kind)) $('#bj-trust').value = 'owned-only';
+    if (llm) renderLocalModels();
     const best = $('#bj-reducer').value === 'best';
     document.querySelectorAll('#bj-form [data-reducer="best"]').forEach((el) => { el.hidden = !best; });
     const rt = $('#bj-runtime').value;
@@ -580,11 +683,40 @@
         : 'Your code runs only on your own computers, with the Python YourHarness runs on and its packages (NumPy is there).';
   }
 
+  function renderLocalModels() {
+    const select = $('#bj-llm-model');
+    if (!select) return;
+    const current = select.value;
+    const hosts = new Map();
+    for (const d of B.devices) {
+      if (d.kind !== 'agent' || !d.available || (!d.owned && !$('#bj-lend-prompts').checked)) continue;
+      for (const m of d.engine?.localModels || []) {
+        const key = m.name + '@' + m.digest;
+        if (!hosts.has(key)) hosts.set(key, { ...m, devices: [] });
+        hosts.get(key).devices.push(d.name);
+      }
+    }
+    const entries = [...hosts.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const signature = JSON.stringify(entries);
+    if (select.dataset.inventory === signature) return;
+    select.dataset.inventory = signature;
+    const options = entries.map(([key, m]) => {
+      const opt = new Option(`${m.name} · ${m.digest.slice(0, 12)} · ${m.devices.join(', ')}`, key);
+      opt.dataset.name = m.name;
+      opt.dataset.digest = m.digest;
+      return opt;
+    });
+    select.replaceChildren(new Option(options.length ? 'Choose an installed model' : 'No shared model available', ''), ...options);
+    if (hosts.has(current)) select.value = current;
+    $('#bj-llm-hint').textContent = options.length ? '' : 'Start Ollama on a connected computer and install a local text model there with ollama pull <model>. The list refreshes automatically. Friends can lend models with harness agent --share-models.';
+  }
+
   function renderInputs() {
     const sel = $('#bj-input');
     if (!sel) return;
     const keep = sel.value;
     const opts = B.datasets.map((d) => [d.ref, `${d.name} (${d.format}, ${bytes(d.size)})`]);
+    if (!opts.length) opts.push(['', 'Add a dataset in the Datasets tab']);
     opts.push(['__items__', 'A list of items or parameters (your own function only)']);
     sel.innerHTML = opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
     if (opts.some(([v]) => v === keep)) sel.value = keep;
@@ -717,6 +849,14 @@
         break;
       }
       case 'detail': showDetail(id); break;
+      case 'predict': {
+        const r = B.jobs.get(id)?.result;
+        if (!r?.coefficients) break;
+        const xs = [...document.querySelectorAll('#bj-detail [data-feature]')].map((input) => input.valueAsNumber);
+        const predicted = xs.reduce((sum, x, i) => sum + x * r.coefficients[i], r.intercept);
+        $('#bj-prediction').textContent = Number.isFinite(predicted) ? `${r.target} = ${nf.format(predicted)}` : 'Enter a finite number for each feature.';
+        break;
+      }
       case 'close-detail': B.detail = null; $('#bj-detail').hidden = true; break;
       case 'cancel': if (confirm('Cancel this job?')) act(() => api('POST', `/api/engine/jobs/${encodeURIComponent(id)}/cancel`, {})); break;
       case 'retry': act(() => api('POST', `/api/engine/jobs/${encodeURIComponent(id)}/retry`, {})); break;
@@ -746,6 +886,7 @@
 
   function onChange(e) {
     if (['bj-kind', 'bj-input', 'bj-reducer', 'bj-runtime'].includes(e.target.id)) showKind();
+    if (e.target.id === 'bj-lend-prompts') renderLocalModels();
   }
 
   function renderAll() { renderJobs(); renderDatasets(); renderModels(); renderInputs(); renderComputers(); }
@@ -754,8 +895,9 @@
     const m = e.detail || {};
     if (m.type === 'devices' && B.loaded) {
       const byId = new Map(B.devices.map((d) => [d.id, d]));
-      B.devices = m.devices.map((d) => ({ id: d.id, name: d.name, kind: d.kind, owned: d.owned, engine: d.engine || (byId.get(d.id) || {}).engine }));
+      B.devices = m.devices.map((d) => ({ id: d.id, name: d.name, kind: d.kind, owned: d.owned, available: d.sharing && !d.stale && !d.limits?.paused, engine: d.engine || (byId.get(d.id) || {}).engine }));
       renderComputers();
+      if ($('#bj-kind').value === 'llm.generate') renderLocalModels();
       return;
     }
     if (!B.loaded) return;
@@ -772,6 +914,15 @@
 
   let built = false;
   window.YHBatch = {
+    newWorkload(kind) {
+      if (!KINDS[kind] || !built) return;
+      $('#bj-kind').value = kind;
+      $('#bj-lend-prompts').checked = false;
+      $('#bj-plan').hidden = $('#bj-spec').hidden = true;
+      flash('#bj-status', '');
+      showKind();
+      showTab('new');
+    },
     opened() {
       if (!built) { build(); built = true; showTab(B.tab); }
       load();

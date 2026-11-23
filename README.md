@@ -1,12 +1,26 @@
 # YourHarness
 
-Pool the devices you already own into one workspace for AI work. Open a Linux terminal from any of them, and the jobs you run there borrow processors, memory and storage from the rest.
+Use your laptop, tablet or phone to send work to the computers you own and the ones your friends choose to lend. A job runs where its model, runtime and input fit. The laptop can receive the answer even when it could never run the job itself.
 
-Plan and roadmap: https://dibae101.github.io/YourHarness/
+## Start a workload
+
+From a checkout with Node and Python 3.10+ installed, run `npm start`. Open the pool address it prints, sign in as an owner and open **Home**.
+
+| Choose | What you get |
+| --- | --- |
+| **Local LLM** | Run prompts using a matching Ollama model installed on your desktop or an opted-in friend's computer. Download the responses in order. |
+| **Train a model** | Fit one linear or ridge regression across partitions of a CSV or JSON Lines dataset. Download the weights and predict a new value in the app. |
+| **Training experiments** | Run custom Python training code once per parameter combination. Each trial gets the whole dataset. Require a CUDA or Apple Metal host when your code needs it. |
+| **Model evaluation** | Score a Python or TorchScript classifier on labeled examples. |
+| **Run an agent** | Assign repository tasks to configured coding agents and inspect their changes. |
+| **Process data / Custom Python** | Aggregate and join datasets, transform records, or run a Python function over inputs. |
+| **Review Studio** | Render frames and assemble a playable review video. |
+
+Each prompt or custom training trial runs on one computer. Independent prompts and trials can run concurrently across the pool. The built-in regression also combines partition summaries into one model.
+
+[AI workload guide, examples and proof of concept](docs/ai-workloads.md) · [Device setup](docs/devices.md) · [Coding agents](docs/agent-tasks.md)
 
 ## Review Studio
-
-From a source checkout with Node and Python 3.10+ installed, run `npm start`. On first launch it prepares the project’s Python environment. Open the pool address it prints and sign in as an owner.
 
 Open **Review Studio** from the pool desktop to make a playable MP4 from an image sequence or a Blender motion preview. The built-in turntable takes no external files. Measure sample frames, compare a helper, invite a teammate for one job, and play the completed cut in your browser.
 
@@ -14,7 +28,7 @@ Open **Review Studio** from the pool desktop to make a playable MP4 from an imag
 
 ## Install the apps
 
-Download from the [Releases page](https://github.com/Dibae101/YourHarness/releases). Nothing else to install, no Python needed.
+Desktop installers include the Python engine. Tagged versions are on the [Releases page](https://github.com/Dibae101/YourHarness/releases). Installers built from main are attached to successful [Build apps runs](https://github.com/Dibae101/YourHarness/actions/workflows/build-apps.yml).
 
 | Device | Get | Notes |
 | --- | --- | --- |

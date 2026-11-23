@@ -1842,7 +1842,11 @@ def run(chunk, total):
       if (!b) return;
       const app = b.dataset.open;
       if (b.classList.contains('dock-item') && isOpen(app) && state.front === app && !phone()) minimize(app);
-      else open(app);
+      else {
+        open(app);
+        if (app === 'batch' && b.dataset.workload) window.YHBatch?.newWorkload(b.dataset.workload);
+        if (app === 'agents' && b.hasAttribute('data-new-run')) window.YHAgents?.newRun();
+      }
     });
     window.addEventListener('resize', () => { Object.keys(APP_SIZES).forEach((a) => { if (isOpen(a)) place(a); }); dockState(); });
     return { open, close, minimize, isOpen, restore, dockState };

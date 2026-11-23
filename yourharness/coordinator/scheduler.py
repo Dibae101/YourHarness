@@ -102,7 +102,7 @@ def sanitize_tasks(t) -> dict | None:
     }
 
 
-ENGINE_OPS = ("batch.aggregate", "batch.groupby", "batch.transform", "python.map", "ml.evaluate", "tests.pytest", "batch.join")
+ENGINE_OPS = ("llm.generate", "ml.train", "ml.trials", "batch.aggregate", "batch.groupby", "batch.transform", "python.map", "ml.evaluate", "tests.pytest", "batch.join")
 ENGINE_RUNTIMES = ("builtin", "native-python", "managed-python", "isolated-oci")
 
 
@@ -111,12 +111,18 @@ def sanitize_engine(e) -> dict | None:
     the planner gives code to your own computers only."""
     if not isinstance(e, dict):
         return None
+    from ..engine.ollama import valid_model
+
+    models = e.get("localModels")
+    local_models = [{"name": m["name"], "digest": m["digest"]} for m in models[:256]
+                    if isinstance(m, dict) and valid_model(m.get("name"), m.get("digest"))] if isinstance(models, list) else []
     running = []
     for r in (e.get("running") or [])[:256]:
         if isinstance(r, dict) and isinstance(r.get("attempt"), int):
             running.append({"partition": clean_text(r.get("partition"), 80, ""), "attempt": r["attempt"]})
     return {
         "slots": clamp_int(e.get("slots"), 0, 256, 0),
+        "localModels": local_models,
         "ops": [o for o in e.get("ops") or [] if o in ENGINE_OPS],
         "formats": [f for f in e.get("formats") or [] if f in ("text", "jsonl", "csv")],
         "runtimes": [r for r in e.get("runtimes") or [] if r in ENGINE_RUNTIMES],

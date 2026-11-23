@@ -340,6 +340,8 @@ class EngineManager:
                 raise EngineError(f"There's no dataset {ref}.")
             reading = [s["workload"] for s in (job["spec"].get("stages") or [{"workload": job["spec"]["workload"], "from": "inputs"}])
                        if s["from"] == "inputs"]
+            if ds["format"] == "text" and any(w["type"] == "ml.train" for w in reading):
+                raise EngineError("Regression needs named numeric columns. Upload a CSV or JSON Lines dataset.")
             if any(halo_records_needed(wl) for wl in reading) and ds["format"] == "csv" and ds["meta"].get("quoted"):
                 raise EngineError("This CSV has quoted fields, which may span lines, so a rolling mean can't read across partitions. "
                                   "Convert it to JSON Lines, or remove the rolling mean.")
@@ -690,6 +692,8 @@ class EngineManager:
         task = {"workload": wl, "stage": st["kind"], "input": inp, "onBadRecord": spec["output"]["onBadRecord"],
                 "checkpoint": p["checkpoint"] if resume else None, "checkpointEvery": spec["retry"]["checkpointIntervalSeconds"],
                 "ctx": {}, "runtime": runtime, "maxOutputBytes": MAX_OUTPUT}
+        if wl["type"] == "ml.trials":
+            task["trainingData"] = {k: meta[k] for k in ("sha", "size", "format")}
         if inp["kind"] == "artifact":
             task.update(format="jsonl", header=None, dataStart=0)
         elif inp["kind"] == "range":
@@ -1338,6 +1342,7 @@ class EngineManager:
             return None
         return {"slots": info.get("slots", 0), "ops": info.get("ops", []), "formats": info.get("formats", []), "runtimes": info.get("runtimes", []),
                 "busy": len(self.s.resources.held(d.id, "engine")), "python": info.get("python"),
+                "localModels": info.get("localModels", []),
                 "envs": len(info.get("envs", [])), "accelerators": info.get("accelerators", []), "profile": info.get("profile"),
                 "oci": info.get("oci"), "ociWhy": info.get("ociWhy") or "", "tier": isolation.tier(d)}
 

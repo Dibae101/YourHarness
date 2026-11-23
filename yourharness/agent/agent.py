@@ -98,6 +98,7 @@ class AgentConfig:
     allow_commands: bool = False  # on a friend's computer, also allow tasks that run commands
     owned: bool | None = None  # joined with the owner's link (True) or a friend code (False), as the join said
     ca: str | None = None  # the coordinator's own certificate to trust (a pool served with --tls-self-signed)
+    share_models: bool | None = None
 
 
 class Agent:
@@ -119,10 +120,11 @@ class Agent:
         self.oci = OciManager(cfg.home, self.send)
         self.enginehost = EngineHost(cfg.server, cfg.home, self.send, cfg.threads if cfg.sharing else 0, runtimes=self.envs, oci=self.oci,
                                      ca=cfg.ca)
+        self.enginehost.share_models = cfg.share_models
         self.activity = ActivityLog(cfg.home, cfg.server)  # this computer's own record of what it did for the pool
         self.enginehost.on_activity = self.activity.add
         self.taskhost.on_activity = self.activity.add
-        if cfg.workspace:  # a computer that hosts a terminal also lets the pool browse its home folder
+        if cfg.workspace and cfg.owned is not False:  # a computer that hosts a terminal also lets the pool browse its home folder
             from .files import HomeFiles
 
             self.files = HomeFiles()
@@ -130,7 +132,7 @@ class Agent:
 
             if Runner.available():  # the pool shell can run commands here
                 self.runner = Runner(cfg.server, cfg.token, cfg.home, self.send, {"HARNESS_URL": cfg.server})
-        if cfg.workspace:
+        if cfg.workspace and cfg.owned is not False:
             env = {"HARNESS_URL": cfg.server, "HARNESS_TOKEN": cfg.token}
             if os.name == "posix":
                 from .terminal import TerminalHost
@@ -250,8 +252,10 @@ class Agent:
                                        ssl=ctx if ctx is not None else True) as ws:
                 self.ws = ws
                 self.outbox = asyncio.Queue()
+                self.enginehost.owned = None
+                self.enginehost.models = []
                 self.send(self._hello())
-                tasks = [asyncio.ensure_future(t) for t in (self._writer(ws, self.outbox), self._beat(), self._refresh_info(), self._report_load())]
+                tasks = [asyncio.ensure_future(t) for t in (self._writer(ws, self.outbox), self._beat(), self._refresh_info(), self._report_load(), self._model_inventory())]
                 try:
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
@@ -306,6 +310,23 @@ class Agent:
             used = round((total - avail) / sysinfo.GB, 1) if total and avail else None
             self.send({"type": "update", "load": {"cpu": cpu, "memUsedGB": used}})
 
+    async def _model_inventory(self) -> None:
+        from ..engine import ollama
+
+        known = {}
+        while self.enginehost.owned is None:
+            await asyncio.sleep(0.2)
+        while True:
+            if self.enginehost.shares_models() and self.cfg.sharing:
+                known = await asyncio.to_thread(ollama.discover, known)
+                models = [dict(name=name, digest=digest) for (name, digest), eligible in known.items() if eligible]
+            else:
+                models = []
+            if models != self.enginehost.models:
+                self.enginehost.models = models
+                self.send({"type": "update", "engine": self.enginehost.describe()})
+            await asyncio.sleep(INFO_S)
+
     async def _refresh_info(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
@@ -334,7 +355,7 @@ class Agent:
             sharing = f"sharing {self.cfg.threads} worker processes" if self.cfg.sharing else "not sharing compute"
             print(f"Joined the pool as {m.get('name')}, {sharing}{role}.", flush=True)
             self._limits_note(m.get("limits"))
-            self.taskhost.owned = "submit" in (m.get("caps") or [])
+            self.taskhost.owned = "submit" in (m.get("caps") or []) and self.cfg.owned is not False
             th = self.taskhost
             if (th.enabled if th.enabled is not None else th.owned) and th.tools.get("git"):
                 agents = ", ".join(a["id"] for a in th.tools.get("agents", []))

@@ -297,4 +297,32 @@ document.querySelector('[data-tab="computers"]').click();
 const comp = document.querySelector('#bj-comp').textContent;
 assert.match(comp, /Mac/); assert.match(comp, /older than batch jobs in browsers/);
 assert.match(comp, /GPU: Apple silicon GPU/); assert.match(comp, /2 prepared environments/);
+
+// The Home launcher opens the right editor. Model and prompt consent are independent of dataset sharing.
+window.YHBatch.newWorkload('llm.generate');
+const digest = 'ab'.repeat(32);
+msg({ type: 'devices', devices: [
+  { id: 'lender', name: 'Lender', owned: false, kind: 'agent', sharing: true,
+    engine: { slots: 1, busy: 0, ops: ['llm.generate'], formats: [], runtimes: ['builtin'], localModels: [{ name: 'm:latest', digest }] } },
+] });
+const llm = document.querySelector('#bj-llm-model');
+assert.equal(llm.options.length, 1);
+document.querySelector('#bj-lend-prompts').click();
+assert.equal(llm.options.length, 2);
+llm.selectedIndex = 1;
+set('#bj-prompts', 'first\n\nsecond');
+await submit();
+assert.deepEqual(lastSpec().inputs, { items: ['first', 'second'] });
+assert.deepEqual(lastSpec().workload, { type: 'llm.generate', model: 'm:latest', digest, maxTokens: 256 });
+assert.equal(lastSpec().security.allowedTrust, 'owned-and-friends');
+assert.equal(lastSpec().output.spotCheck, 0);
+window.YHBatch.newWorkload('ml.trials');
+set('#bj-input', ds.ref);
+set('#bj-runtime', 'native-python');
+set('#bj-trial-gpu', 'cuda');
+await submit();
+assert.equal(lastSpec().workload.type, 'ml.trials');
+assert.equal(lastSpec().inputs.dataset.ref, ds.ref);
+assert.equal(lastSpec().resources.accelerator, 'cuda');
+assert.equal(lastSpec().security.allowedTrust, 'owned-only');
 console.log('batch.js smoke test passed:', calls.length, 'requests');

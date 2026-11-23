@@ -30,7 +30,7 @@ from typing import Callable
 log = logging.getLogger("yourharness")
 PACKAGE_PARENT = str(Path(__file__).resolve().parent.parent.parent)
 HEARTBEAT_S = float(os.environ.get("HARNESS_ENGINE_BEAT_S", 2))  # the lease is renewed this often while a partition runs
-OPS = ["batch.aggregate", "batch.groupby", "batch.transform", "python.map", "ml.evaluate", "batch.join", "tests.pytest"]
+OPS = ["ml.train", "ml.trials", "batch.aggregate", "batch.groupby", "batch.transform", "python.map", "ml.evaluate", "batch.join", "tests.pytest"]
 FORMATS = ["text", "jsonl", "csv"]
 
 
@@ -51,6 +51,8 @@ class EngineHost:
 
         self.ca = ca or ca_file()  # an HTTPS pool's private authority, if it has one (yourharness/tls.py)
         self.owned: bool | None = None
+        self.share_models: bool | None = None
+        self.models: list[dict] = []
         self.accelerators: list[dict] = []  # GPUs found at start (runtime/inventory.py)
         self.running: dict[tuple[str, int], asyncio.subprocess.Process | None] = {}
         self.containers: dict[tuple[str, int], str] = {}
@@ -58,6 +60,9 @@ class EngineHost:
         self.unacked: dict[tuple[str, int], dict] = {}
         self.on_busy: Callable[[bool], None] | None = None
         self.on_activity: Callable[[dict], None] | None = None  # a line in this computer's own activity log
+
+    def shares_models(self) -> bool:
+        return self.owned is not None and (self.share_models if self.share_models is not None else self.owned)
 
     def describe(self) -> dict:
         runtimes = ["builtin", "native-python"]
@@ -67,7 +72,8 @@ class EngineHost:
             runtimes.append("isolated-oci")
         running = [{"partition": p, "attempt": n} for (p, n) in self.running]
         running += [{"partition": p, "attempt": n} for (p, n) in self.unacked if (p, n) not in self.running]
-        out = {"slots": self.slots, "ops": OPS, "formats": FORMATS, "runtimes": runtimes, "python": platform.python_version(),
+        models = self.models if self.shares_models() else []
+        out = {"slots": self.slots, "ops": [*OPS, "llm.generate"] if models else OPS, "localModels": models, "formats": FORMATS, "runtimes": runtimes, "python": platform.python_version(),
                "running": running, "accelerators": self.accelerators}
         if self.runtimes is not None:
             out.update(self.runtimes.describe())
@@ -118,7 +124,14 @@ class EngineHost:
         kind = (task.get("runtime") or {}).get("kind", "builtin")
         if len(self.running) >= max(1, self.slots):
             return self._refuse(m, "This computer is busy with other partitions.")
-        if kind != "builtin" and not self.owned:  # the same rule as engine/isolation.py, applied here too
+        wl = task.get("workload") or {}
+        if wl.get("type") == "llm.generate":
+            selected = {"name": wl.get("model"), "digest": wl.get("digest")}
+            if not self.shares_models() or selected not in self.models or kind != "builtin":
+                return self._refuse(m, "This computer is not sharing the selected local model.")
+        from ..engine.spec import CODE_WORKLOADS
+
+        if (kind != "builtin" or wl.get("type") in CODE_WORKLOADS) and not self.owned:  # the same rule as engine/isolation.py, applied here too
             return self._refuse(m, "Your own code runs only on the pool owner's own computers.")
         if kind == "managed-python" and (self.runtimes is None or not self.runtimes.has(task.get("env"))):
             return self._refuse(m, "This computer hasn't prepared the job's Python environment.")

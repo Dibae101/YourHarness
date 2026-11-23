@@ -87,7 +87,7 @@ assert.equal(recent[0].querySelector('.hm-mark').dataset.ok, 'true');
 // devices: computers first (the one running the pool first), then tabs, phones and tablets
 const groups = $$('.hm-sub-h').map((h) => h.textContent);
 assert.deepEqual(groups, ['Finished recently', 'Computers', 'Phones, tablets and browser tabs']);
-const lists = $$('.hm-sec')[1].querySelectorAll('.hm-list');
+const lists = $('[aria-labelledby="hm-dev-h"]').querySelectorAll('.hm-list');
 assert.deepEqual([...lists[0].children].map((li) => li.dataset.id), ['mac', 'pc', 'friend']);
 assert.deepEqual([...lists[1].children].map((li) => li.dataset.id), ['me1', 'pad', 'phone']);
 assert.equal(card('pc').querySelector('.hm-dev-name b').textContent, 'DESKTOP <b>PC</b>');

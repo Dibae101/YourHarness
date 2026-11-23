@@ -17,13 +17,21 @@ class ReduceError(ValueError):
 
 def merge_states(wl: dict, states: list[dict]) -> dict:
     t = wl["type"]
+    if t == "ml.train":
+        from .training import merge
+
+        return merge(wl, states)
+    if t == "llm.generate":
+        from .ollama import merge
+
+        return merge(states)
     if t == "batch.aggregate":
         return AggregateOp.merge(wl, states)
     if t == "batch.groupby":
         return GroupByOp.merge(wl, states)
     if t == "batch.transform":
         return {"seen": sum(int(s["seen"]) for s in states), "out": sum(int(s["out"]) for s in states)}
-    if t == "python.map":
+    if t in ("python.map", "ml.trials"):
         return _merge_python(wl, states)
     if t == "ml.evaluate":
         from . import ml
@@ -38,13 +46,19 @@ def merge_states(wl: dict, states: list[dict]) -> dict:
 
 def final_result(wl: dict, st: dict) -> dict:
     t = wl["type"]
+    if t == "ml.train":
+        from .training import fit
+
+        return fit(wl, st)
+    if t == "llm.generate":
+        return {**st, "model": wl["model"], "digest": wl["digest"]}
     if t == "batch.aggregate":
         return AggregateOp.final(wl, st)
     if t == "batch.groupby":
         return GroupByOp.final(wl, st)
     if t == "batch.transform":
         return {"records": st["seen"], "written": st["out"]}
-    if t == "python.map":
+    if t in ("python.map", "ml.trials"):
         return _final_python(wl, st)
     if t == "ml.evaluate":
         from . import ml

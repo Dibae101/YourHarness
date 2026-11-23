@@ -1,5 +1,9 @@
 # YourHarness product concept
 
+## Platform direction
+
+The pool serves local inference, model training, agents, data jobs and rendering. This document keeps the original animation pilot as one case study. The general product concept, supported workloads, lending boundaries, and proposed proofs for AI and data are in the [AI workload guide](ai-workloads.md).
+
 ## The idea
 
 Ask someone you trust to lend their computer **for one job, until a time they choose**. You tell YourHarness what you need finished and by when. It estimates what your devices can do alone, whether a second computer would save time after transferring the files, and how much help to ask for. Your friend sees the request, chooses their limits, and can stop at any time. You get the finished result back on your laptop.

@@ -594,6 +594,10 @@ button.fm-name:hover { text-decoration: underline; }
 .hm-sec { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .hm-sub-h { margin: 8px 0 0; font-size: 0.75rem; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 .hm-help { max-width: 72ch; }
+.hm-workloads { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 8px; }
+.hm-workloads > * { display: grid; align-content: start; gap: 4px; padding: 12px 14px; text-align: left; font: inherit; text-decoration: none; cursor: pointer; border: 1px solid var(--line); border-radius: 12px; color: var(--ink); background: var(--surface); }
+.hm-workloads > :is(:hover, :focus-visible) { border-color: var(--focus); }
+.hm-workloads span { font-size: 0.8125rem; color: var(--muted); }
 .hm-list, .hm-recent { list-style: none; margin: 0; padding: 0; }
 .hm-list { display: flex; flex-direction: column; gap: 8px; }
 .hm-card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; min-width: 0; }

@@ -50,10 +50,13 @@ WORKLOADS = {
     "batch.transform": {"input": "dataset", "runtimes": ("builtin",)},
     "python.map": {"input": "dataset|items", "runtimes": ("native-python", "managed-python", "isolated-oci")},
     "ml.evaluate": {"input": "dataset", "runtimes": ("native-python", "managed-python", "isolated-oci")},
+    "ml.train": {"input": "dataset", "runtimes": ("builtin",)},
+    "ml.trials": {"input": "dataset+items", "runtimes": ("native-python", "managed-python", "isolated-oci")},
+    "llm.generate": {"input": "items", "runtimes": ("builtin",)},
     "batch.join": {"input": "dataset", "runtimes": ("builtin",)},
     "tests.pytest": {"input": "project", "runtimes": ("native-python", "managed-python", "isolated-oci")},
 }
-CODE_WORKLOADS = ("python.map", "ml.evaluate", "tests.pytest")  # they run your own code: only on your own computers
+CODE_WORKLOADS = ("python.map", "ml.evaluate", "ml.trials", "tests.pytest")  # these run only on your own computers
 MAX_TESTS = 20_000
 TEST_ID = re.compile(r"[^\x00-\x1f]{1,2000}")
 # pytest options a test job sets itself, to run exactly a shard's tests and read their outcomes
@@ -74,7 +77,7 @@ def context_version(values: dict) -> str:
 
 def writes_records(wl: dict) -> bool:
     t = wl["type"]
-    return t in ("batch.transform", "batch.join") or (t == "python.map" and wl.get("reducer") == "concat") \
+    return t in ("batch.transform", "batch.join", "llm.generate") or (t == "python.map" and wl.get("reducer") == "concat") \
         or (t == "ml.evaluate" and bool(wl.get("predictions"))) or (t == "batch.groupby" and wl.get("shuffle") is not None)
 
 
@@ -229,6 +232,9 @@ def _workload(w, path: str) -> dict:
             out["rolling"] = {"field": field, "window": _num(r.get("window"), f"{path}.rolling.window", 1, 10_000, 10, integer=True),
                               "as": _field(r.get("as") or f"rolling_mean_{field.replace('.', '_')}", f"{path}.rolling.as")}
         return out
+    if t == "ml.trials":
+        fn = _workload({"type": "python.map", "code": w.get("code"), "function": w.get("function", "train")}, path)
+        return {**fn, "type": t}
     if t == "python.map":
         code = w.get("code")
         if not isinstance(code, str) or not code.strip():
@@ -247,6 +253,21 @@ def _workload(w, path: str) -> dict:
             out["bestBy"] = {"key": _field(b.get("key"), f"{path}.bestBy.key"),
                              "order": _choice(b.get("order"), f"{path}.bestBy.order", ("max", "min"), "max")}
         return out
+    if t == "ml.train":
+        features = _fields(w.get("features"), f"{path}.features")
+        target = _field(w.get("target"), f"{path}.target")
+        if len(features) > 32 or len(features) != len(set(features)) or target in features:
+            raise SpecError(f"{path}.features", "choose 1 to 32 distinct numeric features, excluding the target")
+        return {"type": t, "features": features, "target": target, "ridge": _num(w.get("ridge"), f"{path}.ridge", 0, 1e12, 0)}
+    if t == "llm.generate":
+        from .ollama import valid_model
+
+        if not valid_model(w.get("model"), w.get("digest")):
+            raise SpecError(path, "select an installed local Ollama model by name and full SHA-256 digest")
+        tokens = w.get("maxTokens", 256)
+        if type(tokens) is not int or not 1 <= tokens <= 4096:
+            raise SpecError(f"{path}.maxTokens", "use a whole number between 1 and 4096")
+        return {"type": t, "model": w["model"], "digest": w["digest"], "maxTokens": tokens}
     if t == "ml.evaluate":
         predictions = w.get("predictions", False)
         if not isinstance(predictions, bool):
@@ -287,6 +308,21 @@ def _workload(w, path: str) -> dict:
 def _inputs(v, path: str, wl: dict, wants_model: bool = False) -> dict:
     v = _obj(v, path)
     need = WORKLOADS[wl["type"]]["input"]
+    if wl["type"] == "ml.trials":
+        if set(v) not in ({"dataset", "items"}, {"dataset", "grid"}):
+            raise SpecError(path, "provide a training dataset and either parameter objects or a parameter grid")
+        data = _inputs({"dataset": v["dataset"]}, path, {"type": "ml.train"})
+        params = _inputs({k: val for k, val in v.items() if k != "dataset"}, path, {"type": "python.map"})
+        if len(params["items"]) > 1000 or any(not isinstance(p, dict) for p in params["items"]):
+            raise SpecError(path, "use up to 1000 parameter objects, one per training trial")
+        return {**data, **params}
+    if wl["type"] == "llm.generate":
+        prompts = v.get("items")
+        if (set(v) != {"items"} or not isinstance(prompts, list) or not 1 <= len(prompts) <= 1000
+                or any(not isinstance(p, str) or not p.strip() or len(p) > 32_000 for p in prompts)
+                or sum(len(p.encode("utf-8")) for p in prompts) > 1024 * 1024):
+            raise SpecError(path, "use 1 to 1000 nonempty text prompts of up to 32000 characters and 1 MiB total")
+        return {"items": prompts}
     if wl["type"] == "tests.pytest":  # the project archive the tests run in; harness test makes and uploads it
         p = _obj(v.get("project"), f"{path}.project")
         ref, sha = p.get("ref"), p.get("sha256")
@@ -337,9 +373,9 @@ def _inputs(v, path: str, wl: dict, wants_model: bool = False) -> dict:
                 raise SpecError(f"{path}.grid", "should map each parameter name to a list of values")
             items = [{}]
             for name, vals in grid.items():
-                items = [{**it, name: val} for it in items for val in vals]
-                if len(items) > MAX_ITEMS:
+                if len(items) * len(vals) > MAX_ITEMS:
                     raise SpecError(f"{path}.grid", f"makes more than {MAX_ITEMS:,} combinations")
+                items = [{**it, name: val} for it in items for val in vals]
         try:
             json.dumps(items, allow_nan=False)
         except (TypeError, ValueError):
@@ -367,6 +403,11 @@ def parse(doc) -> dict:
     s = _obj(doc.get("spec"), "spec")
     stages = _stages(s)
     wl = stages[-1]["workload"]  # the last stage's workload is the job's result
+    llm = any(st["workload"]["type"] == "llm.generate" for st in stages)
+    if llm and len(stages) != 1:
+        raise SpecError("spec.stages", "run local generation as a single-stage job")
+    if len(stages) != 1 and any(st["workload"]["type"] == "ml.trials" for st in stages):
+        raise SpecError("spec.stages", "run training trials as a single-stage job")
     reading = [st["workload"] for st in stages if st["from"] == "inputs"]
     inputs = _inputs(s.get("inputs"), "spec.inputs", reading[0], any(st["workload"]["type"] == "ml.evaluate" for st in stages))
     for i, st in enumerate(stages):
@@ -425,11 +466,20 @@ def parse(doc) -> dict:
     }
     if wl["type"] == "tests.pytest":
         partitioning["itemsPerPartition"] = 1  # one shard per partition
+    if llm:
+        partitioning.update(itemsPerPartition=1, maxInflightPerWorker=1)
+    if wl["type"] == "ml.trials":
+        partitioning["itemsPerPartition"] = 1
     res = _obj(s.get("resources"), "spec.resources")
     resources = {
         "cpuSlots": _num(res.get("cpuSlots"), "spec.resources.cpuSlots", 1, 64, 1, integer=True),
         "minFreeMemoryGiB": _num(res.get("minFreeMemoryGiB"), "spec.resources.minFreeMemoryGiB", 0, 4096, 0.25),
     }
+    if res.get("accelerator") is not None:
+        if wl["type"] != "ml.trials" or runtime["kind"] == "isolated-oci":
+            raise SpecError("spec.resources.accelerator", "GPU placement is available for native and managed Python training trials")
+        resources["accelerator"] = _choice(res["accelerator"], "spec.resources.accelerator", ("cuda", "metal"), None)
+        partitioning["maxInflightPerWorker"] = 1
     sec = _obj(s.get("security"), "spec.security")
     if sec.get("allowUntrustedNativeFallback"):
         raise SpecError("spec.security.allowUntrustedNativeFallback", "can't be turned on: code never falls back to running unisolated on someone else's computer")
@@ -468,6 +518,12 @@ def parse(doc) -> dict:
         "retentionDays": _num(out.get("retentionDays"), "spec.output.retentionDays", 0, 3650, 7),
         "spotCheck": _num(out.get("spotCheck"), "spec.output.spotCheck", 0, 1000, 0, integer=True),
     }
+    if llm:
+        if output["spotCheck"]:
+            raise SpecError("spec.output.spotCheck", "set to 0 for generated text, which can differ between runs")
+        retry["speculate"] = False
+    if wl["type"] == "ml.trials":
+        retry["speculate"] = False
     return {
         "apiVersion": API_VERSION, "kind": "Job",
         "metadata": {"name": name.strip() or "Job", "labels": {str(k)[:60]: str(v)[:200] for k, v in list(labels.items())[:20]}},

@@ -58,6 +58,7 @@ class EngineAPI:
         r.add_post("/api/engine/jobs/{job}/approve-setup", self.approve_setup)
         r.add_delete("/api/engine/jobs/{job}", self.delete_job)
         r.add_get("/api/engine/jobs/{job}/result", self.result)
+        r.add_get(r"/api/engine/jobs/{job}/checkpoints/{trial:\d{1,4}}", self.checkpoint)
         r.add_put("/api/engine/models", self.upload_model)
         r.add_delete("/api/engine/models/{model}", self.delete_model)
         r.add_get("/api/engine/attempts/{pid}/{n}/input", self.attempt_input)
@@ -108,7 +109,8 @@ class EngineAPI:
     async def overview(self, request):
         self._who(request)
         data = self.m.overview()
-        data["devices"] = [{"id": d.id, "name": d.name, "kind": d.kind, "owned": d.owned, "engine": self.m.device_view(d)}
+        data["devices"] = [{"id": d.id, "name": d.name, "kind": d.kind, "owned": d.owned, "engine": self.m.device_view(d),
+                            "available": d.sharing and not (d.stale or d.closed or getattr(d, "paused", False))}
                            for d in self.c.sched.devices.values()]
         return web.json_response(data)
 
@@ -251,6 +253,19 @@ class EngineAPI:
         await resp.write_eof()
         return resp
 
+    async def checkpoint(self, request):
+        self._who(request)
+        jid = self._id(request, "job")
+        job = self.m.db.job(jid)
+        trial = int(request.match_info["trial"])
+        if job is None or job["status"] != "done" or job["spec"]["spec"]["workload"]["type"] != "ml.trials":
+            raise _fail(404, "There is no completed training run with that id.")
+        part = self.m.db.one("SELECT output FROM partitions WHERE job_id = ? AND idx = ? AND status = 'done'", (jid, trial - 1))
+        info = part["output"]["outputs"].get("checkpoint.bin") if part else None
+        if not info or not self.m.store.has(info["sha"]):
+            raise _fail(404, "This trial has no saved checkpoint.")
+        return await self._stream(request, info["sha"], 0, info["size"], filename=f"{jid}-trial-{trial}.bin")
+
     # ------------------------------------------------------------------ a computer working on a partition
     def _attempt(self, request):
         ip = self.c._check_blocked(request)
@@ -265,9 +280,11 @@ class EngineAPI:
             raise _fail(401, "This partition's sign-in isn't valid anymore. The attempt may have been cancelled or finished elsewhere.")
         return got
 
-    async def _stream(self, request, sha: str, start: int, end: int):
-        resp = web.StreamResponse(headers={"Content-Type": "application/octet-stream", "Content-Length": str(max(0, end - start)),
-                                           "Cache-Control": "no-store"})
+    async def _stream(self, request, sha: str, start: int, end: int, filename: str | None = None):
+        headers = {"Content-Type": "application/octet-stream", "Content-Length": str(max(0, end - start)), "Cache-Control": "no-store"}
+        if filename:
+            headers.update({"Content-Disposition": f'attachment; filename="{filename}"', "X-Content-Type-Options": "nosniff"})
+        resp = web.StreamResponse(headers=headers)
         await resp.prepare(request)
         async for chunk in self.m.store.stream_range(sha, start, end):
             await resp.write(chunk)
@@ -293,6 +310,12 @@ class EngineAPI:
 
     async def attempt_input(self, request):
         p, _a = self._attempt(request)
+        if p["input"]["kind"] == "items" and self.m.stage_row(p["stage_id"])["spec"]["workload"]["type"] == "ml.trials":
+            ref = self.m.db.job(p["job_id"])["spec"]["spec"]["inputs"]["dataset"]["ref"]
+            dataset = self.m.db.dataset(ref.split(":", 1)[1])
+            if dataset is None:
+                raise _fail(404, "The training dataset is missing.")
+            return await self._stream(request, dataset["sha"], 0, dataset["size"])
         if p["input"]["kind"] not in ("range", "artifact"):
             raise _fail(400, "This partition's input came with the task.")
         try:

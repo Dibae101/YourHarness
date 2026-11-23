@@ -1,5 +1,7 @@
 # JobSpec reference
 
+For local generation, regression and training trials, see the [AI workload guide](ai-workloads.md). These use the same job submission, planning and result APIs.
+
 A batch job is a JSON (or YAML, with PyYAML installed) document. The coordinator checks it and fills in every default before anything runs; a field that's wrong is named in the error, for example `spec.runtime.image: should be a container image pinned by its digest`. `harness job plan JOB.json` checks one and shows where it would run. How jobs run is in [engine.md](engine.md).
 
 ```json

@@ -34,7 +34,15 @@ def writes_records(wl: dict) -> bool:
 def make_op(wl: dict, ctx: dict | None, write: Callable[[dict], None] | None, *, bad: str = "fail", model: dict | None = None):
     """The operator for a workload. model: {"adapter", "path"} of a fetched model, for ml.evaluate."""
     t = wl["type"]
-    if t == "python.map":
+    if t == "ml.train":
+        from .training import TrainOp
+
+        return TrainOp(wl, bad)
+    if t == "llm.generate":
+        from .ollama import GenerateOp
+
+        return GenerateOp(wl, write)
+    if t in ("python.map", "ml.trials"):
         from .pyop import PythonOp
 
         return PythonOp(wl, ctx, write)

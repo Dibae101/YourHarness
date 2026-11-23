@@ -206,6 +206,7 @@ async function joinRemote(info) {
   // --workspace: one of your own computers offers its terminal to the pool too (Ubuntu via WSL or PowerShell on Windows).
   // A friend's computer never does; it allows agent tasks only if its owner ticked the box.
   const extra = friend ? (info.tasks ? ['--tasks', ...(info.commands ? ['--allow-commands'] : [])] : []) : ['--workspace'];
+  if (friend) extra.push(info.models ? '--share-models' : '--no-share-models');
   const agent = run(['agent', '--server', url, '--join', code, ...extra]);
   try {
     await waitFor(agent, /Joined the pool/, 25000);
@@ -216,8 +217,8 @@ async function joinRemote(info) {
   killAll(agent); // stop sharing with the old pool: its coordinator, if this app ran one, and its agent
   if (friend) {
     // a friend code works once, and the agent just used it, so the window shows this computer's status instead
-    writeCfg({ mode: 'remote', server: url, lending: true, tasks: !!info.tasks });
-    await showLending(url, !!info.tasks);
+    writeCfg({ mode: 'remote', server: url, lending: true, tasks: !!info.tasks, models: !!info.models });
+    await showLending(url, !!info.tasks, !!info.models);
   } else {
     writeCfg({ mode: 'remote', server: url });
     await showPool(url, code);
@@ -225,9 +226,9 @@ async function joinRemote(info) {
   return { ok: true };
 }
 
-async function showLending(url, tasks) {
+async function showLending(url, tasks, models) {
   poolUrl = url;
-  await win.loadFile(path.join(__dirname, 'pair.html'), { query: { lending: url, tasks: tasks ? '1' : '0' } });
+  await win.loadFile(path.join(__dirname, 'pair.html'), { query: { lending: url, tasks: tasks ? '1' : '0', models: models ? '1' : '0' } });
   setStatus();
 }
 
@@ -235,7 +236,7 @@ async function rejoinSaved(url) {
   const agent = run(['agent']); // reuses the sign-in saved on first join
   try { await waitFor(agent, /Joined the pool/, 20000); } catch { agent.kill(); return false; }
   const cfg = readCfg();
-  if (cfg.lending) await showLending(url, !!cfg.tasks);
+  if (cfg.lending) await showLending(url, !!cfg.tasks, !!cfg.models);
   else await showPool(url);
   return true;
 }
@@ -331,7 +332,8 @@ ipcMain.handle('pair', (e, info) => {
   const code = info && typeof info === 'object' ? String(info.code || '').trim() : '';
   if (!/^\d{4}$/.test(code) && !FRIEND_CODE.test(code)) return { error: 'Type the 4-digit join code, or a friend code like ABCD-EFGH-JKLM-NPQR.' };
   const tasks = FRIEND_CODE.test(code) && info.tasks === true;
-  return joinRemote({ address: String(info.address || ''), code, tasks, commands: tasks && info.commands === true });
+  return joinRemote({ address: String(info.address || ''), code, tasks, commands: tasks && info.commands === true,
+    models: FRIEND_CODE.test(code) && info.models === true });
 });
 ipcMain.handle('start-own', async (e) => {
   if (!fromApp(e)) return refused;

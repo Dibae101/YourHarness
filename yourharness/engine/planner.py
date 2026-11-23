@@ -24,7 +24,7 @@ from .partition import target_bytes
 DEFAULT_RATE = {"batch.aggregate": 25e6, "batch.groupby": 15e6, "batch.transform": 12e6, "python.map": 4e6, "ml.evaluate": 2e6,
                 "batch.join": 8e6}
 DEFAULT_ITEMS_PER_S = 20.0  # python.map over items: calls per second per slot
-ITEMS_RATE = {"tests.pytest": 1 / 20}  # a test shard holds about 20 s of tests (engine/testing.py)
+ITEMS_RATE = {"tests.pytest": 1 / 20, "llm.generate": 1 / 15, "ml.trials": 1 / 60}
 NETWORK_BPS = float(os.environ.get("HARNESS_NETWORK_BPS", 25e6))  # what the coordinator can send to other computers
 PART_OVERHEAD_S = 0.4  # starting a worker process and fetching its input
 MIN_DISTRIBUTED_BYTES = 16 * 2**20
@@ -61,6 +61,13 @@ class Planner:
         if not d.sharing or not info.get("slots"):
             return "isn't sharing its processor"
         workloads = [s["workload"] for s in (spec.get("stages") or [{"workload": wl}])]
+        if wl["type"] == "llm.generate":
+            selected = {"name": wl["model"], "digest": wl["digest"]}
+            if d.kind != "agent" or selected not in info.get("localModels", []):
+                return f"is not sharing the installed Ollama model {wl['model']} at revision {wl['digest'][:12]}"
+        accelerator = spec.get("resources", {}).get("accelerator")
+        if accelerator and not any(a.get("kind") == accelerator for a in info.get("accelerators", [])):
+            return f"has no detected {accelerator.upper()} GPU"
         for t in dict.fromkeys(w["type"] for w in workloads):
             if t not in info.get("ops", []):
                 return f"can't run {t}" + (" (browser tabs run totals and group-bys)" if d.kind == "browser" else " (it runs an older YourHarness)")
@@ -109,9 +116,11 @@ class Planner:
         for d in devices:
             why = self.eligible({**job, "plan": {}}, ds, d)
             slots = max(1, min(int((getattr(d, "engine_info", None) or {}).get("slots") or 1), max(1, d.threads)))
+            if wl["type"] == "llm.generate" or spec.get("resources", {}).get("accelerator"):
+                slots = 1  # one prompt or GPU trial at a time per host for this job
             per_slot, measured = self.rate(d.id, wl["type"], items)
             row = {"id": d.id, "name": d.name, "owned": d.owned, "eligible": why is None, "why": why, "slots": slots,
-                   "rate": round(per_slot * slots, 1), "measured": measured, "local": bool(d.coordinator)}
+                   "rate": per_slot * slots, "measured": measured, "local": bool(d.coordinator)}
             rows.append(row)
             if why is None:
                 ok.append((d, row))
@@ -134,11 +143,13 @@ class Planner:
         # the computer to keep it on: the coordinator's own, else the fastest of your own
         own = [x for x in ok if x[0].owned]
         local_d, local_row = max(own or ok, key=lambda x: (x[1]["local"], x[1]["rate"]))
-        net = 0 if items else 1  # items arrive with the task; byte ranges cross the network
         t_local = PART_OVERHEAD_S + units / max(local_row["rate"], 1e-9)
         here = sum(r["rate"] for d, r in ok if r["local"])
         away = sum(r["rate"] for d, r in ok if not r["local"])
-        away_eff = min(away, NETWORK_BPS) if net else away
+        bytes_per_unit = ds["size"] if wl["type"] == "ml.trials" else 0 if items else 1
+        away_eff = min(away, NETWORK_BPS / bytes_per_unit) if bytes_per_unit else away
+        if wl["type"] == "ml.trials" and not local_row["local"]:
+            t_local = max(t_local, units * bytes_per_unit / NETWORK_BPS)
         total_rate = max(here + away_eff, 1e-9)
         slots = sum(r["slots"] for _, r in ok)
         t_dist = 1.0 + units / total_rate + PART_OVERHEAD_S * math.ceil(max(1, units / max(1, self._target(spec, ds, slots, total_rate / slots))) / max(1, slots))
@@ -153,6 +164,9 @@ class Planner:
         elif len(ok) == 1:
             decision = "RUN_LOCAL"
             reasons.append(f"Only {local_row['name']} can run it.")
+        elif items and units == 1:
+            decision = "RUN_LOCAL"
+            reasons.append(f"There is one item to run, so it stays on {local_row['name']}.")
         elif not items and units < MIN_DISTRIBUTED_BYTES:
             decision = "RUN_LOCAL"
             reasons.append(f"The input is small ({units / 2**20:.1f} MB): sending it to other computers would take longer than the work.")

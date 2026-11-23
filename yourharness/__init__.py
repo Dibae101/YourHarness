@@ -4,4 +4,4 @@ Importing this package pulls in only the standard library, so the workspace
 SDK (``from yourharness import pool``) works from any Python 3.10+.
 """
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"

@@ -2,7 +2,7 @@
 
 The job engine runs one job over many devices and returns one checked result. You say what to compute over which input; the engine cuts the input into partitions, gives each partition to a computer or browser tab that may and can run it, retries what gets lost, combines the accepted partial results, and checks the combination before it calls the job done.
 
-It is on the `feat/job-engine` branch (stacked on `feat/agent-tasks`). The older compute jobs (`harness run primes ...`, `pool.map`) still work as before; agent tasks are described in [agent-tasks.md](agent-tasks.md). Every field of a job is in [job-spec.md](job-spec.md); the trust rules are in [security.md](security.md); setting up each kind of device is in [devices.md](devices.md); what the blueprint asked for and what is built is in [blueprint-status.md](blueprint-status.md).
+The older compute jobs (`harness run primes ...`, `pool.map`) still work as before; agent tasks are described in [agent-tasks.md](agent-tasks.md). Every field of a job is in [job-spec.md](job-spec.md); the trust rules are in [security.md](security.md); setting up each kind of device is in [devices.md](devices.md); what the blueprint asked for and what is built is in [blueprint-status.md](blueprint-status.md).
 
 ## What you can run
 
@@ -13,6 +13,9 @@ It is on the `feat/job-engine` branch (stacked on `feat/agent-tasks`). The older
 | `batch.transform` | Filter, select, rename, rolling mean; writes records | Your computers and friends' computers |
 | `batch.join` | Join two datasets on key fields (inner or left), through hashed buckets | Your computers and friends' computers |
 | `python.map` | Your own function over items, a parameter grid, or a dataset's records | Your computers only |
+| `llm.generate` | Independent text prompts on an installed Ollama model pinned by manifest digest | Your native computers and friends who opt in on both sides |
+| `ml.train` | Fit linear or ridge regression across numeric data partitions | Your computers and friends processing shareable data |
+| `ml.trials` | Run custom training code per parameter set, with the full training dataset | Your own computers with the selected runtime and hardware |
 | `ml.evaluate` | Score a model (Python or TorchScript) on labeled records: accuracy, per-class precision/recall/F1, confusion matrix | Your computers only |
 | `tests.pytest` | A pytest suite in shards (`harness test`) | Your computers only |
 

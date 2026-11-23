@@ -120,6 +120,7 @@
   const WORKLOAD = {
     'batch.aggregate': 'Batch job', 'batch.groupby': 'Batch job', 'batch.transform': 'Batch job', 'batch.join': 'Batch job',
     'python.map': 'Your code', 'ml.evaluate': 'Model evaluation', 'tests.pytest': 'Test run',
+    'ml.train': 'Regression', 'ml.trials': 'Training trials', 'llm.generate': 'Local LLM',
   };
   const ENG_STATE = { running: 'Running', reducing: 'Combining the results', verifying: 'Checking the results', needs_approval: 'Waiting for your approval',
     done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };
@@ -197,11 +198,23 @@
         <button class="btn ghost small" type="button" data-open="devices">Add a device</button>
       </div>
       ${H.status ? `<p class="hm-status error" role="alert">${esc(H.status)}</p>` : ''}
+      ${H.caps?.includes('submit') ? `<section class="hm-sec" aria-labelledby="hm-work-h">
+        <h2 id="hm-work-h">Start a workload</h2>
+        <div class="hm-workloads">
+          <button type="button" data-open="batch" data-workload="llm.generate"><b>Local LLM</b><span>Send prompts to an installed model</span></button>
+          <button type="button" data-open="batch" data-workload="ml.train"><b>Train a model</b><span>Fit regression weights across devices</span></button>
+          <button type="button" data-open="batch" data-workload="ml.trials"><b>Training experiments</b><span>Train your own model per parameter set</span></button>
+          <button type="button" data-open="batch" data-workload="ml.evaluate"><b>Model evaluation</b><span>Score predictions against labeled data</span></button>
+          <button type="button" data-open="agents" data-new-run><b>Run an agent</b><span>Give a coding agent a repository task</span></button>
+          <button type="button" data-open="batch" data-workload="batch.aggregate"><b>Process data</b><span>Aggregate, reshape, group or join records</span></button>
+          <button type="button" data-open="batch" data-workload="python.map"><b>Custom Python</b><span>Apply a function to records or items</span></button>
+          <a href="/reviews.html"><b>Review Studio</b><span>Render and assemble a video preview</span></a>
+        </div>
+      </section>` : ''}
       <section class="hm-sec" aria-labelledby="hm-run-h">
         <h2 id="hm-run-h">Running now</h2>
         ${live.length ? `<ul class="hm-list">${live.map(liveRow).join('')}</ul>`
-          : `<p class="hm-empty">Nothing is running. Start work from <button class="linkish" type="button" data-open="batch">Batch</button>,
-             <button class="linkish" type="button" data-open="agents">Agents</button> or <code>harness test</code>.</p>`}
+          : '<p class="hm-empty">Nothing is running.</p>'}
         ${recent.length ? `<h3 class="hm-sub-h">Finished recently</h3><ul class="hm-recent">${recent.map(recentRow).join('')}</ul>` : ''}
       </section>
       <section class="hm-sec" aria-labelledby="hm-dev-h">

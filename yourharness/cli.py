@@ -130,6 +130,10 @@ def cmd_agent(a) -> int:
     if a.join:
         try:
             saved.update(join(a.join, a.name or saved.get("name") or _default_agent_name(), a.server))
+            saved.pop("share_models", None)  # consent belongs to this pool membership
+            if "submit" not in (saved.get("caps") or []):
+                for key in ("workspace", "tasks", "allow_commands"):
+                    saved.pop(key, None)
         except SignInError as e:
             print(e, file=sys.stderr)
             return 1
@@ -146,6 +150,8 @@ def cmd_agent(a) -> int:
         saved["tasks"] = bool(a.tasks or a.allow_commands)
     if a.allow_commands or a.no_tasks:
         saved["allow_commands"] = bool(a.allow_commands)
+    if a.share_models is not None:
+        saved["share_models"] = a.share_models
     if a.task_slots:
         saved["task_slots"] = max(1, min(16, a.task_slots))
     cfg_path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
@@ -157,7 +163,7 @@ def cmd_agent(a) -> int:
     cfg = AgentConfig(server=saved["server"], token=saved["token"], name=saved.get("name") or _default_agent_name(),
                       threads=threads, sharing=not a.no_share, workspace=bool(saved.get("workspace")), home=home,
                       tasks=saved.get("tasks"), task_slots=int(saved.get("task_slots") or 1),
-                      allow_commands=bool(saved.get("allow_commands")), owned=("submit" in caps) if isinstance(caps, list) else None, ca=ca)
+                      allow_commands=bool(saved.get("allow_commands")), share_models=saved.get("share_models"), owned=("submit" in caps) if isinstance(caps, list) else None, ca=ca)
     _setup_logging(a.verbose)
     _stop_cleanly_on_sigterm()
     print(f"Connecting to {cfg.server} as {cfg.name}...", flush=True)
@@ -572,6 +578,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--allow-commands", action="store_true",
                    help="on a friend's computer, also allow tasks that run the pool owner's commands (the Command agent, "
                         "setup and check commands, AI agents allowed to run commands); implies --tasks")
+    s.add_argument("--share-models", action=argparse.BooleanOptionalAction, default=None,
+                   help="lend installed Ollama text models to this pool (default on your own computers, off for friends)")
     s.add_argument("--task-slots", type=int, help="agent tasks to run at the same time (default 1)")
     s.add_argument("--ca", metavar="PEM", help="for an HTTPS pool whose certificate comes from a private authority (such as mkcert): "
                                               "that authority's certificate, kept for later starts")

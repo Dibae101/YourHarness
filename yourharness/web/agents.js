@@ -674,6 +674,7 @@
 
   let built = false;
   window.YHAgents = {
+    newRun() { if (built) showTab('new'); },
     opened() {
       if (!built) { build(); built = true; showTab(A.tab); if (window.YH && window.YH.devices) onDevices(window.YH.devices); }
       load();

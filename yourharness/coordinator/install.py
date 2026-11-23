@@ -95,6 +95,8 @@ if ($code -match '^[0-9]{4}$') {
     $more = Read-Host 'Also allow commands? The owner could then run commands of their choosing here (tests, builds, scripts), not only an AI that edits files. Type yes to allow'
     if ($more.Trim().ToLower() -eq 'yes') { $flags = '--tasks --allow-commands' }
   }
+  $models = Read-Host 'Lend installed Ollama text models in Ubuntu to this pool for prompts? Type yes to allow'
+  if ($models.Trim().ToLower() -eq 'yes') { $flags += ' --share-models' }
 } else {
   Write-Host 'That is not a join code. Type the 4 digits, or the friend code you were sent.'
   return

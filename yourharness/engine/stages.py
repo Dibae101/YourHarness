@@ -186,8 +186,18 @@ def combine(mgr, job: dict, stage: dict, parts: list[dict], first_stage_result: 
                 if name != "state.json" and not mgr.store.has(o["sha"]):
                     raise ValueError(f"a bucket file of partition {p['idx'] + 1} is missing from storage")
         checks.append("Every bucket file was stored under the digest its computer reported.")
-    if wl["type"] == "ml.evaluate":
+    if wl["type"] in ("ml.train", "ml.trials", "ml.evaluate"):
         result["provenance"] = mgr.provenance(job)
+    if wl["type"] == "ml.trials":
+        result["checkpoints"] = []
+        for p in parts:
+            checkpoint = p["output"]["outputs"].get("checkpoint.bin")
+            if checkpoint:
+                if not mgr.store.has(checkpoint["sha"]):
+                    raise ValueError(f"The checkpoint for trial {p['idx'] + 1} is missing.")
+                result["checkpoints"].append({"trial": p["idx"] + 1, "sha256": checkpoint["sha"], "bytes": checkpoint["size"],
+                                              "url": f"/api/engine/jobs/{job['id']}/checkpoints/{p['idx'] + 1}"})
+    if wl["type"] == "ml.evaluate":
         result["latency"] = mgr.latency(parts)
     if wl["type"] == "tests.pytest":  # timings and failure messages, beside the checked outcomes
         from .testing import report

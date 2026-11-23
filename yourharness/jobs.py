@@ -32,8 +32,26 @@ import textwrap
 
 from .client import Client, PoolError, setup_text
 
-__all__ = ["dataset", "model", "aggregate", "group_by", "join", "transform", "map_items", "map_records", "evaluate", "where", "run", "plan",
-           "PoolError", "SetupNeeded"]
+__all__ = [
+    "PoolError",
+    "SetupNeeded",
+    "aggregate",
+    "dataset",
+    "evaluate",
+    "generate",
+    "group_by",
+    "join",
+    "local_models",
+    "map_items",
+    "map_records",
+    "model",
+    "plan",
+    "run",
+    "train",
+    "train_trials",
+    "transform",
+    "where",
+]
 API_VERSION = "yourharness.dev/v1alpha1"
 
 _client: Client | None = None
@@ -57,6 +75,49 @@ def model(path, name: str | None = None, adapter: str | None = None) -> str:
     a .zip with model.py at its top and the files it reads, or a TorchScript .pt (adapter="torchscript").
     Returns its reference, like "model:m1a2b3c4"."""
     return client().add_model(path, name=name, adapter=adapter)["ref"]
+
+
+def local_models(*, friends: bool = False) -> list[dict]:
+    """Installed text models on connected, sharing computers, with their hosts and revision."""
+    models = {}
+    for d in client().request("GET", "/api/engine")["devices"]:
+        if d["kind"] != "agent" or not d.get("available") or (not friends and not d["owned"]):
+            continue
+        for m in (d.get("engine") or {}).get("localModels", []):
+            entry = models.setdefault((m["name"], m["digest"]), {**m, "devices": []})
+            entry["devices"].append(d["name"])
+    return [models[key] for key in sorted(models)]
+
+
+def generate(model: str, prompts, *, digest: str | None = None, max_tokens: int = 256, friends: bool = False, **spec) -> list[dict]:
+    """Run one local completion per prompt. Set friends=True to share the prompts with opted-in friends."""
+    import json
+
+    if digest is None:
+        matches = [m for m in local_models(friends=friends) if m["name"] == model]
+        if len(matches) != 1:
+            raise PoolError("Select an installed name and revision from jobs.local_models().")
+        digest = matches[0]["digest"]
+    wl = {"type": "llm.generate", "model": model, "digest": digest, "maxTokens": max_tokens}
+    spec["security"] = {"allowedTrust": "owned-and-friends" if friends else "owned-only"}
+    inputs = {"items": [prompts] if isinstance(prompts, str) else list(prompts)}
+    raw = run(_job(wl, inputs, f"Generate with {model}", **spec))
+    return [json.loads(line) for line in raw.splitlines() if line]
+
+
+def train(ds, *, features, target: str, ridge: float = 0, name: str | None = None, **spec) -> dict:
+    """Fit numeric CSV or JSONL rows. Coefficients follow the input feature order."""
+    wl = {"type": "ml.train", "features": [features] if isinstance(features, str) else list(features), "target": target, "ridge": ridge}
+    return run(_job(wl, _ref(ds), name or f"Train on {target}", **spec))
+
+
+def train_trials(fn, ds, grid: dict, *, name: str | None = None, python: str | None = None, requirements=None,
+                 manifest: bool = False, **spec) -> list | dict:
+    """Train once per parameter set. manifest=True includes provenance and links to files written to ctx['checkpointPath']."""
+    wl = {"type": "ml.trials", "code": _source(fn), "function": fn.__name__}
+    spec, opts = _setup_args(_runtime(spec, python, requirements))
+    result = run(_job(wl, {**_ref(ds), "grid": grid}, name or fn.__name__, **spec), **opts)
+    return result if manifest else result["value"]
 
 
 def evaluate(model_ref: str, ds, *, label: str = "label", features=None, id: str | None = None, batch: int = 64,  # noqa: A002
