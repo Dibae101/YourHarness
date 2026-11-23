@@ -2,11 +2,12 @@
 // On launch it looks for a pool on the network. If one answers, you enter its 4-digit code once;
 // if none does, it starts a pool on this computer. Either way this computer shares in the
 // background (menu bar or tray) and the workspace opens in this window.
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, clipboard } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, clipboard, powerSaveBlocker, powerMonitor } = require('electron');
 const MAC = process.platform === 'darwin';
 const { spawn, execFile } = require('child_process');
 const dgram = require('dgram');
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -31,6 +32,31 @@ const readCfg = () => { try { return JSON.parse(fs.readFileSync(cfgPath(), 'utf8
 const writeCfg = (c) => { fs.mkdirSync(dataDir(), { recursive: true }); fs.writeFileSync(cfgPath(), JSON.stringify(c)); };
 const log = (...a) => { try { fs.appendFileSync(path.join(dataDir(), 'app.log'), `${new Date().toISOString()} ${a.join(' ')}\n`); } catch { /* no log */ } };
 
+// ---------------------------------------------------------------- staying awake while working
+// While this computer works for the pool (a batch partition, an agent task, compute pieces) the
+// app asks the system not to sleep, so the work survives the screen locking. The screen itself
+// may still turn off. By default only on mains power; the tray menu changes that.
+const powerPath = () => path.join(dataDir(), 'power.json');
+const AWAKE_MODES = { plugged: 'Keep this computer awake while it works, when plugged in', always: 'Keep it awake while it works, on battery too',
+  never: 'Let it sleep as usual' };
+function awakeMode() {
+  try { const m = JSON.parse(fs.readFileSync(powerPath(), 'utf8')).keepAwake; return AWAKE_MODES[m] ? m : 'plugged'; } catch { return 'plugged'; }
+}
+let busy = false;
+let blocker = null;
+function applyPower() {
+  const mode = awakeMode();
+  const onBattery = typeof powerMonitor.isOnBatteryPower === 'function' && powerMonitor.isOnBatteryPower();
+  const want = busy && (mode === 'always' || (mode === 'plugged' && !onBattery));
+  if (want && blocker === null) { blocker = powerSaveBlocker.start('prevent-app-suspension'); log('power', 'keeping the computer awake while it works'); }
+  if (!want && blocker !== null) { powerSaveBlocker.stop(blocker); blocker = null; log('power', 'the computer may sleep again'); }
+  setStatus();
+}
+function setAwakeMode(mode) {
+  try { fs.mkdirSync(dataDir(), { recursive: true }); fs.writeFileSync(powerPath(), JSON.stringify({ keepAwake: mode })); } catch { /* not saved */ }
+  applyPower();
+}
+
 // ---------------------------------------------------------------- backend program
 function backendPath() {
   const exe = WIN ? 'harness.exe' : 'harness';
@@ -47,12 +73,21 @@ function run(args, env = {}) {
   if (!exe) throw new Error('The YourHarness engine is missing from this app. Reinstall it.');
   const child = spawn(exe, args, {
     windowsHide: true,
-    env: { ...process.env, ...env, YOURHARNESS_HOME: path.join(dataDir(), 'agent'), PYTHONUNBUFFERED: '1' },
+    env: { ...process.env, ...env, YOURHARNESS_HOME: path.join(dataDir(), 'agent'), PYTHONUNBUFFERED: '1', YH_BUSY_LINES: '1' },
   });
   children.add(child);
-  child.on('exit', () => children.delete(child));
+  child.on('exit', () => { children.delete(child); if (!children.size && busy) { busy = false; applyPower(); } });
   const tail = [];
-  const feed = (d) => { for (const line of String(d).split(/\r?\n/)) if (line) { tail.push(line); if (tail.length > 40) tail.shift(); log(args[0], line); } };
+  const feed = (d) => {
+    for (const line of String(d).split(/\r?\n/)) {
+      if (!line) continue;
+      const m = /^::yh-busy::([01])$/.exec(line.trim()); // the agent says when it starts and stops working for the pool
+      if (m) { busy = m[1] === '1'; applyPower(); continue; }
+      tail.push(line);
+      if (tail.length > 40) tail.shift();
+      log(args[0], line);
+    }
+  };
   child.stdout.on('data', feed);
   child.stderr.on('data', feed);
   child.tail = tail;
@@ -106,7 +141,8 @@ function discover(ms = 1500) {
 // Resolves { ok: true } or { ok: false, reason } so the screen can say what to try.
 function check(url) {
   return new Promise((resolve) => {
-    const req = http.get(url + '/install.sh', { timeout: 4000 }, (res) => { res.resume(); resolve({ ok: res.statusCode === 200, reason: `It answered with status ${res.statusCode}, so it may not be a YourHarness pool.` }); });
+    const client = url.startsWith('https:') ? https : http;
+    const req = client.get(url + '/install.sh', { timeout: 4000 }, (res) => { res.resume(); resolve({ ok: res.statusCode === 200, reason: `It answered with status ${res.statusCode}, so it may not be a YourHarness pool.` }); });
     req.on('error', (e) => resolve({ ok: false, reason: e.code || e.message }));
     req.on('timeout', () => { req.destroy(); resolve({ ok: false, reason: 'ETIMEDOUT' }); });
   });
@@ -152,19 +188,25 @@ async function startOwn() {
 }
 
 function parseAddress(text) {
-  const m = /^(?:https?:\/\/)?([^\/:\s]+)(?::(\d{1,5}))?\/?$/.exec(String(text || '').trim());
-  return m ? { host: m[1], port: Number(m[2] || 8420) } : null;
+  const m = /^(?:(https?):\/\/)?([^\/:\s]+)(?::(\d{1,5}))?\/?$/.exec(String(text || '').trim());
+  if (!m) return null;
+  const scheme = m[1] || 'http';
+  return { scheme, host: m[2], port: Number(m[3] || (scheme === 'https' ? 443 : 8420)) };
 }
 
 async function joinRemote(info) {
   const addr = info.address ? parseAddress(info.address) : info;
   if (!addr || !addr.host) return { error: 'That address does not look right. Use something like 192.168.1.51:8420.' };
   const { host, port, code } = { ...addr, code: info.code };
-  const url = `http://${host}:${port}`;
+  const scheme = addr.scheme || 'http';
+  const url = `${scheme}://${host}:${port}`;
   const probe = await check(url);
   if (!probe.ok) return { error: explain(host, port, probe.reason) };
-  // --workspace: this computer offers its own terminal to the pool too (Ubuntu via WSL or PowerShell on Windows)
-  const agent = run(['agent', '--server', url, '--join', code, '--workspace']);
+  const friend = FRIEND_CODE.test(code);
+  // --workspace: one of your own computers offers its terminal to the pool too (Ubuntu via WSL or PowerShell on Windows).
+  // A friend's computer never does; it allows agent tasks only if its owner ticked the box.
+  const extra = friend ? (info.tasks ? ['--tasks', ...(info.commands ? ['--allow-commands'] : [])] : []) : ['--workspace'];
+  const agent = run(['agent', '--server', url, '--join', code, ...extra]);
   try {
     await waitFor(agent, /Joined the pool/, 25000);
   } catch (e) {
@@ -172,15 +214,29 @@ async function joinRemote(info) {
     return { error: e.message.includes('code') || e.message.includes('join') ? e.message : `Could not join. ${e.message}` };
   }
   killAll(agent); // stop sharing with the old pool: its coordinator, if this app ran one, and its agent
-  writeCfg({ mode: 'remote', server: url });
-  await showPool(url, code);
+  if (friend) {
+    // a friend code works once, and the agent just used it, so the window shows this computer's status instead
+    writeCfg({ mode: 'remote', server: url, lending: true, tasks: !!info.tasks });
+    await showLending(url, !!info.tasks);
+  } else {
+    writeCfg({ mode: 'remote', server: url });
+    await showPool(url, code);
+  }
   return { ok: true };
+}
+
+async function showLending(url, tasks) {
+  poolUrl = url;
+  await win.loadFile(path.join(__dirname, 'pair.html'), { query: { lending: url, tasks: tasks ? '1' : '0' } });
+  setStatus();
 }
 
 async function rejoinSaved(url) {
   const agent = run(['agent']); // reuses the sign-in saved on first join
   try { await waitFor(agent, /Joined the pool/, 20000); } catch { agent.kill(); return false; }
-  await showPool(url);
+  const cfg = readCfg();
+  if (cfg.lending) await showLending(url, !!cfg.tasks);
+  else await showPool(url);
   return true;
 }
 
@@ -214,11 +270,15 @@ function buildMenu() {
 function setStatus() {
   if (!tray) return;
   tray.setToolTip(poolUrl ? `YourHarness: sharing with ${poolUrl}` : 'YourHarness');
+  const mode = awakeMode();
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open YourHarness', click: showWindow },
     { label: 'Join another pool…', click: showPairPage },
     { label: poolUrl ? `Pool: ${poolUrl}` : 'Not connected', enabled: false },
+    { label: busy ? (blocker !== null ? 'Working for the pool (staying awake)' : 'Working for the pool') : 'Not working on anything', enabled: false },
     { label: 'Copy pool address', enabled: !!poolUrl, click: () => clipboard.writeText(poolUrl) },
+    { type: 'separator' },
+    ...Object.entries(AWAKE_MODES).map(([k, label]) => ({ label, type: 'radio', checked: mode === k, click: () => setAwakeMode(k) })),
     { type: 'separator' },
     { label: 'Quit (stops sharing this computer)', click: () => { quitting = true; app.quit(); } },
   ]));
@@ -263,10 +323,15 @@ const fromApp = (e) => { try { return new URL(e.senderFrame.url).protocol === 'f
 const refused = { error: 'Only the YourHarness app itself can do that.' };
 
 ipcMain.handle('servers', (e) => (fromApp(e) ? discover() : []));
+// A friend code made in the Agents app: joins as a lender, which never controls the pool.
+const FRIEND_CODE = /^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$/i;
+
 ipcMain.handle('pair', (e, info) => {
   if (!fromApp(e)) return refused;
-  if (!info || typeof info !== 'object' || !/^\d{4}$/.test(String(info.code || ''))) return { error: 'The join code is 4 digits.' };
-  return joinRemote({ address: String(info.address || ''), code: String(info.code) });
+  const code = info && typeof info === 'object' ? String(info.code || '').trim() : '';
+  if (!/^\d{4}$/.test(code) && !FRIEND_CODE.test(code)) return { error: 'Type the 4-digit join code, or a friend code like ABCD-EFGH-JKLM-NPQR.' };
+  const tasks = FRIEND_CODE.test(code) && info.tasks === true;
+  return joinRemote({ address: String(info.address || ''), code, tasks, commands: tasks && info.commands === true });
 });
 ipcMain.handle('start-own', async (e) => {
   if (!fromApp(e)) return refused;
@@ -279,6 +344,8 @@ app.whenReady().then(async () => {
   const icon = nativeImage.createFromPath(path.join(__dirname, 'tray.png')).resize({ width: 18, height: 18 });
   tray = new Tray(icon);
   tray.on('click', showWindow);
+  powerMonitor.on('on-ac', applyPower);
+  powerMonitor.on('on-battery', applyPower);
   setStatus();
   try { await boot(); } catch (e) { log('boot failed', e.stack || e.message); win.loadFile(path.join(__dirname, 'pair.html')); }
 });

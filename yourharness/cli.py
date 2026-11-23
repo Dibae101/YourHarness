@@ -3,10 +3,13 @@
     harness serve                          start the coordinator
     harness agent --join '<link>'          join this computer as an agent
     harness agent --workspace              ...and host the shared Linux workspace
+    harness agent --tasks                  ...and allow agent tasks (needed on a friend's computer)
     harness devices | jobs                 see what's in the pool
     harness run primes --below 1e9         run a job and print the result
     harness run python job.py --pieces 64  run your own run(chunk, total) on every agent
     harness files [ls|put|get|rm]          use the shared folder
+    harness dataset add sales.jsonl        add a dataset for batch jobs
+    harness job run job.json               run a batch job (a JobSpec) and print its result
 """
 
 from __future__ import annotations
@@ -26,6 +29,24 @@ def _setup_logging(verbose: bool) -> None:
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
+
+
+def _stop_cleanly_on_sigterm() -> None:
+    """Treat SIGTERM (how the desktop app and most service managers stop us) like Ctrl-C.
+
+    Without this, Python exits at once, and an agent task's AI CLI started in its own
+    process group would keep running, and spending, on its own.
+    """
+    import signal
+
+    def handler(signum, frame):
+        raise KeyboardInterrupt
+
+    if hasattr(signal, "SIGTERM"):
+        try:
+            signal.signal(signal.SIGTERM, handler)
+        except (ValueError, OSError):  # not the main thread
+            pass
 
 
 def _number(text: str) -> int:
@@ -51,6 +72,12 @@ def cmd_serve(a) -> int:
         stale_s=float(os.environ.get("HARNESS_STALE_S", 20)),
         chunk_timeout_s=float(os.environ.get("CHUNK_TIMEOUT_S", 300)),
     )
+    cert, key = a.tls_cert or os.environ.get("HARNESS_TLS_CERT"), a.tls_key or os.environ.get("HARNESS_TLS_KEY")
+    if cert or key:
+        if not (cert and Path(cert).is_file() and (key is None or Path(key).is_file())):
+            print("--tls-cert needs a certificate file (PEM), and --tls-key its key unless the certificate file holds both.", file=sys.stderr)
+            return 1
+        cfg.tls_cert, cfg.tls_key = str(Path(cert).resolve()), str(Path(key).resolve()) if key else None
     if a.new_join_link:
         Store(cfg.data_dir).rotate_join_token()
         print("Made a new join link. Devices that already joined stay signed in; the old link stops working.")
@@ -58,6 +85,7 @@ def cmd_serve(a) -> int:
         Store(cfg.data_dir).rotate_lend_token()
         print("Made a new lend link. Computers already lending stay signed in; the old link stops working.")
     _setup_logging(a.verbose)
+    _stop_cleanly_on_sigterm()
     try:
         asyncio.run(serve(cfg, public_url=a.public_url, show_qr=not a.no_qr and not os.environ.get("NO_QR"), local_agent=not a.no_local_agent))
     except KeyboardInterrupt:
@@ -82,8 +110,23 @@ def cmd_agent(a) -> int:
 
     home = default_home()
     home.mkdir(parents=True, exist_ok=True)
+    if a.activity:
+        from .agent.activity import describe, read
+
+        recs = read(home, 500)
+        print("\n".join(describe(r) for r in recs) if recs else f"Nothing recorded yet ({home / 'activity.jsonl'}).")
+        return 0
+    if a.cleanup:
+        return _agent_cleanup(home)
     cfg_path = home / "agent.json"
     saved = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    if a.ca:
+        if not Path(a.ca).is_file():
+            print(f"There's no certificate file at {a.ca}.", file=sys.stderr)
+            return 1
+        saved["ca"] = str(Path(a.ca).resolve())
+    if saved.get("ca"):  # an HTTPS pool with a private authority: everything this agent starts trusts it too
+        os.environ["HARNESS_CA_FILE"] = saved["ca"]
     if a.join:
         try:
             saved.update(join(a.join, a.name or saved.get("name") or _default_agent_name(), a.server))
@@ -99,19 +142,51 @@ def cmd_agent(a) -> int:
         saved["threads"] = a.threads
     if a.workspace or a.no_workspace:
         saved["workspace"] = bool(a.workspace)
+    if a.tasks or a.no_tasks or a.allow_commands:
+        saved["tasks"] = bool(a.tasks or a.allow_commands)
+    if a.allow_commands or a.no_tasks:
+        saved["allow_commands"] = bool(a.allow_commands)
+    if a.task_slots:
+        saved["task_slots"] = max(1, min(16, a.task_slots))
     cfg_path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
     os.chmod(cfg_path, 0o600)
 
     threads = int(saved.get("threads") or max(1, (os.cpu_count() or 2) - 1))
+    caps = saved.get("caps")
+    ca = saved.get("ca") if saved.get("ca") and Path(saved["ca"]).is_file() else None
     cfg = AgentConfig(server=saved["server"], token=saved["token"], name=saved.get("name") or _default_agent_name(),
-                      threads=threads, sharing=not a.no_share, workspace=bool(saved.get("workspace")), home=home)
+                      threads=threads, sharing=not a.no_share, workspace=bool(saved.get("workspace")), home=home,
+                      tasks=saved.get("tasks"), task_slots=int(saved.get("task_slots") or 1),
+                      allow_commands=bool(saved.get("allow_commands")), owned=("submit" in caps) if isinstance(caps, list) else None, ca=ca)
     _setup_logging(a.verbose)
+    _stop_cleanly_on_sigterm()
     print(f"Connecting to {cfg.server} as {cfg.name}...", flush=True)
     try:
         return asyncio.run(Agent(cfg).run())
     except KeyboardInterrupt:
         print("\nStopped the agent.")
         return 0
+
+
+def _agent_cleanup(home: Path) -> int:
+    """harness agent --cleanup: delete what pools left on this computer, and its sign-in (the agent must be stopped)."""
+    import asyncio
+
+    from .agent.activity import ActivityLog, cleanup
+    from .runtime.oci import OciManager
+
+    oci = OciManager(home, lambda m: None)
+
+    async def images() -> list[str]:
+        await oci.detect()
+        return await oci.forget()
+
+    removed = asyncio.run(images())
+    gone = cleanup(home)
+    what = ", ".join(gone + removed) or "nothing was left"
+    ActivityLog(home, "this computer").add({"kind": "pool", "what": f"cleaned up: {what}"})
+    print(f"Deleted from {home}: {what}. The activity record stays (harness agent --activity); join again with a link or code.")
+    return 0
 
 
 # ---------------------------------------------------------------------- client commands
@@ -256,6 +331,210 @@ def cmd_pool(a) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------- batch jobs (the job engine)
+def _size(n) -> str:
+    if n is None:
+        return ""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return ""
+
+
+def cmd_dataset(a) -> int:
+    c = _client()
+    if a.action in (None, "ls"):
+        rows = c.datasets()
+        if not rows:
+            print("No datasets yet. Add one with: harness dataset add FILE")
+        for d in rows:
+            share = "shareable" if d["classification"] == "shareable" else "private"
+            print(f"{d['ref']}  {d['format']:<5}  {_size(d['size']):>9}  {d.get('lines') or 0:>10,} lines  {share:<9}  {d['name']}")
+    elif a.action == "add":
+        if not a.args:
+            print("Name the file: harness dataset add FILE [--format jsonl|csv|text] [--shareable]", file=sys.stderr)
+            return 1
+        for p in a.args:
+            d = c.add_dataset(p, name=a.name, fmt=a.format, classification="shareable" if a.shareable else None)
+            print(f"Added {d['ref']}: {d['name']}, {_size(d['size'])}, {d.get('lines') or 0:,} lines.")
+    elif a.action == "import":
+        if len(a.args) != 2 or a.args[0] not in ("shared", "pool"):
+            print("Use: harness dataset import shared|pool PATH", file=sys.stderr)
+            return 1
+        d = c.import_dataset(a.args[0], a.args[1], format=a.format, classification="shareable" if a.shareable else None)
+        print(f"Added {d['ref']}: {d['name']}, {_size(d['size'])}.")
+    elif a.action == "rm":
+        for ref in a.args:
+            c.delete_dataset(ref.split(":", 1)[-1])
+            print(f"Deleted {ref}.")
+    return 0
+
+
+def cmd_model(a) -> int:
+    c = _client()
+    if a.action in (None, "ls"):
+        rows = c.models()
+        if not rows:
+            print("No models yet. Add one with: harness model add model.py")
+        for m in rows:
+            print(f"{m['ref']}  {m['adapter']:<11}  {_size(m['size']):>9}  sha256 {m['sha'][:12]}…  {m['name']}")
+    elif a.action == "add":
+        if not a.args:
+            print("Name the file: harness model add model.py|model.zip|model.pt [--adapter python|torchscript]", file=sys.stderr)
+            return 1
+        for p in a.args:
+            m = c.add_model(p, name=a.name, adapter=a.adapter)
+            print(f"Added {m['ref']}: {m['name']} ({m['adapter']}, {_size(m['size'])}, sha256 {m['sha']}).")
+    elif a.action == "rm":
+        for ref in a.args:
+            c.delete_model(ref.split(":", 1)[-1])
+            print(f"Deleted {ref}.")
+    return 0
+
+
+def _load_job(path: str) -> dict:
+    from .engine.spec import loads
+
+    text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
+    return loads(text)
+
+
+def _print_engine_result(job: dict) -> None:
+    r = job.get("result") or {}
+    if job.get("workload") == "ml.evaluate" and "classes" in r:
+        acc = "n/a" if r["accuracy"] is None else f"{r['accuracy']:.4f}"
+        print(f"accuracy {acc} ({r['correct']:,} of {r['samples']:,} correct)  macro F1 {r['macro']['f1']:.4f}  weighted F1 {r['weighted']['f1']:.4f}")
+        width = max((len(c["label"]) for c in r["classes"][:50]), default=5)
+        for c in r["classes"][:50]:
+            print(f"  {c['label']:<{width}}  precision {c['precision']:.3f}  recall {c['recall']:.3f}  f1 {c['f1']:.3f}  support {c['support']:,}")
+        if len(r["classes"]) > 50:
+            print(f"  … {len(r['classes']) - 50} more labels: harness job result {job['id']}")
+        if r.get("unlabeled"):
+            print(f"  {r['unlabeled']:,} records had no label and were left out")
+        model = (r.get("provenance") or {}).get("model") or {}
+        if model:
+            print(f"  model {model.get('name')} sha256 {model.get('sha256')}", file=sys.stderr)
+        if job.get("outputs"):
+            print(f"  {job['outputs']['records']:,} predictions written. Save them with: harness job result {job['id']} -o predictions.jsonl")
+    elif job.get("outputs"):
+        print(f"{job['outputs']['records']:,} records written ({_size(job['outputs']['bytes'])}). "
+              f"Save them with: harness job result {job['id']} -o FILE.jsonl")
+    elif "values" in r:
+        for k, v in r["values"].items():
+            print(f"{k}: {v}")
+    else:
+        print(json.dumps(r, indent=2))
+    per = ", ".join(f"{d['name']} {d['n']}" for d in job.get("perDevice", []))
+    took = (job["finishedAt"] or 0) - (job["startedAt"] or 0)
+    v = (job.get("validation") or {}).get("level", "")
+    print(f"  {job['total']} partitions{f' ({per})' if per else ''}, {took:.1f} s{f', {v}' if v else ''}", file=sys.stderr)
+
+
+def cmd_test(a) -> int:
+    """harness test: a project's pytest suite, in shards across your computers (yourharness/testrun.py)."""
+    from .client import PoolError
+    from .engine.testing import junit_xml
+    from .jobs import SetupNeeded
+    from .testrun import TestSetupError, run, summary
+
+    args = list(a.pytest_args or [])
+    limits = {k: v for k, v in (("memoryMB", a.memory_mb), ("cpus", a.cpus)) if v}
+    try:
+        job = run(a.project, args, shards=a.shards, reruns=a.reruns, python=a.python, requirements=a.requirement, container=a.container,
+                  limits=limits or None, mode="local" if a.local else "distributed", approve_setup=a.approve_setup, downloads=a.downloads,
+                  spot_check=a.spot_check)
+    except SetupNeeded as e:
+        print(e, file=sys.stderr)
+        return 2
+    except (TestSetupError, PoolError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(summary(job))
+    if a.junit and job["status"] == "done":
+        Path(a.junit).write_text(junit_xml(job["result"], name=Path(a.project).resolve().name), encoding="utf-8")
+        print(f"JUnit report: {a.junit}", file=sys.stderr)
+    return 0 if job["status"] == "done" and job["result"].get("ok") else 1
+
+
+def cmd_job(a) -> int:
+    from .client import setup_text
+
+    c = _client()
+    if a.action in (None, "ls"):
+        for j in c.engine_jobs():
+            done = j["counts"].get("done", 0)
+            print(f"{j['id']}  {j['status']:<9}  {done}/{j['total']}  {j['workload']:<16}  {j['name']}  (by {j['createdBy']})")
+        return 0
+    if a.action in ("run", "plan"):
+        if not a.args:
+            print(f"Give the job file: harness job {a.action} JOB.json (or - for stdin)", file=sys.stderr)
+            return 1
+        job = _load_job(a.args[0])
+        if a.action == "plan":
+            p = c.plan_job(job)
+            print(p["decision"])
+            for line in p.get("reasons", []):
+                print(f"  {line}")
+            for d in p.get("devices", []):
+                print(f"  {'yes' if d['eligible'] else 'no ':<3}  {d['name']}" + ("" if d["eligible"] else f": {d['why']}"))
+            return 0
+        started = c.start_job(job)
+        if started["status"] == "needs_approval":
+            if not a.approve_setup:
+                print(setup_text(started) + f"\nOr start it with: harness job run {a.args[0]} --approve-setup", file=sys.stderr)
+                return 2
+            started = c.approve_setup(started["id"], downloads=a.downloads)
+        if a.no_wait:
+            print(started["id"])
+            return 0
+        done = c.wait_engine_job(started["id"])
+        if done["status"] == "needs_approval":
+            print(setup_text(done), file=sys.stderr)
+            return 2
+        if done["status"] != "done":
+            print(f"{done['id']} {done['status']}: {done.get('error') or ''}", file=sys.stderr)
+            return 1
+        _print_engine_result(done)
+        return 0
+    if not a.args:
+        print(f"Give the job id: harness job {a.action} JOB_ID", file=sys.stderr)
+        return 1
+    job_id = a.args[0]
+    if a.action == "show":
+        j = c.engine_job(job_id)
+        print(json.dumps({k: j[k] for k in ("id", "name", "status", "decision", "counts", "perDevice", "result", "validation", "error")}, indent=2))
+    elif a.action == "wait":
+        j = c.wait_engine_job(job_id)
+        if j["status"] == "needs_approval":
+            print(setup_text(j), file=sys.stderr)
+            return 2
+        _print_engine_result(j) if j["status"] == "done" else print(j["status"], j.get("error") or "")
+    elif a.action == "approve":
+        j = c.engine_job(job_id)
+        if j["status"] != "needs_approval":
+            print(f"Job {job_id} isn't waiting for a setup approval (it is {j['status']}).", file=sys.stderr)
+            return 1
+        print(setup_text(j).rsplit("\nApprove it with", 1)[0], file=sys.stderr)
+        ids = None
+        if a.device:
+            by_name = {s["name"].lower(): s["id"] for s in j.get("setupPlan") or []}
+            ids = [by_name.get(x.lower(), x) for x in a.device]
+        j = c.approve_setup(job_id, ids, downloads=a.downloads)
+        print(f"Approved. {j.get('note') or ''}".strip())
+    elif a.action == "result":
+        got = c.engine_result(job_id, a.output)
+        if a.output:
+            print(f"Saved {got}")
+        else:
+            print(json.dumps(got, indent=2) if not isinstance(got, bytes) else got.decode("utf-8"), end="" if isinstance(got, bytes) else "\n")
+    elif a.action == "cancel":
+        print(c.cancel_engine_job(job_id)["status"])
+    elif a.action == "retry":
+        print(c.retry_engine_job(job_id)["status"])
+    return 0
+
+
 # ---------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="harness", description="Pool the devices you own into one workspace.")
@@ -268,6 +547,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--data-dir", help="where sign-ins are stored (default ~/.yourharness/coordinator)")
     s.add_argument("--shared-dir", help="the shared folder (default ~/.yourharness/shared)")
     s.add_argument("--public-url", help="the address devices use, if not this machine's LAN address, e.g. https://box.tailnet.ts.net")
+    s.add_argument("--tls-cert", metavar="PEM", help="serve HTTPS with this certificate (e.g. from `tailscale cert`, Let's Encrypt or mkcert); "
+                                                    "devices must trust it, see docs/security.md")
+    s.add_argument("--tls-key", metavar="PEM", help="the certificate's private key, unless the certificate file holds it")
     s.add_argument("--new-join-link", action="store_true", help="replace the join link; devices already in stay signed in")
     s.add_argument("--new-lend-link", action="store_true", help="replace the lend link, so computers lent with the old one can't rejoin")
     s.add_argument("--no-qr", action="store_true")
@@ -283,8 +565,41 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--workspace", action="store_true", help="host the shared Linux workspace terminal")
     s.add_argument("--no-workspace", action="store_true", help="stop hosting the workspace")
     s.add_argument("--no-share", action="store_true", help="connect without taking any pieces")
+    s.add_argument("--tasks", action="store_true",
+                   help="allow agent tasks (AI agents or commands working on a Git repository) on this computer; "
+                        "needed on a friend's computer, which doesn't allow them otherwise")
+    s.add_argument("--no-tasks", action="store_true", help="don't run agent tasks on this computer")
+    s.add_argument("--allow-commands", action="store_true",
+                   help="on a friend's computer, also allow tasks that run the pool owner's commands (the Command agent, "
+                        "setup and check commands, AI agents allowed to run commands); implies --tasks")
+    s.add_argument("--task-slots", type=int, help="agent tasks to run at the same time (default 1)")
+    s.add_argument("--ca", metavar="PEM", help="for an HTTPS pool whose certificate comes from a private authority (such as mkcert): "
+                                              "that authority's certificate, kept for later starts")
+    s.add_argument("--activity", action="store_true", help="show what this computer did for pools (its own record) and exit")
+    s.add_argument("--cleanup", action="store_true",
+                   help="delete what pools left on this computer (partition files, caches, models, environments, pulled images, "
+                        "task folders) and its sign-in, then exit; stop the agent first")
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_agent)
+
+    s = sub.add_parser("test", help="run a project's pytest suite in shards across your computers",
+                       description="Collects the tests here, sends the project (the files git tracks) to your computers in shards of about "
+                                   "equal running time, and reports every test's outcome. Options after -- go to pytest.")
+    s.add_argument("project", nargs="?", default=".", help="the project folder (default: this one)")
+    s.add_argument("--shards", type=int, help="how many shards (default: about 20 s of tests each, from the last run's timings)")
+    s.add_argument("--reruns", type=int, default=1, help="run failing tests again this many times; one that then passes is reported "
+                                                         "as flaky, not passed (default 1)")
+    s.add_argument("--junit", metavar="FILE", help="also write a JUnit XML report")
+    s.add_argument("--local", action="store_true", help="run every shard on one computer")
+    s.add_argument("--python", help="run in a managed environment with this Python version (needs --requirement pytest ...)")
+    s.add_argument("-r", "--requirement", action="append", help="a package for the managed environment, e.g. pytest==8.3.3 (repeat it)")
+    s.add_argument("--container", metavar="IMAGE@sha256:...", help="run in this container image (with pytest in it), with no network")
+    s.add_argument("--memory-mb", type=int, help="the container's memory limit (default 2048)")
+    s.add_argument("--cpus", type=float, help="the container's CPU limit (default 1)")
+    s.add_argument("--spot-check", type=int, default=0, metavar="N", help="also run N shards again on another computer and compare outcomes")
+    s.add_argument("--approve-setup", action="store_true", help="approve preparing the environment or checking the image")
+    s.add_argument("--downloads", action="store_true", help="with --approve-setup: allow downloading what it needs")
+    s.set_defaults(fn=cmd_test, pytest_args=[])  # pytest's own options come after --, e.g. harness test -- -k login
 
     s = sub.add_parser("discover", help="find coordinators on this network")
     s.add_argument("--wait", type=float, default=1.5)
@@ -321,11 +636,45 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", nargs="?", choices=["ls", "put", "get", "rm"])
     s.add_argument("args", nargs="*")
     s.set_defaults(fn=cmd_pool)
+
+    s = sub.add_parser("dataset", help="datasets for batch jobs: ls, add FILE..., import shared|pool PATH, rm REF...")
+    s.add_argument("action", nargs="?", choices=["ls", "add", "import", "rm"])
+    s.add_argument("args", nargs="*")
+    s.add_argument("--name", help="what to call the dataset (default: the file name)")
+    s.add_argument("--format", choices=["jsonl", "csv", "text"], help="default: from the file name")
+    s.add_argument("--shareable", action="store_true", help="friends' computers may process it, for jobs that allow them")
+    s.set_defaults(fn=cmd_dataset)
+
+    s = sub.add_parser("model", help="models for ml.evaluate jobs: ls, add FILE..., rm REF...")
+    s.add_argument("action", nargs="?", choices=["ls", "add", "rm"])
+    s.add_argument("args", nargs="*")
+    s.add_argument("--name", help="what to call the model (default: the file name)")
+    s.add_argument("--adapter", choices=["python", "torchscript"], help="default: python for .py/.zip, torchscript for .pt")
+    s.set_defaults(fn=cmd_model)
+
+    s = sub.add_parser("job", help="batch jobs: run JOB.json, plan JOB.json, ls, show ID, wait ID, result ID [-o FILE], "
+                                   "approve ID, cancel ID, retry ID")
+    s.add_argument("action", nargs="?", choices=["run", "plan", "ls", "show", "wait", "result", "approve", "cancel", "retry"])
+    s.add_argument("args", nargs="*")
+    s.add_argument("--no-wait", action="store_true", help="print the job id and return at once")
+    s.add_argument("-o", "--output", help="save the result to this file")
+    s.add_argument("--approve-setup", action="store_true",
+                   help="run: if the job needs its Python environment prepared, approve that (it installs software on your computers)")
+    s.add_argument("--downloads", action="store_true", help="run/approve: the computers may download uv, the Python and the packages")
+    s.add_argument("--device", action="append", metavar="NAME_OR_ID", help="approve: only on this computer (repeat for more)")
+    s.set_defaults(fn=cmd_job)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    passed: list[str] = []
+    if argv[:1] == ["test"] and "--" in argv:  # harness test [options] -- [pytest options]
+        i = argv.index("--")
+        argv, passed = argv[:i], argv[i + 1:]
     args = build_parser().parse_args(argv)
+    if args.cmd == "test":
+        args.pytest_args = passed
     if args.cmd not in ("serve", "agent", "discover"):
         from .client import PoolError
 

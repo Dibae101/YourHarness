@@ -167,7 +167,11 @@ class Runner:
 
     # ------------------------------------------------------------------ syncing
     def _http(self) -> aiohttp.ClientSession:
-        return aiohttp.ClientSession(headers={"Authorization": f"Bearer {self.token}"}, timeout=aiohttp.ClientTimeout(total=None, sock_connect=15))
+        from ..tls import client_context
+
+        ctx = client_context()
+        return aiohttp.ClientSession(headers={"Authorization": f"Bearer {self.token}"}, timeout=aiohttp.ClientTimeout(total=None, sock_connect=15),
+                                     connector=aiohttp.TCPConnector(ssl=ctx if ctx is not None else True))
 
     async def sync_down(self, http: aiohttp.ClientSession) -> dict:
         self.root.mkdir(parents=True, exist_ok=True)

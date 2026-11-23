@@ -102,7 +102,18 @@ def test_jobs_split_across_an_agent_and_a_browser(coord):
     asyncio.run(main())
 
 
+def python_agent(coord) -> None:
+    """For a test that needs a computer running Python: start one unless an earlier test in this file already did.
+
+    Without this, the test passes only after test_jobs_split_across_an_agent_and_a_browser, and fails or
+    waits forever when run on its own or in a shard of its own (harness test)."""
+    if not any(d["kind"] == "agent" for d in coord.client("agent check").devices()):
+        coord.agent("Agent A", threads=2)
+
+
 def test_code_goes_only_to_devices_that_can_run_it(coord):
+    python_agent(coord)
+
     async def main():
         async with FakeBrowser(coord, "Browser C") as fb:
             job = await fb.run("custom", {"code": "function run(chunk, total) { return chunk; }", "chunks": 30, "combine": "sum", "lang": "js"})
@@ -119,6 +130,7 @@ def test_code_goes_only_to_devices_that_can_run_it(coord):
 def test_pool_map_from_python(coord):
     from yourharness import pool
 
+    python_agent(coord)
     pool._client = coord.client("workspace")
 
     def cube(n):

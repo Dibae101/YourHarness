@@ -24,6 +24,18 @@ from yourharness import kernels
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def pytest_runtest_logreport(report):
+    """On GitHub Actions, a failing test also becomes an annotation, readable from the run's page and API without its logs."""
+    if os.environ.get("GITHUB_ACTIONS") != "true" or not report.failed:
+        return
+    text = str(getattr(report, "longreprtext", "") or "")
+    lines = [ln for ln in text.splitlines() if ln.startswith("E ")] or text.splitlines()[-5:]
+    msg = "\n".join(lines[:12])[-1800:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+    title = report.nodeid.replace("%", "%25").replace(",", "%2C").replace(":", "%3A")[:200]
+    sys.__stdout__.write(f"\n::error title={title} ({report.when})::{msg}\n")  # at the start of a line, after pytest's progress dots
+    sys.__stdout__.flush()
+
+
 class Proc:
     """A subprocess whose output is drained in the background so it never blocks."""
 
@@ -91,16 +103,26 @@ class Coord:
 
         import urllib.request
 
+        from yourharness.tls import client_context
+
         req = urllib.request.Request(f"{self.base}/api/join", data=json.dumps({"token": self.token, "kind": "agent", "name": name}).encode(),
                                      headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req) as res:
+        with urllib.request.urlopen(req, context=client_context()) as res:  # an HTTPS pool's authority, when HARNESS_CA_FILE names one
             token = json.loads(res.read())["deviceToken"]
         return Client(self.base, token)
 
 
-def start_coordinator(tmp: Path, stale_s: str = "2", extra_env: dict | None = None) -> Coord:
+def free_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def start_coordinator(tmp: Path, stale_s: str = "2", extra_env: dict | None = None, port: int = 0) -> Coord:
     env = {**os.environ, "HARNESS_STALE_S": stale_s, "NO_QR": "1", "HARNESS_REPAIR_S": "1", **(extra_env or {})}
-    args = [sys.executable, "-m", "yourharness", "serve", "--host", "127.0.0.1", "--port", "0",
+    args = [sys.executable, "-m", "yourharness", "serve", "--host", "127.0.0.1", "--port", str(port),
             "--data-dir", str(tmp / "data"), "--shared-dir", str(tmp / "shared"), "--no-qr", "--no-local-agent"]
     proc = Proc(args, env)
     port = int(proc.wait_for("Listening on port").rsplit(" ", 1)[1])
@@ -130,11 +152,11 @@ class FakeBrowser:
     """Signs in with a cookie and computes pieces like a browser tab would."""
 
     def __init__(self, coord: Coord, name: str, threads: int = 2, *, stall: bool = False, beat: bool = True, origin: str | None = None,
-                 token: str | None = None):
-        self.coord, self.name, self.threads = coord, name, threads
+                 token: str | None = None, platform: str = "Test"):
+        self.coord, self.name, self.threads, self.platform = coord, name, threads, platform
         self.stall, self.beat = stall, beat
         self.origin = origin or coord.base
-        self.join_token = token or coord.token
+        self.join_token = token  # None: the coordinator's owner link, read when joining
         self.msgs: list[dict] = []
         self.params: dict[str, dict] = {}
         self.computed = 0
@@ -142,10 +164,10 @@ class FakeBrowser:
 
     async def __aenter__(self):
         self.http = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
-        r = await self.http.post(f"{self.coord.base}/api/join", json={"token": self.join_token, "name": self.name})
+        r = await self.http.post(f"{self.coord.base}/api/join", json={"token": self.join_token or self.coord.token, "name": self.name})
         assert r.status == 200, await r.text()
         self.ws = await self.http.ws_connect(self.coord.base.replace("http", "ws") + "/ws", headers={"Origin": self.origin})
-        await self.ws.send_json({"type": "hello", "name": self.name, "threads": self.threads, "sharing": True, "runtimes": ["js"], "info": {"platform": "Test", "cores": self.threads}})
+        await self.ws.send_json({"type": "hello", "name": self.name, "threads": self.threads, "sharing": True, "runtimes": ["js"], "info": {"platform": self.platform, "cores": self.threads}})
         self.reader = asyncio.ensure_future(self._read())
         self.beater = asyncio.ensure_future(self._beat())
         return self

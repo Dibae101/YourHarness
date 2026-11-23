@@ -48,10 +48,11 @@ The Terminal app opens **YourHarness OS**: a shell that belongs to the pool, not
 
 ### The desktop
 
-The app (and the page in any browser) is a small desktop: a status bar on top, a dock at the bottom, and windows you can move, resize, minimize and maximize. On phones each app opens full screen.
+The app (and the page in any browser) is a small desktop: a status bar on top, a dock at the bottom, and windows you can move, resize, minimize and maximize. On phones each app opens full screen. It opens on Home.
 
 | App | What it does |
 | --- | --- |
+| **Home** | **Running now**: every batch job, test run, agent run and compute job in progress, with a progress bar, the devices working on it and a button to its app, then what finished in the last day. **Devices**: one row per computer, browser tab, phone and tablet with what it has and what it's doing. The pool's owner also gets a switch on each (off pauses it: no new work, and what it's running finishes) and how many of its threads the pool may use. Phones and tablets take small tasks only (one thread) until you give them more. |
 | **System Monitor** | One card per computer or phone with what it shares, live CPU and memory use, and a two-minute CPU graph. Below: **Programs running in YourHarness OS** with the computer each is on. **Test the pool** runs a short job and shows how many pieces each device computed. |
 | **Terminal** | **YourHarness OS** (default) plus a direct shell on each computer. |
 | **Files** | Opens on `/pool`. Make folders, upload, download, rename and delete; each file shows which computers hold it. Also browse the home folder of every computer running the app, send a file from one computer to another, and the shared folder. |
@@ -75,6 +76,31 @@ Releases are built by GitHub Actions: push a tag such as `v0.3.0` and the `.dmg`
 | **`harness` and `pool.map()`** | Run jobs on the pool from the workspace shell or from Python | Inside the workspace, or any agent computer |
 
 The first prototype (Node, `server.js` and `public/`) is still in the repo and still runs with `npm start`. It will be removed once the Python version replaces it.
+
+## Agent tasks (preview, on the `feat/agent-tasks` branch)
+
+The **Agents** app gives each computer a task and picks what does it: Claude Code, Codex CLI, Kiro CLI, or a plain command with no AI. You choose the model, the files it may change and the checks it must pass, and which GitHub repository and branch the results go to. Each task runs in its own Git worktree on its computer. The coordinator checks every result (file scope, protected files, links, sizes, anything that looks like a secret), combines the accepted ones on a new branch, pushes it and opens a draft pull request. It never pushes to `main` and never merges.
+
+Friends' computers join with a one-time friend code, can never control the pool, and run agent tasks only if their owner allows it (`--tasks`, or the checkbox in the app). The GitHub token stays on the coordinator's computer.
+
+Setup, a first run with no AI, and troubleshooting: [docs/agent-tasks.md](docs/agent-tasks.md). The design and test plan: [docs/agent-worker-plan.md](docs/agent-worker-plan.md).
+
+## Batch jobs (preview, on the `feat/job-engine` branch)
+
+The **Batch** app and `harness job` run one job over many devices and return one checked result: totals and group-bys, transforms and joins over datasets, your own Python function over items or records, a model evaluated on labeled data, and a pytest suite in shards (`harness test`). The engine cuts the input into partitions, gives each one to a device that may and can run it, retries what gets lost, combines the results exactly (the same totals however the input was split), and says how the result was checked.
+
+- Jobs survive a coordinator restart; a device that disappears loses its partitions to others.
+- Your code runs only on your own computers: natively, in a Python environment with pinned packages (prepared with uv after you approve it), or in a container with no network (Docker or Podman).
+- Friends' computers and browser tabs run only the engine's built-in operators, on datasets you marked shareable. Phones hand their partitions back when the screen locks.
+- Removing a device moves its work at once; a friend's computer then deletes what it kept, and both sides can see what it did.
+
+```bash
+harness dataset add sales.jsonl
+harness job run job.json            # see docs/job-spec.md
+harness test ./myproject            # a pytest suite in shards across your computers
+```
+
+How it works and how to try it: [docs/engine.md](docs/engine.md). Every job field: [docs/job-spec.md](docs/job-spec.md). Trust rules, containers, HTTPS and removing devices: [docs/security.md](docs/security.md). Setting up each device: [docs/devices.md](docs/devices.md). What the architecture blueprint asked for and what's built: [docs/blueprint-status.md](docs/blueprint-status.md).
 
 ## Quick start
 
@@ -106,7 +132,7 @@ The coordinator's own computer joins the pool and hosts a workspace by itself, s
 
 ### 2. Join phones, tablets and browsers
 
-Scan the QR code, or open the coordinator's address and type the code. The device signs in once and remembers it. Keep the page open with the screen on; a phone whose page is paused stops checking in, and its pieces move to other devices within about 20 seconds.
+Scan the QR code, or open the coordinator's address and type the code. The device signs in once and remembers it. Keep the page open with the screen on; a phone whose page is paused stops checking in, and its pieces move to other devices within about 20 seconds. A phone or tablet takes small tasks only: the pool uses one of its threads until you give it more on Home.
 
 ### 3. Add the Windows PC with its Ubuntu workspace
 
@@ -203,10 +229,11 @@ Wi-Fi is about 30,000 times slower than memory inside a device, so the pool neve
 - A device that joined with a lend link only computes run pieces. It never hosts terminals, runs pool shell commands, holds /pool files or serves the Files app, whatever its agent claims, and it isn't sent file names or command lines.
 - Requests and WebSocket connections from other websites are refused.
 - Shared files are always served as downloads, so an HTML file in the shared folder can't run as a page on the pool's address.
-- Remove a lost device from the Devices list. Its token stops working at once.
+- Remove a lost device from the Devices list. Its token stops working at once, its batch partitions and agent tasks go to other computers at once, and a friend's computer deletes what it kept for the pool. **Activity** next to each device shows what it worked on, also after it's removed.
+- Friends' computers (friend code or lend link) never run your code, in batch jobs or anywhere else: only the engine's built-in operators, on data you marked shareable.
 - **Anyone in the pool can open the workspace terminal and run code on every sharing device.** Share the join link only with people you'd hand your computers to.
 
-For HTTPS, which also lets phones keep the screen on and use WebGPU, put the coordinator behind something that terminates TLS, such as `tailscale serve --bg 8420`, and start it with `--public-url https://<name>.ts.net`. Behind a proxy, every device appears to come from the proxy's address unless you set `HARNESS_TRUST_PROXY=1`, which uses the last X-Forwarded-For entry (the one the proxy added).
+For HTTPS, which also lets phones keep the screen on and use WebGPU, put the coordinator behind something that terminates TLS, such as `tailscale serve --bg 8420`, and start it with `--public-url https://<name>.ts.net`, or give it a certificate with `--tls-cert` and `--tls-key`. Behind a proxy, every device appears to come from the proxy's address unless you set `HARNESS_TRUST_PROXY=1`, which uses the last X-Forwarded-For entry (the one the proxy added). The full picture, including what isn't protected: [docs/security.md](docs/security.md).
 
 ## Configuration
 
@@ -221,8 +248,13 @@ For HTTPS, which also lets phones keep the screen on and use WebGPU, put the coo
 | `HARNESS_TRUST_PROXY` | unset | Set to `1` behind a proxy so each device keeps its own address (X-Forwarded-For) |
 | `HARNESS_STALE_S` | `20` | Seconds without a check-in before a device's pieces move |
 | `CHUNK_TIMEOUT_S` | `300` | Seconds before a running piece is given to another device |
+| `--tls-cert`, `--tls-key` / `HARNESS_TLS_CERT`, `HARNESS_TLS_KEY` | unset | Serve HTTPS with this certificate (see docs/security.md) |
+| `HARNESS_ONLINE` | unset | `1` when the coordinator can be reached from the internet: links only, no 4-digit code |
+| `HARNESS_MAX_DATASET_GB`, `HARNESS_MAX_MODEL_GB` | `64`, `8` | Largest dataset and model or project archive |
+| `HARNESS_NETWORK_BPS` | `25e6` | What the planner assumes the coordinator can send per second |
+| `HARNESS_SPECULATE_AFTER_S`, `HARNESS_LOCALITY_WAIT_S` | `10`, `3` | When a straggler may also run elsewhere; how long a partition waits for the computer holding its input |
 
-Agent: `harness agent [--join LINK] [--name NAME] [--threads N] [--workspace | --no-workspace] [--no-share]`. Settings are remembered in `~/.yourharness/agent.json`.
+Agent: `harness agent [--join LINK] [--name NAME] [--threads N] [--workspace | --no-workspace] [--no-share] [--tasks] [--allow-commands] [--ca PEM]`, plus `--activity` (what this computer did for pools) and `--cleanup` (delete what pools left here). Settings are remembered in `~/.yourharness/agent.json`. On the agent's computer: `HARNESS_ENV_CACHE_GB` (10) for Python environments, `HARNESS_MODEL_CACHE_GB` (5) and `HARNESS_ARTIFACT_CACHE_GB` (2) for downloaded models and files, `HARNESS_OCI_ENGINE` to pick Docker or Podman (`HARNESS_OCI=0` turns containers off), `HARNESS_CA_FILE` for a private certificate authority.
 
 ## Development
 
@@ -231,17 +263,25 @@ Agent: `harness agent [--join LINK] [--name NAME] [--threads N] [--workspace | -
 .venv/bin/python -m pytest
 ```
 
-The tests start a real coordinator and real agents as subprocesses and connect fake browsers. They cover sign-in and lockout, cross-site requests, removing devices, jobs split between an agent and a browser, routing code by language, `pool.map`, shared files and search, rejecting malformed results, frozen devices losing their pieces, the workspace terminal, and the installer bundle. They pass on Python 3.12 and 3.14.
+The tests start a real coordinator and real agents as subprocesses and connect fake browsers. They cover sign-in and lockout, cross-site requests, removing devices, jobs split between an agent and a browser, routing code by language, `pool.map`, shared files and search, rejecting malformed results, frozen devices losing their pieces, the workspace terminal, and the installer bundle. The engine's tests compare every distributed result with a reference run on the same bytes, freeze computers and restart the coordinator mid-job, run the browser operators in Node against the Python ones, run containers through a stand-in engine (and real Docker where it runs, as on the Linux CI runners), and serve the pool over HTTPS. The page has smoke tests too: `npm install --no-save jsdom@26`, then `node tests/web/agents_smoke.mjs`, `batch_smoke.mjs` and `engine_smoke.mjs`. They pass on Python 3.10, 3.12 and 3.14.
 
 ```
 yourharness/
   cli.py              the harness command
   pool.py, client.py  pool.map() and the API client (standard library only)
+  jobs.py, testrun.py batch jobs from Python, and harness test
+  tls.py              HTTPS for the coordinator and trust for its clients
   kernels.py          Python compute for every job type
   sysinfo.py          memory, disk and GPU detection
-  coordinator/        app.py (HTTP, WebSocket), scheduler.py, jobkinds.py, terminals.py, files.py, auth.py, state.py, install.py
-  agent/              agent.py, slots.py (worker processes), slot.py, terminal.py (PTY)
-  web/                the page: index.html, app.js, jobs.js, worker.js, style.css, vendor/xterm
-tests/                end-to-end tests
+  coordinator/        app.py (HTTP, WebSocket), scheduler.py, jobkinds.py, terminals.py, files.py, auth.py, state.py, install.py,
+                      tasks/ (agent tasks: manager, final checks, GitHub)
+  engine/             the job engine: spec.py, planner.py, manager.py, isolation.py, worker.py, the operators, reducers, stages,
+                      ML evaluation, test sharding, the SQLite database and artifact store
+  agent/              agent.py, enginehost.py (partitions), taskhost.py (agent tasks), activity.py, slots.py, terminal.py (PTY)
+  runtime/            envs.py (managed Python with uv), oci.py (containers), inventory.py (GPUs)
+  web/                the page: index.html, app.js, agents.js, batch.js, engine.js and engine-ops.js (partitions in a tab), style.css
+tests/                end-to-end tests; tests/web/ the page's smoke tests (node + jsdom)
+bench/                timing the same jobs on one computer and across the pool
+scripts/              ai_smoke_matrix.py: real AI agent CLIs, only with --yes
 server.js, public/    the Node prototype (npm start, npm test)
 ```

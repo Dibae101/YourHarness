@@ -27,12 +27,17 @@ from .execs import Execs
 from .pool_store import PoolStore
 from .poolshell import PoolShell
 from .remote_fs import RemoteFS
+from .resources import Resources
+from .tasks import TaskManager
+from .tasks.rules import ADAPTERS
 from .terminals import Terminals
 
 log = logging.getLogger("yourharness")
 
 WIRE_COLORS = ["#E0A100", "#2563C9", "#D1433B", "#23935A", "#8B5CC4", "#E0742A", "#1795A8", "#C2417D"]
 OUTBOX_LIMIT = 5000
+MOBILE_PLATFORMS = ("iPhone", "iPad", "Android")  # as the page names them (web/app.js detectPlatform)
+MOBILE_THREADS = 1  # a phone or tablet takes small tasks only, unless its owner gives it more on the Home screen
 
 
 def now_ms() -> int:
@@ -69,6 +74,100 @@ def sanitize_info(info) -> dict:
     }
 
 
+def sanitize_tasks(t) -> dict | None:
+    """What a computer says about running agent tasks: whether it allows them, and with which agents.
+
+    A friend's computer is believed about this, unlike its other claims: allowing
+    tasks only puts that computer itself at risk, and it's the friend's choice.
+    """
+    if not isinstance(t, dict):
+        return None
+    agents = []
+    for a in (t.get("agents") or [])[:16]:
+        if isinstance(a, dict) and a.get("id") in ADAPTERS and a["id"] not in {x["id"] for x in agents}:
+            agents.append({"id": a["id"], "name": ADAPTERS[a["id"]], "version": clean_text(a.get("version"), 60, "")})
+    running = []
+    for r in (t.get("running") or [])[:64]:
+        if isinstance(r, dict) and isinstance(r.get("attempt"), int):
+            running.append({"task": clean_text(r.get("task"), 40, ""), "attempt": r["attempt"]})
+    enabled = t.get("enabled")
+    return {
+        "enabled": None if enabled is None else bool(enabled),
+        "slots": clamp_int(t.get("slots"), 1, 16, 1),
+        "agents": agents,
+        "git": clean_text(t.get("git"), 60, "") or None,
+        "problem": clean_text(t.get("problem"), 200, "") or None,
+        "commands": bool(t.get("commands")),  # a friend allowed commands too (--allow-commands)
+        "running": running,
+    }
+
+
+ENGINE_OPS = ("batch.aggregate", "batch.groupby", "batch.transform", "python.map", "ml.evaluate", "tests.pytest", "batch.join")
+ENGINE_RUNTIMES = ("builtin", "native-python", "managed-python", "isolated-oci")
+
+
+def sanitize_engine(e) -> dict | None:
+    """What a computer says it can do for batch jobs. A friend's claims about runtimes don't matter:
+    the planner gives code to your own computers only."""
+    if not isinstance(e, dict):
+        return None
+    running = []
+    for r in (e.get("running") or [])[:256]:
+        if isinstance(r, dict) and isinstance(r.get("attempt"), int):
+            running.append({"partition": clean_text(r.get("partition"), 80, ""), "attempt": r["attempt"]})
+    return {
+        "slots": clamp_int(e.get("slots"), 0, 256, 0),
+        "ops": [o for o in e.get("ops") or [] if o in ENGINE_OPS],
+        "formats": [f for f in e.get("formats") or [] if f in ("text", "jsonl", "csv")],
+        "runtimes": [r for r in e.get("runtimes") or [] if r in ENGINE_RUNTIMES],
+        "python": clean_text(e.get("python"), 20, ""),
+        "envs": [clean_text(x, 80, "") for x in (e.get("envs") or [])[:500] if isinstance(x, str)],
+        "building": [clean_text(x, 80, "") for x in (e.get("building") or [])[:50] if isinstance(x, str)],
+        "envErrors": {clean_text(k, 80, ""): clean_text(v, 600, "") for k, v in list((e.get("envErrors") or {}).items())[:50]
+                      if isinstance(k, str) and isinstance(v, str)} if isinstance(e.get("envErrors"), dict) else {},
+        "accelerators": [sanitize_accelerator(a) for a in (e.get("accelerators") or [])[:16] if isinstance(a, dict)],
+        # a browser tab runs only the first stage of a job, and leaves features it can't match exactly to computers
+        "stages": [s for s in (e.get("stages") or STAGE_KINDS) if s in STAGE_KINDS] if isinstance(e.get("stages") or [], list) else list(STAGE_KINDS),
+        "unsupported": [u for u in (e.get("unsupported") or []) if u in ENGINE_FEATURES] if isinstance(e.get("unsupported") or [], list) else [],
+        "profile": sanitize_profile(e.get("profile")),
+        "oci": sanitize_oci(e.get("oci")),  # Docker or Podman, for the isolated-oci runtime
+        "ociWhy": clean_text(e.get("ociWhy"), 300, ""),
+        "running": running,
+    }
+
+
+def sanitize_oci(o) -> dict | None:
+    if not isinstance(o, dict) or o.get("engine") not in ("docker", "podman"):
+        return None
+    return {"engine": o["engine"], "version": clean_text(o.get("version"), 40, ""), "rootless": bool(o.get("rootless"))}
+
+
+STAGE_KINDS = ("map", "shuffle-map", "shuffle-reduce", "join-map", "join-reduce")
+ENGINE_FEATURES = ("where.regex",)
+
+
+def sanitize_profile(p) -> dict | None:
+    """What a browser tab measured about itself (engine.js), as numbers and short text the page can show."""
+    if not isinstance(p, dict):
+        return None
+    bat = p.get("battery")
+    battery = "unknown"
+    if isinstance(bat, dict):
+        battery = {"charging": bool(bat.get("charging")), "level": _num_or_none(bat.get("level"), 0, 1)}
+    return {"ok": bool(p.get("ok")), "why": clean_text(p.get("why"), 200, ""), "blocked": clean_text(p.get("blocked"), 120, ""),
+            "cores": clamp_int(p.get("cores"), 0, 1024, 0) or None, "memoryGB": _num_or_none(p.get("memoryGB"), 0, 4096),
+            "recordsPerSecond": _num_or_none(p.get("recordsPerSecond"), 0, 1e12), "bytesPerSecond": _num_or_none(p.get("bytesPerSecond"), 0, 1e13),
+            "battery": battery, "workers": bool(p.get("workers"))}
+
+
+def sanitize_accelerator(a: dict) -> dict:
+    """A GPU a computer reports: what kind, its name, its memory and driver, as text the page can show."""
+    mem = a.get("memoryGB")
+    return {"kind": a.get("kind") if a.get("kind") in ("cuda", "metal", "rocm") else "other", "name": clean_text(a.get("name"), 80, "GPU"),
+            "memoryGB": _num_or_none(mem, 0, 4096) if isinstance(mem, (int, float)) and not isinstance(mem, bool) else None,
+            "driver": clean_text(a.get("driver"), 40, "")}
+
+
 def sanitize_workspace(ws) -> dict | None:
     if not isinstance(ws, dict):
         return None
@@ -86,8 +185,12 @@ class Device:
         self.color = color
         self.name = clean_text(hello.get("name"), 40, rec.get("name") or "Unnamed device")
         self.info = sanitize_info(hello.get("info"))
-        self.threads = clamp_int(hello.get("threads"), 1, 256, 1)
-        self.sharing = hello.get("sharing") is not False
+        # What the device offers, and what the pool owner allows it (the Home screen): threads and
+        # sharing below are the result, and everything that hands out work reads only those two.
+        self.want_threads = clamp_int(hello.get("threads"), 1, 256, 1)
+        self.want_sharing = hello.get("sharing") is not False
+        self.limits: dict = dict(rec.get("limits") or {})
+        self.apply_limits()
         offered = hello.get("runtimes") if isinstance(hello.get("runtimes"), list) else []
         allowed = {"python"} if self.kind == "agent" else {"js"}
         self.runtimes = frozenset(r for r in offered if r in allowed) or frozenset(allowed)
@@ -101,7 +204,10 @@ class Device:
         self.files = self.trusted and isinstance(hello.get("files"), dict)  # lets the Files app browse its home folder
         ex = hello.get("exec") if self.trusted else None  # can run the pool shell's commands
         self.exec = {"os": clean_text(ex.get("os"), 60, "Linux"), "linux": bool(ex.get("linux"))} if isinstance(ex, dict) else None
+        self.tasks_info = sanitize_tasks(hello.get("tasks")) if self.kind == "agent" else None  # agent tasks
+        self.engine_info = sanitize_engine(hello.get("engine"))  # batch-job partitions
         self.load: dict = {}  # live CPU and memory use, reported every few seconds
+        self.reserved_cpu = 0.0  # processor slots held by batch partitions and agent tasks (resources.py)
         self.inflight: set[tuple[str, int]] = set()
         self.params_sent: set[str] = set()
         self.done = 0
@@ -113,6 +219,25 @@ class Device:
         self._close: tuple[int, str] | None = None
         self.outbox: asyncio.Queue = asyncio.Queue()
         self.writer = asyncio.ensure_future(self._write())
+
+    @property
+    def mobile(self) -> bool:
+        """A phone or tablet: mostly for watching, and by default it takes small tasks only (one thread)."""
+        return self.kind == "browser" and self.info.get("platform") in MOBILE_PLATFORMS
+
+    def apply_limits(self) -> None:
+        lim = self.limits or {}
+        self.paused = bool(lim.get("paused"))  # the owner paused it: no new work of any kind
+        cap = lim.get("threads")
+        if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+            cap = MOBILE_THREADS if self.mobile else None
+        self.threads = min(self.want_threads, cap) if cap else self.want_threads
+        self.sharing = self.want_sharing and not self.paused
+
+    def limits_view(self) -> dict:
+        cap = (self.limits or {}).get("threads")
+        return {"paused": self.paused, "threads": self.threads, "wantThreads": self.want_threads, "wantSharing": self.want_sharing,
+                "cap": cap if isinstance(cap, int) and not isinstance(cap, bool) else None, "mobile": self.mobile}
 
     def send(self, msg: dict) -> None:
         self.send_raw(json.dumps(msg, separators=(",", ":")))
@@ -158,7 +283,7 @@ class Device:
 
     def can_take(self, job: "Job") -> bool:
         return (self.sharing and not self.stale and not self.closed and (self.owned or not job.owners_only)
-                and bool(self.runtimes & job.runtimes) and self.threads - len(self.inflight) > 0)
+                and bool(self.runtimes & job.runtimes) and self.threads - len(self.inflight) - self.reserved_cpu > 0)
 
 
 class Job:
@@ -227,6 +352,11 @@ class Scheduler:
         self.remote_fs = RemoteFS(self)
         self.execs = Execs(self)
         self.poolshell = PoolShell(self)
+        self.resources = Resources(self)
+        self.tasks = TaskManager(self, store.dir)
+        from ..engine.manager import EngineManager
+
+        self.engine = EngineManager(self, store.dir)
         self.public_url = ""  # the address other devices use; set once the port is known
         self.repair_s = float(os.environ.get("HARNESS_REPAIR_S", 10))
         self._devices_pending = False
@@ -256,13 +386,38 @@ class Scheduler:
     def list_files(self) -> list[dict]:
         return shared_files.list_files(self.shared_dir, self.file_meta)
 
-    @staticmethod
-    def device_view(d: Device) -> dict:
+    def device_view(self, d: Device) -> dict:
         return {
             "id": d.id, "name": d.name, "kind": d.kind, "color": d.color, "info": d.info, "threads": d.threads,
             "sharing": d.sharing, "runtimes": sorted(d.runtimes), "workspace": d.workspace, "busy": len(d.inflight),
             "done": d.done, "busyMs": round(d.busy_ms), "joinedAt": d.joined_at, "stale": d.stale, "host": d.host, "coordinator": d.coordinator, "files": d.files, "exec": d.exec, "load": d.load,
+            "owned": d.owned, "agentTasks": self.tasks.device_view(d), "engine": self.engine.device_view(d),
+            "reserved": self.resources.view(d.id), "limits": d.limits_view(),
         }
+
+    def set_limits(self, device_id: str, by: str, **changes) -> dict | None:
+        """The pool owner pauses or resumes a device, or caps the threads it uses (the Home screen).
+
+        changes: paused (bool) and/or threads (1-256, or None for no cap; a phone or tablet then
+        takes small tasks, one thread). Kept with the device's sign-in, so it holds after a restart.
+        Work already running finishes; only new work follows the new limits."""
+        rec = self.store.get(device_id)
+        if rec is None:
+            return None
+        limits = {**(rec.get("limits") or {}), **{k: v for k, v in changes.items() if k in ("paused", "threads")}}
+        self.store.update_device(device_id, limits=limits)
+        self.store.audit("sharing changed", device=device_id, name=rec.get("name"), by=by, paused=bool(limits.get("paused")),
+                         threads=limits.get("threads"))
+        d = self.devices.get(device_id)
+        if d is not None:
+            d.limits = limits
+            d.apply_limits()
+            d.send({"type": "limits", **d.limits_view(), "by": by})
+            self.broadcast_devices()
+            self.dispatch()
+            self.engine.dispatch()
+            self.tasks.dispatch()
+        return limits
 
     def device_list(self) -> list[dict]:
         return [self.device_view(d) for d in self.devices.values()]
@@ -292,13 +447,16 @@ class Scheduler:
             self.remote_fs.device_gone(previous)
             self.execs.device_gone(previous)
             self.poolshell.device_gone(previous)
+            self.tasks.device_gone(previous)
+            self.engine.device_gone(previous)
             previous.close(4002, "This device connected again from somewhere else.")
         d = Device(rec, ws, hello, self.pick_color(rec), host)
+        d.reserved_cpu = self.resources.cpu_reserved(d.id)  # work it was given before it reconnected
         self.store.update_device(d.id, name=d.name, color=d.color)
         self.devices[d.id] = d
         latest = self.running_job() or (self.jobs[-1] if self.jobs else None)
         hi = {
-            "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind, "caps": list(d.caps),
+            "type": "welcome", "id": d.id, "name": d.name, "color": d.color, "kind": d.kind, "caps": list(d.caps), "limits": d.limits_view(),
             "devices": self.device_list(), "jobs": [j.summary() for j in self.jobs], "snapshot": self.snapshot(latest),
             "files": [], "procs": [], "pool": self.pool_store.listing(names=False), "address": self.public_url,
         }
@@ -318,6 +476,10 @@ class Scheduler:
         log.info("%s joined (%s, %s threads)", d.name, d.kind, d.threads)
         self.broadcast_devices()
         self.dispatch()
+        if d.kind == "agent":
+            self.tasks.device_connected(d)
+        if d.engine_info is not None:
+            self.engine.device_connected(d)
         return d
 
     def disconnect(self, d: Device) -> None:
@@ -330,18 +492,30 @@ class Scheduler:
             self.remote_fs.device_gone(d)
             self.execs.device_gone(d)
             self.poolshell.device_gone(d)
+            self.tasks.device_gone(d)
+            self.engine.device_gone(d)
             log.info("%s left", d.name)
             self.pool_store.changed()
             self.broadcast_devices()
             self.dispatch()
 
-    def remove_device(self, device_id: str) -> bool:
-        removed = self.store.remove_device(device_id)
+    def remove_device(self, device_id: str, by: str | None = None) -> bool:
+        """Revoke a device: its sign-in stops working, it is disconnected, and its work goes to others at once.
+
+        A friend's computer then deletes what it kept for the pool (agent/activity.py)."""
+        rec = self.store.get(device_id)
+        removed = self.store.remove_device(device_id, by=by)
         d = self.devices.get(device_id)
+        name = d.name if d is not None else (rec or {}).get("name") or device_id
         if d is not None:
-            d.send({"type": "denied", "reason": "This device was removed from the pool. Open a new join link to add it again."})
+            d.send({"type": "denied", "removed": True, "reason": "This device was removed from the pool. Open a new join link to add it again."})
             d.close(4401, "Removed")
             self.disconnect(d)
+        if removed or d is not None:
+            self.engine.device_removed(device_id, name)
+            self.tasks.device_removed(device_id, name)
+            for r in self.resources.held(device_id):
+                self.resources.release(r.key)
         return removed or d is not None
 
     def requeue_device(self, d: Device) -> None:
@@ -371,11 +545,26 @@ class Scheduler:
                 d.name = clean_text(msg["name"], 40, d.name)
                 self.store.update_device(d.id, name=d.name)
             if "threads" in msg:
-                d.threads = clamp_int(msg["threads"], 1, 256, d.threads)
+                d.want_threads = clamp_int(msg["threads"], 1, 256, d.want_threads)
             if "sharing" in msg:
-                d.sharing = bool(msg["sharing"])
+                d.want_sharing = bool(msg["sharing"])
             if "info" in msg:
                 d.info = sanitize_info(msg["info"])
+            d.apply_limits()  # what the owner allows still applies to what the device now offers
+            if "tasks" in msg and d.kind == "agent":
+                running = (d.tasks_info or {}).get("running", [])
+                d.tasks_info = sanitize_tasks(msg["tasks"])
+                if d.tasks_info is not None:
+                    d.tasks_info["running"] = running  # only a fresh connection reports what it's working on
+                self.broadcast_devices()
+                self.tasks.dispatch()
+            if "engine" in msg:
+                running = (d.engine_info or {}).get("running", [])
+                d.engine_info = sanitize_engine(msg["engine"])
+                if d.engine_info is not None:
+                    d.engine_info["running"] = running
+                self.broadcast_devices()
+                self.engine.dispatch()
             if isinstance(msg.get("load"), dict):
                 d.load = {"cpu": _num_or_none(msg["load"].get("cpu"), 0, 100), "memUsedGB": _num_or_none(msg["load"].get("memUsedGB"), 0, 65536)}
                 self.broadcast_devices()
@@ -409,6 +598,15 @@ class Scheduler:
         elif kind in ("exec.out", "exec.done"):
             if d.kind == "agent":
                 self.execs.handle(d, msg)
+        elif isinstance(kind, str) and kind.startswith("task."):
+            if d.kind == "agent":
+                self.tasks.handle(d, msg)
+        elif isinstance(kind, str) and kind.startswith("eng."):
+            if d.engine_info is not None:
+                self.engine.handle(d, msg)
+        elif isinstance(kind, str) and kind.startswith("env."):
+            if d.kind == "agent" and d.engine_info is not None:
+                self.engine.runtimes.handle(d, msg)
         elif isinstance(kind, str) and kind.startswith("os."):
             if d.kind != "agent":
                 if not d.can(CAP_SHELL):
@@ -641,6 +839,8 @@ class Scheduler:
         if changed:
             self.broadcast_devices()
             self.dispatch()
+        self.tasks.sweep()
+        self.engine.sweep()
 
     async def run_maintenance(self, every_s: float = 1.0) -> None:
         last_repair = 0.0

@@ -18,6 +18,18 @@ from pathlib import Path
 FINISHED = ("done", "failed", "cancelled")
 
 
+def setup_text(job: dict) -> str:
+    """What a job that waits for a setup approval would prepare, and how to approve it."""
+    lines = [f"Job {job['id']} needs its Python environment prepared before it can start:"]
+    for s in job.get("setupPlan") or []:
+        lines.append(f"  {s['name']}:")
+        lines += [f"    {step}" for step in s["steps"]]
+    if job.get("setupPlan"):
+        lines.append(f"  {job['setupPlan'][0]['downloads']}")
+    lines.append(f"Approve it with: harness job approve {job['id']}  (add --downloads to let the computers download what's missing)")
+    return "\n".join(lines)
+
+
 class PoolError(Exception):
     pass
 
@@ -38,12 +50,27 @@ def saved_signin() -> tuple[str, str]:
     return url.rstrip("/"), token
 
 
+def saved_ca() -> str | None:
+    """A private authority's certificate for an HTTPS pool: HARNESS_CA_FILE, or the one `harness agent --ca` kept."""
+    ca = os.environ.get("HARNESS_CA_FILE")
+    cfg = home() / "agent.json"
+    if not ca and cfg.exists():
+        try:
+            ca = json.loads(cfg.read_text(encoding="utf-8")).get("ca")
+        except ValueError:
+            ca = None
+    return ca if ca and Path(ca).is_file() else None
+
+
 class Client:
     def __init__(self, server: str | None = None, token: str | None = None):
+        from .tls import client_context
+
         if server and token:
             self.server, self.token = server.rstrip("/"), token
         else:
             self.server, self.token = saved_signin()
+        self.ctx = client_context(saved_ca())
 
     def request(self, method: str, path: str, body=None, data: bytes | None = None, headers: dict | None = None, timeout: float = 90):
         hdrs = {"Authorization": f"Bearer {self.token}", **(headers or {})}
@@ -52,7 +79,7 @@ class Client:
             hdrs["Content-Type"] = "application/json"
         req = urllib.request.Request(self.server + path, data=data, headers=hdrs, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as res:
+            with urllib.request.urlopen(req, context=self.ctx, timeout=timeout) as res:
                 raw = res.read()
                 return json.loads(raw) if res.headers.get_content_type() == "application/json" else raw
         except urllib.error.HTTPError as e:
@@ -115,7 +142,7 @@ class Client:
         with open(path, "rb") as f:
             req = urllib.request.Request(f"{self.server}/api/files/{target}", data=f, headers=hdrs, method="PUT")
             try:
-                with urllib.request.urlopen(req, timeout=3600) as res:
+                with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res:
                     return json.loads(res.read())
             except urllib.error.HTTPError as e:
                 try:
@@ -130,7 +157,7 @@ class Client:
             dest = dest / name
         req = urllib.request.Request(f"{self.server}/api/files/{urllib.parse.quote(name, safe='')}", headers={"Authorization": f"Bearer {self.token}"})
         try:
-            with urllib.request.urlopen(req, timeout=3600) as res, open(dest, "wb") as out:
+            with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res, open(dest, "wb") as out:
                 while chunk := res.read(1024 * 1024):
                     out.write(chunk)
         except urllib.error.HTTPError as e:
@@ -151,7 +178,7 @@ class Client:
         with open(path, "rb") as f:
             req = urllib.request.Request(f"{self.server}/api/pool/{target}", data=f, headers=hdrs, method="PUT")
             try:
-                with urllib.request.urlopen(req, timeout=3600) as res:
+                with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res:
                     return json.loads(res.read())
             except urllib.error.HTTPError as e:
                 try:
@@ -166,7 +193,7 @@ class Client:
             dest = dest / name
         req = urllib.request.Request(f"{self.server}/api/pool/{urllib.parse.quote(name, safe='')}", headers={"Authorization": f"Bearer {self.token}"})
         try:
-            with urllib.request.urlopen(req, timeout=3600) as res, open(dest, "wb") as out:
+            with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res, open(dest, "wb") as out:
                 while chunk := res.read(1024 * 1024):
                     out.write(chunk)
         except urllib.error.HTTPError as e:
@@ -179,6 +206,121 @@ class Client:
 
     def pool_rm(self, name: str) -> None:
         self.request("DELETE", f"/api/pool/{urllib.parse.quote(name, safe='')}")
+
+    # --- the job engine: datasets and batch jobs
+    def datasets(self) -> list[dict]:
+        return self.request("GET", "/api/engine")["datasets"]
+
+    def add_dataset(self, path: str | Path, name: str | None = None, fmt: str | None = None, classification: str | None = None) -> dict:
+        path = Path(path)
+        q = {"name": name or path.name}
+        if fmt:
+            q["format"] = fmt
+        if classification:
+            q["classification"] = classification
+        return self._put_file("/api/engine/datasets", q, path)["dataset"]
+
+    def _put_file(self, route: str, query: dict, path: Path) -> dict:
+        hdrs = {"Authorization": f"Bearer {self.token}", "Content-Length": str(path.stat().st_size), "Content-Type": "application/octet-stream"}
+        with open(path, "rb") as f:
+            req = urllib.request.Request(f"{self.server}{route}?{urllib.parse.urlencode(query)}", data=f, headers=hdrs, method="PUT")
+            try:
+                with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res:
+                    return json.loads(res.read())
+            except urllib.error.HTTPError as e:
+                try:
+                    message = json.loads(e.read()).get("error")
+                except ValueError:
+                    message = None
+                raise PoolError(message or f"The coordinator answered {e.code}.") from None
+
+    def models(self) -> list[dict]:
+        return self.request("GET", "/api/engine")["models"]
+
+    def add_model(self, path: str | Path, name: str | None = None, adapter: str | None = None) -> dict:
+        """Upload a model for ml.evaluate: model.py, a .zip with model.py at its top, or a TorchScript .pt."""
+        path = Path(path)
+        q = {"name": name or path.name}
+        if adapter:
+            q["adapter"] = adapter
+        return self._put_file("/api/engine/models", q, path)["model"]
+
+    def delete_model(self, model_id: str) -> None:
+        self.request("DELETE", f"/api/engine/models/{urllib.parse.quote(model_id)}")
+
+    def import_dataset(self, source: str, path: str, **opts) -> dict:
+        return self.request("POST", "/api/engine/datasets/import", {"source": source, "path": path, **opts}, timeout=3600)["dataset"]
+
+    def delete_dataset(self, ds_id: str) -> None:
+        self.request("DELETE", f"/api/engine/datasets/{urllib.parse.quote(ds_id)}")
+
+    def plan_job(self, job: dict) -> dict:
+        return self.request("POST", "/api/engine/plan", {"job": job})["plan"]
+
+    def start_job(self, job: dict) -> dict:
+        return self.request("POST", "/api/engine/jobs", {"job": job})["job"]
+
+    def engine_jobs(self) -> list[dict]:
+        return self.request("GET", "/api/engine")["jobs"]
+
+    def engine_job(self, job_id: str) -> dict:
+        return self.request("GET", f"/api/engine/jobs/{urllib.parse.quote(job_id)}")["job"]
+
+    def cancel_engine_job(self, job_id: str) -> dict:
+        return self.request("POST", f"/api/engine/jobs/{urllib.parse.quote(job_id)}/cancel", {})["job"]
+
+    def retry_engine_job(self, job_id: str) -> dict:
+        return self.request("POST", f"/api/engine/jobs/{urllib.parse.quote(job_id)}/retry", {})["job"]
+
+    def approve_setup(self, job_id: str, devices: list[str] | None = None, downloads: bool = False) -> dict:
+        """Let the computers prepare the job's Python environment (all that need it, or the ones named by id)."""
+        body: dict = {"downloads": bool(downloads)}
+        if devices is not None:
+            body["devices"] = list(devices)
+        return self.request("POST", f"/api/engine/jobs/{urllib.parse.quote(job_id)}/approve-setup", body)["job"]
+
+    def wait_engine_job(self, job_id: str, quiet: bool = False, poll: float = 0.5) -> dict:
+        """Wait until the job finishes, or stops to wait for a setup approval (status "needs_approval")."""
+        import time
+
+        show = not quiet and sys.stderr.isatty()
+        try:
+            while True:
+                job = self.engine_job(job_id)
+                if job["status"] in FINISHED or job["status"] == "needs_approval":
+                    break
+                if show:
+                    c = job["counts"]
+                    sys.stderr.write(f"\r\033[K{c.get('done', 0)}/{job['total']} partitions · {job['status']}")
+                    sys.stderr.flush()
+                time.sleep(poll)
+        except KeyboardInterrupt:
+            self.cancel_engine_job(job_id)
+            raise PoolError("Cancelled.") from None
+        finally:
+            if show:
+                sys.stderr.write("\r\033[K")
+        return job
+
+    def engine_result(self, job_id: str, dest: str | Path | None = None):
+        """The job's result: parsed JSON, or the raw records (JSON Lines) saved to dest."""
+        req = urllib.request.Request(f"{self.server}/api/engine/jobs/{urllib.parse.quote(job_id)}/result",
+                                     headers={"Authorization": f"Bearer {self.token}"})
+        try:
+            with urllib.request.urlopen(req, context=self.ctx, timeout=3600) as res:
+                if dest is not None:
+                    with open(dest, "wb") as out:
+                        while chunk := res.read(1024 * 1024):
+                            out.write(chunk)
+                    return Path(dest)
+                raw = res.read()
+                return json.loads(raw) if res.headers.get_content_type() == "application/json" else raw
+        except urllib.error.HTTPError as e:
+            try:
+                message = json.loads(e.read()).get("error")
+            except ValueError:
+                message = None
+            raise PoolError(message or f"The coordinator answered {e.code}.") from None
 
 
 def progress_line(job: dict) -> str:

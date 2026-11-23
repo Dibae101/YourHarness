@@ -19,7 +19,13 @@ from pathlib import Path
 import aiohttp
 
 from .. import __version__, sysinfo
+from .activity import ActivityLog, cleanup
+from .enginehost import EngineHost
 from .slots import SlotPool
+from .taskhost import TaskHost
+
+# A friend invite code, as the coordinator makes them: ABCD-EFGH-JKLM-NPQR
+INVITE_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-?[A-HJ-NP-Z2-9]{4}){3}", re.I)
 
 log = logging.getLogger("yourharness")
 
@@ -48,7 +54,7 @@ def parse_join_link(link: str) -> tuple[str, str]:
 def join(link_or_code: str, name: str, server: str | None = None) -> dict:
     """Join with a 4-digit code plus the coordinator's address, or with a full join link."""
     text = link_or_code.strip()
-    if text.isdigit():
+    if text.isdigit() or INVITE_CODE.fullmatch(text):
         if not server:
             raise SignInError("A join code needs the coordinator's address too: harness agent --server http://192.168.1.20:8420 --join 1234")
         token = text
@@ -60,8 +66,10 @@ def join(link_or_code: str, name: str, server: str | None = None) -> dict:
         f"{server}/api/join", data=json.dumps({"token": token, "kind": "agent", "name": name}).encode(),
         headers={"Content-Type": "application/json"}, method="POST",
     )
+    from ..tls import client_context
+
     try:
-        with urllib.request.urlopen(req, timeout=15) as res:
+        with urllib.request.urlopen(req, timeout=15, context=client_context()) as res:
             body = json.loads(res.read())
     except urllib.error.HTTPError as e:
         try:
@@ -71,7 +79,8 @@ def join(link_or_code: str, name: str, server: str | None = None) -> dict:
         raise SignInError(message or f"The coordinator answered {e.code}.") from None
     except (urllib.error.URLError, OSError) as e:
         raise SignInError(f"Can't reach the coordinator at {server} ({e}). Check that it's running and that this computer is on the same network.") from None
-    return {"server": server, "token": body["deviceToken"], "deviceId": body["deviceId"], "name": body["name"]}
+    return {"server": server, "token": body["deviceToken"], "deviceId": body["deviceId"], "name": body["name"],
+            "caps": body.get("caps") if isinstance(body.get("caps"), list) else None}
 
 
 @dataclass
@@ -84,6 +93,11 @@ class AgentConfig:
     workspace: bool = False
     home: Path = field(default_factory=default_home)
     coordinator: bool = False
+    tasks: bool | None = None  # agent tasks; None means allowed on your own computers, not on a friend's
+    task_slots: int = 1
+    allow_commands: bool = False  # on a friend's computer, also allow tasks that run commands
+    owned: bool | None = None  # joined with the owner's link (True) or a friend code (False), as the join said
+    ca: str | None = None  # the coordinator's own certificate to trust (a pool served with --tls-self-signed)
 
 
 class Agent:
@@ -97,6 +111,17 @@ class Agent:
         self.files = None
         self.runner = None
         self.cpu = sysinfo.CpuMeter()
+        self.taskhost = TaskHost(cfg.server, cfg.home, self.send, cfg.tasks, cfg.task_slots, cfg.allow_commands)
+        from ..runtime.envs import EnvManager
+        from ..runtime.oci import OciManager
+
+        self.envs = EnvManager(cfg.home, self.send)
+        self.oci = OciManager(cfg.home, self.send)
+        self.enginehost = EngineHost(cfg.server, cfg.home, self.send, cfg.threads if cfg.sharing else 0, runtimes=self.envs, oci=self.oci,
+                                     ca=cfg.ca)
+        self.activity = ActivityLog(cfg.home, cfg.server)  # this computer's own record of what it did for the pool
+        self.enginehost.on_activity = self.activity.add
+        self.taskhost.on_activity = self.activity.add
         if cfg.workspace:  # a computer that hosts a terminal also lets the pool browse its home folder
             from .files import HomeFiles
 
@@ -138,6 +163,14 @@ class Agent:
     # ------------------------------------------------------------------ main loop
     async def run(self) -> int:
         await self.pool.resize(self.cfg.threads if self.cfg.sharing else 0)
+        if self.cfg.tasks is not False:
+            await self.taskhost.detect()
+        from ..runtime.inventory import accelerators
+
+        self.enginehost.accelerators = await asyncio.get_running_loop().run_in_executor(None, accelerators)
+        asyncio.ensure_future(self._detect_oci())  # Docker or Podman, in the background: it can take a few seconds to answer
+        if os.environ.get("YH_BUSY_LINES") == "1":
+            asyncio.ensure_future(self._report_busy())
         delay = 1.0
         try:
             while True:
@@ -146,6 +179,7 @@ class Agent:
                     if code == 4401:
                         print("The coordinator refused this agent's sign-in. It may have been removed from the pool.\n"
                               "Join again with a current link:  harness agent --join '<join link>'", file=sys.stderr)
+                        await self._left_pool()
                         return 1
                     if code == 4002:
                         print("This agent connected again from another process, so this one is stopping.", file=sys.stderr)
@@ -164,7 +198,36 @@ class Agent:
         finally:
             if self.terms:
                 self.terms.close_all()
+            self.taskhost.stop_all()
+            self.enginehost.stop_all()
             await self.pool.close()
+
+    async def _left_pool(self) -> None:
+        """No longer in the pool: stop everything; a friend's computer deletes what it kept for the pool."""
+        self.taskhost.stop_all()
+        self.enginehost.stop_all()
+        await self.pool.close()
+        self.activity.add({"kind": "pool", "what": "removed from the pool (its sign-in was refused)"})
+        owned = self.enginehost.owned if self.enginehost.owned is not None else self.cfg.owned
+        if owned is False:
+            await asyncio.sleep(0.5)  # let the stopped work end before its folders go
+            images = await self.oci.forget()
+            gone = cleanup(self.cfg.home)
+            what = ", ".join(gone + images) or "nothing was left"
+            self.activity.add({"kind": "pool", "what": f"deleted what this computer kept for the pool: {what}"})
+            print(f"Deleted what this computer kept for the pool ({what}). Its activity record stays: harness agent --activity",
+                  file=sys.stderr)
+        else:
+            print(f"This computer's files for the pool are still in {self.cfg.home}. To delete them: harness agent --cleanup", file=sys.stderr)
+
+    async def _detect_oci(self) -> None:
+        if os.environ.get("HARNESS_OCI") == "0":
+            self.oci.why = "turned off (HARNESS_OCI=0)"
+            return
+        await self.oci.detect()
+        if self.oci.available():
+            log.info("Containers: %s %s%s", self.oci.kind, self.oci.version, " (rootless)" if self.oci.rootless else "")
+            self.send({"type": "update", "engine": self.enginehost.describe()})
 
     def _hello(self) -> dict:
         return {
@@ -173,12 +236,18 @@ class Agent:
             "workspace": self.terms.describe() if self.terms else None, "coordinator": self.cfg.coordinator,
             "files": self.files.describe() if self.files else None,
             "exec": self.runner.describe() if self.runner else None,
+            "tasks": self.taskhost.describe(),
+            "engine": self.enginehost.describe(),
         }
 
     async def _connect_once(self) -> int | None:
         url = self.cfg.server.replace("https://", "wss://", 1).replace("http://", "ws://", 1) + "/ws"
+        from ..tls import client_context
+
+        ctx = client_context(self.cfg.ca)
         async with aiohttp.ClientSession() as http:
-            async with http.ws_connect(url, headers={"Authorization": f"Bearer {self.cfg.token}"}, heartbeat=10.0, max_msg_size=64 * 1024 * 1024) as ws:
+            async with http.ws_connect(url, headers={"Authorization": f"Bearer {self.cfg.token}"}, heartbeat=10.0, max_msg_size=64 * 1024 * 1024,
+                                       ssl=ctx if ctx is not None else True) as ws:
                 self.ws = ws
                 self.outbox = asyncio.Queue()
                 self.send(self._hello())
@@ -214,6 +283,20 @@ class Agent:
             await asyncio.sleep(BEAT_S)
             self.send({"type": "beat"})
 
+    def busy(self) -> bool:
+        """Whether this computer is working for the pool right now: partitions, agent tasks or pieces."""
+        return bool(self.enginehost.running or self.taskhost.attempts or self.pool.queue or any(s.task for s in self.pool.slots))
+
+    async def _report_busy(self) -> None:
+        """For the desktop app (YH_BUSY_LINES=1), which keeps the computer from sleeping while it works: a line when that changes."""
+        was = None
+        while True:
+            now = self.busy()
+            if now != was:
+                print(f"::yh-busy::{1 if now else 0}", flush=True)
+                was = now
+            await asyncio.sleep(2)
+
     async def _report_load(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
@@ -229,6 +312,20 @@ class Agent:
             await asyncio.sleep(INFO_S)
             info = await loop.run_in_executor(None, sysinfo.collect, str(self.cfg.home))
             self.send({"type": "update", "info": info})
+            if self.cfg.tasks is not False and await self.taskhost.refresh():  # an agent CLI installed since
+                self.send({"type": "update", "tasks": self.taskhost.describe()})
+
+    def _limits_note(self, lim, by: str | None = None) -> None:
+        """Say what the pool's owner allows this computer (the Home screen): once on joining, then on each change."""
+        if not isinstance(lim, dict):
+            return
+        where = f"on the Home screen by {by}" if by else "on the Home screen"
+        if lim.get("paused"):
+            print(f"Paused {where}: this computer takes no new work, and what it's running finishes.", flush=True)
+        elif isinstance(lim.get("threads"), int) and lim["threads"] < self.cfg.threads:
+            print(f"The pool uses {lim['threads']} of this computer's {self.cfg.threads} worker processes (set {where}).", flush=True)
+        elif by:
+            print(f"The pool may use all {self.cfg.threads} worker processes (set {where}).", flush=True)
 
     def _handle(self, m: dict) -> None:
         kind = m.get("type")
@@ -236,8 +333,30 @@ class Agent:
             role = " and hosting the workspace" if self.terms else ""
             sharing = f"sharing {self.cfg.threads} worker processes" if self.cfg.sharing else "not sharing compute"
             print(f"Joined the pool as {m.get('name')}, {sharing}{role}.", flush=True)
+            self._limits_note(m.get("limits"))
+            self.taskhost.owned = "submit" in (m.get("caps") or [])
+            th = self.taskhost
+            if (th.enabled if th.enabled is not None else th.owned) and th.tools.get("git"):
+                agents = ", ".join(a["id"] for a in th.tools.get("agents", []))
+                print(f"Agent tasks are allowed on this computer (with: {agents}).", flush=True)
+            self.taskhost.connected()
+            self.enginehost.owned = self.taskhost.owned
+            self.enginehost.connected()
+        elif isinstance(kind, str) and kind.startswith("task."):
+            self.taskhost.handle(m)
+        elif isinstance(kind, str) and kind.startswith("eng."):
+            self.enginehost.handle(m)
+        elif kind == "env.prepare":
+            if not self.enginehost.owned:  # installing software for the pool's code only happens on the owner's own computers
+                self.send({"type": "env.failed", "env": m.get("env"), "error": "This is a friend's computer: it doesn't prepare environments for the pool's code."})
+            elif m.get("kind") == "isolated-oci":
+                self.oci.prepare(m)
+            else:
+                self.envs.prepare(m)
         elif kind == "denied":
             print(m.get("reason") or "The coordinator refused this agent.", file=sys.stderr)
+        elif kind == "limits":  # the pool's owner paused this computer or changed its threads
+            self._limits_note(m, by=m.get("by") or "the pool's owner")
         elif kind == "chunk":
             if "params" in m:
                 self.params[m["jobId"]] = m["params"]
