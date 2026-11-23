@@ -158,6 +158,9 @@ class Coordinator:
         TaskAPI(self).register(r)
         from ..engine.api import EngineAPI
 
+        from ..review.api import Reviews
+
+        Reviews(self, app)
         EngineAPI(self).register(r)
         r.add_get("/install.sh", self.install_sh)
         r.add_get("/install.ps1", self.install_ps1)

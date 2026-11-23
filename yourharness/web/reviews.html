@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Review Studio · YourHarness</title>
+    <link rel="stylesheet" href="/reviews.css" />
+    <script src="/reviews.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div class="brand"><b aria-hidden="true">YH</b> YourHarness <span>/</span> Review Studio</div>
+      <a href="/" id="workspace">Pool workspace ↗</a>
+    </header>
+    <main>
+      <p id="notice" role="status" hidden></p>
+      <section id="library" hidden>
+        <div class="heading">
+          <div>
+            <h1>Review studio</h1>
+            <p>
+              Turn an animation or a sequence of images into a playable cut. Lend a device when it saves time.
+            </p>
+          </div>
+          <button id="new" class="primary">New review</button>
+        </div>
+        <h2>Your reviews</h2>
+        <div id="jobs" class="cards"></div>
+      </section>
+      <section id="compose" hidden>
+        <button class="back" data-back>← All reviews</button>
+        <h1>New review</h1>
+        <form id="create" class="panel form">
+          <label
+            >Source<select id="source">
+              <option value="images">Image sequence</option>
+              <option value="mesh">Blender motion review</option>
+              <option value="demo">Built-in turntable demo</option>
+            </select></label
+          >
+          <p id="source-help"></p>
+          <a id="exporter" href="/api/reviews/exporter" hidden>Download Blender exporter ↓</a>
+          <label id="files-field"
+            >Source files<input id="files" type="file" multiple accept="image/jpeg,image/png"
+          /></label>
+          <label
+            >Review name<input id="title" maxlength="100" required placeholder="e.g. Product launch cut"
+          /></label>
+          <div class="fields">
+            <label>Review deadline<input id="deadline" type="datetime-local" required /></label
+            ><label
+              >Longest edge<select id="quality">
+                <option value="360">360 px · Draft</option>
+                <option value="640" selected>640 px · Review</option>
+                <option value="960">960 px · Detailed</option>
+              </select></label
+            ><label id="rate-field"
+              >Frames per second<input id="fps" type="number" min="1" max="60" value="12"
+            /></label>
+          </div>
+          <button class="primary" type="submit">Import &amp; measure</button>
+        </form>
+      </section>
+      <section id="detail" hidden>
+        <button class="back" data-back>← All reviews</button>
+        <div class="heading">
+          <div>
+            <h1 id="job-name"></h1>
+            <p id="job-meta"></p>
+          </div>
+          <span class="pill" id="state"></span>
+        </div>
+        <ol id="steps" aria-label="Review phases">
+          <li>Measure</li>
+          <li>Plan</li>
+          <li>Render</li>
+          <li>Deliver</li>
+        </ol>
+        <div class="columns">
+          <div>
+            <div class="screen">
+              <video id="movie" controls playsinline hidden></video
+              ><img id="still" alt="Rendered review frame" hidden /><span id="screen-msg"
+                >Waiting for the first frame</span
+              >
+            </div>
+            <section class="panel">
+              <div class="line">
+                <h2>Frame progress</h2>
+                <strong id="count"></strong>
+              </div>
+              <progress id="progress" max="100" value="0"></progress>
+              <p id="timing"></p>
+              <div id="actions" class="actions"></div>
+              <p id="job-error" role="alert" hidden></p>
+            </section>
+            <section class="panel">
+              <h2>Contributions</h2>
+              <div id="contributors"></div>
+            </section>
+          </div>
+          <aside>
+            <section class="panel" id="plan-box">
+              <h2>Would help save time?</h2>
+              <p>
+                Compare one local worker with a second device. Use that device’s measured seconds per frame and
+                available connection speed.
+              </p>
+              <form id="plan-form">
+                <label id="profile-field" hidden
+                  >Prior helper measurements<select id="profiles"></select
+                ></label>
+                <div class="fields">
+                  <label
+                    >Helper sec/frame<input
+                      id="helper-speed"
+                      type="number"
+                      min=".001"
+                      max="86400"
+                      step="any"
+                      required /></label
+                  ><label
+                    >Link Mbps<input id="bandwidth" type="number" min=".001" max="100000" step="any" required
+                  /></label>
+                </div>
+                <button>Compare finish times</button>
+              </form>
+              <p id="projection" aria-live="polite"></p>
+            </section>
+            <section class="panel" id="invite-box">
+              <h2>Lend for this review</h2>
+              <p id="scope"></p>
+              <details>
+                <summary>Files included in this request</summary>
+                <ul id="assets"></ul>
+              </details>
+              <form id="invite-form">
+                <div class="fields">
+                  <label
+                    >Minutes<input
+                      id="invite-min"
+                      type="number"
+                      min="1"
+                      max="1440"
+                      value="15"
+                      required /></label
+                  ><label
+                    >Workers<select id="invite-slots">
+                      <option>1</option>
+                      <option>2</option>
+                      <option>3</option>
+                      <option>4</option>
+                    </select></label
+                  ><label>Frame limit<input id="invite-frames" type="number" min="1" required /></label>
+                </div>
+                <button>Create one-use link</button>
+              </form>
+              <div id="link-panel" hidden>
+                <label>Private invitation<input readonly id="loan-link" /></label
+                ><button id="copy-link">Copy link</button>
+              </div>
+              <button class="text-btn" id="revoke">End all invitations</button>
+              <div id="loans"></div>
+            </section>
+          </aside>
+        </div>
+      </section>
+      <section id="lender" hidden>
+        <small>ONE-JOB INVITATION</small>
+        <h1 id="loan-name">Review invitation</h1>
+        <p id="loan-info"></p>
+        <div class="panel form">
+          <div id="terms"></div>
+          <form id="accept">
+            <label
+              >Your display name<input id="lender-name" maxlength="60" value="Guest device" required
+            /></label>
+            <div class="fields">
+              <label>Workers<select id="slots"></select></label
+              ><label
+                >Render buffer budget<select id="memory">
+                  <option value="128">128 MiB</option>
+                  <option value="256">256 MiB</option>
+                  <option value="512">512 MiB</option>
+                </select></label
+              ><label>Minutes<input id="minutes" type="number" min="1" value="15" required /></label>
+            </div>
+            <p>
+              The buffer budget limits simultaneous frame processing. The browser also uses memory for its own
+              runtime. Keep this tab visible. You can stop lending at any time.
+            </p>
+            <button class="primary">Accept &amp; lend</button>
+          </form>
+          <div id="loan-active" hidden>
+            <p id="loan-progress" aria-live="polite"></p>
+            <button id="stop-loan">Stop lending</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

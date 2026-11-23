@@ -2,13 +2,13 @@
 # Build from the repository root:  pyinstaller desktop/backend.spec --noconfirm
 import sys
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 a = Analysis(
     ["launcher.py"],
     pathex=[".."],
     # the source and web files ship as data too: the coordinator serves the agent bundle and the page from them
-    datas=[("../yourharness", "yourharness")],
+    datas=[("../yourharness", "yourharness")] + collect_data_files("imageio_ffmpeg"),
     hiddenimports=collect_submodules("yourharness") + ["qrcode"] + (["winpty"] if sys.platform == "win32" else []),
     excludes=["tkinter", "pytest"],
 )

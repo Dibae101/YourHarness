@@ -38,7 +38,7 @@ if [ ! -x "$DIR/venv/bin/python" ]; then
   python3 -m venv "$DIR/venv" >/dev/null 2>&1 || { rm -rf "$DIR/venv"; fail "Python can't create a virtual environment. On Ubuntu or WSL run: sudo apt install -y python3-venv   then run this command again."; }
 fi
 say "Installing aiohttp and numpy"
-"$DIR/venv/bin/python" -m pip install --quiet --disable-pip-version-check --upgrade "aiohttp>=3.9" "numpy>=1.24"
+"$DIR/venv/bin/python" -m pip install --quiet --disable-pip-version-check --upgrade "aiohttp>=3.9" "numpy>=1.24" "pillow>=10" "imageio-ffmpeg>=0.5"
 
 say "Downloading the agent from $SERVER"
 rm -rf "$DIR/src.new" && mkdir -p "$DIR/src.new"

@@ -126,6 +126,10 @@ def run(chunk, total):
       const ok = can(gated[app]);
       document.querySelectorAll('[data-open="' + app + '"]').forEach(function (b) { b.hidden = !ok; });
     });
+    for (const id of ['review-tile', 'review-dock-item']) {
+      const link = document.getElementById(id);
+      if (link) link.hidden = !can('submit');
+    }
     const lending = !can('submit') && !can('shell') && !can('files');
     document.body.classList.toggle('lending', lending);
     const note = document.getElementById('lend-note');
@@ -1694,6 +1698,9 @@ def run(chunk, total):
   // -------------------------------------------------------------------------
   // Window manager: draggable, resizable windows on wide screens, full-screen apps on phones
   // -------------------------------------------------------------------------
+  for (const id of ['review-tile', 'review-dock-item']) {
+    document.getElementById(id)?.addEventListener('click', () => { location.href = '/reviews.html'; });
+  }
   const APP_SIZES = { home: [980, 760], monitor: [720, 640], terminal: [860, 600], files: [920, 600], jobs: [1000, 680], devices: [940, 680], agents: [1120, 760], batch: [1120, 780] };
   const WM = (() => {
     let z = 10;
@@ -1730,7 +1737,7 @@ def run(chunk, total):
       dockState();
     }
     function dockState() {
-      document.querySelectorAll('.dock-item').forEach((b) => {
+      document.querySelectorAll('.dock-item[data-open]').forEach((b) => {
         const a = b.dataset.open;
         b.classList.toggle('running', isOpen(a) || (state[a] && state[a].min));
         b.classList.toggle('front', isOpen(a) && state.front === a);

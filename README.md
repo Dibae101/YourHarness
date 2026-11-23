@@ -4,6 +4,14 @@ Pool the devices you already own into one workspace for AI work. Open a Linux te
 
 Plan and roadmap: https://dibae101.github.io/YourHarness/
 
+## Review Studio
+
+From a source checkout with Node and Python 3.10+ installed, run `npm start`. On first launch it prepares the project’s Python environment. Open the pool address it prints and sign in as an owner.
+
+Open **Review Studio** from the pool desktop to make a playable MP4 from an image sequence or a Blender motion preview. The built-in turntable takes no external files. Measure sample frames, compare a helper, invite a teammate for one job, and play the completed cut in your browser.
+
+[Setup, supported inputs and lending controls](docs/review-studio.md) | [Product concept and field trial](docs/job-lending-concept.md)
+
 ## Install the apps
 
 Download from the [Releases page](https://github.com/Dibae101/YourHarness/releases). Nothing else to install, no Python needed.
@@ -75,7 +83,7 @@ Releases are built by GitHub Actions: push a tag such as `v0.3.0` and the `.dmg`
 | **Workspace** | A Linux terminal you open from any device's browser. With tmux, every device attaches to the same session | The agent started with `--workspace` (here: the Windows PC) |
 | **`harness` and `pool.map()`** | Run jobs on the pool from the workspace shell or from Python | Inside the workspace, or any agent computer |
 
-The first prototype (Node, `server.js` and `public/`) is still in the repo and still runs with `npm start`. It will be removed once the Python version replaces it.
+The first prototype (Node, `server.js` and `public/`) is still in the repo and runs with `npm run prototype`. It will be removed once the Python version replaces it.
 
 ## Agent tasks (preview, on the `feat/agent-tasks` branch)
 
@@ -283,5 +291,5 @@ yourharness/
 tests/                end-to-end tests; tests/web/ the page's smoke tests (node + jsdom)
 bench/                timing the same jobs on one computer and across the pool
 scripts/              ai_smoke_matrix.py: real AI agent CLIs, only with --yes
-server.js, public/    the Node prototype (npm start, npm test)
+server.js, public/    the Node prototype (npm run prototype, npm test)
 ```
